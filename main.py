@@ -1,6 +1,9 @@
+import numpy as np
+np.int = np.int64
+np.float = np.float64
+
 import argparse
 import datetime
-import numpy as np
 import itertools
 import torch
 from torch.utils.tensorboard import SummaryWriter
