@@ -29,40 +29,7 @@ class LunarLanderEnv(gym.Env):
         self._max_episode_steps = 400
         self.step_counter = 0
 
-# adapted from code below:
 
-# def check_safety(state):
-#     # 0 x, 1 y, 2 x_v, 3 y_v, 4 A, 5 A_v, 6 leg_1, 7 leg_2
-#     y_pos = state[0][1]
-#     y_vel = state[0][3]
-#     angle = state[0][4]
-#     angular_vel = state[0][5]
-#     # random not specific really
-#     max_y_vel = 3.5
-#     max_angle = .20
-#     max_angular_vel = 0.5
-#     safe_y_vel = abs(y_vel) <= max_y_vel * (1 - np.exp(-abs(y_pos))) #safe y velocity
-#     safe_angle = abs(angle) <= max_angle #angle 
-#     safe_angular_vel = abs(angular_vel) <= max_angular_vel #angle velocity
-#     return safe_y_vel and safe_angle and safe_angular_vel
-
-#Ax=b
-        self.polys = [np.array([
-              [0, 1, 0, 0, 0, 0, 0, 0, -3.5],      # -y_vel <= -3.5 (y_vel >= -3.5)
-              [0, -1, 0, 0, 0, 0, 0, 0, -3.5],     # y_vel <= 3.5
-              [0, 0, 0, 0, 1, 0, 0, 0, -0.20],     # -angle <= -0.20 (angle >= -0.20)
-              [0, 0, 0, 0, -1, 0, 0, 0, -0.20],    # angle <= 0.20
-              [0, 0, 0, 0, 0, 1, 0, 0, -0.5],      # -angular_vel <= -0.5 (angular_vel >= -0.5)
-              [0, 0, 0, 0, 0, -1, 0, 0, -0.5]])    # angular_vel <= 0.5
-]
-        self.safe_polys = [np.array([
-              [0, 1, 0, 0, 0, 0, 0, 0, -3.6],      # -y_vel <= -3.6 (y_vel >= 3.6)
-              [0, -1, 0, 0, 0, 0, 0, 0, -3.6],     # y_vel <= 3.6
-              [0, 0, 0, 0, 1, 0, 0, 0, -0.26],     # -angle <= -0.25 (angle >= -0.25)
-              [0, 0, 0, 0, -1, 0, 0, 0, -0.26],    # angle <= 0.25
-              [0, 0, 0, 0, 0, 1, 0, 0, -0.6],      # -angular_vel <= -0.6 (angular_vel >= -0.6)
-              [0, 0, 0, 0, 0, -1, 0, 0, -0.6]])    # angular_vel <= 0.6
-]
     # def fix_legs(self, state: np.ndarray) -> np.ndarray:
     #     x, y, vx, vy, angle, angular_velocity, leg_1, leg_2 = state
     #     leg_1 = 0 if leg_1 != 0 else 0 
