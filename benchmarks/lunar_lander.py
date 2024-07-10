@@ -3,7 +3,7 @@ import numpy as np
 from typing import Tuple, Dict, Any
 
 class LunarLanderEnv(gym.Env):
-    def __init__(self, gravity=-10.0, enable_wind=False, wind_power=0.5, turbulence_power=0.5):
+    def __init__(self, gravity=-0.25, enable_wind=False, wind_power=0.5, turbulence_power=0.5):
         super().__init__()
 
         # Constants
@@ -13,15 +13,17 @@ class LunarLanderEnv(gym.Env):
         self.turbulence_power = turbulence_power
 
         # Action space: Continuous, Main engine and lateral boosters
-        self.action_space = gym.spaces.Box(low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]), dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=np.array([0, -1.0]), high=np.array([1.0, 1.0]), dtype=np.float32)
 
         # Observation space: x, y, vx, vy, angle, angular velocity
-        # Might need to be changed when implementing dimensionality reduction techniques
+
+        # Might need to change
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
 
         # Initial conditions space: x, y, vx, vy, angle, angular velocity, leg 1, leg 2
-        self.init_space = gym.spaces.Box(low=np.array([-0.5, -0.5, -0.1, -0.1, -0.1, -0.1,0,0]), 
-                                         high=np.array([0.5, 0.5, 0.1, 0.1, 0.1, 0.1,1,1]), dtype=np.float32)
+        # Getting errors when trying to force leg_1 and leg_2 to be 0, 
+        self.init_space = gym.spaces.Box(low=np.array([-0.5, 7.5, -0.1, -0.1, -0.1, -0.1,0,0]), 
+                                         high=np.array([0.5, 10, 0.1, 0.1, 0.1, 0.1,0.0000001,0.0000001]), dtype=np.float32)
 
         # Simulation parameters
         self._max_episode_steps = 400
@@ -54,41 +56,55 @@ class LunarLanderEnv(gym.Env):
               [0, 0, 0, 0, 0, -1, 0, 0, -0.5]])    # angular_vel <= 0.5
 ]
         self.safe_polys = [np.array([
-              [0, 1, 0, 0, 0, 0, 0, 0, -4.0],      # -y_vel <= -4.0 (y_vel >= -4.0)
-              [0, -1, 0, 0, 0, 0, 0, 0, -4.0],     # y_vel <= 4.0
-              [0, 0, 0, 0, 1, 0, 0, 0, -0.25],     # -angle <= -0.25 (angle >= -0.25)
-              [0, 0, 0, 0, -1, 0, 0, 0, -0.25],    # angle <= 0.25
+              [0, 1, 0, 0, 0, 0, 0, 0, -3.6],      # -y_vel <= -3.6 (y_vel >= 3.6)
+              [0, -1, 0, 0, 0, 0, 0, 0, -3.6],     # y_vel <= 3.6
+              [0, 0, 0, 0, 1, 0, 0, 0, -0.26],     # -angle <= -0.25 (angle >= -0.25)
+              [0, 0, 0, 0, -1, 0, 0, 0, -0.26],    # angle <= 0.25
               [0, 0, 0, 0, 0, 1, 0, 0, -0.6],      # -angular_vel <= -0.6 (angular_vel >= -0.6)
               [0, 0, 0, 0, 0, -1, 0, 0, -0.6]])    # angular_vel <= 0.6
 ]
-
-
-
+    # def fix_legs(self, state: np.ndarray) -> np.ndarray:
+    #     x, y, vx, vy, angle, angular_velocity, leg_1, leg_2 = state
+    #     leg_1 = 0 if leg_1 != 0 else 0 
+    #     leg_2 = 0 if leg_2 != 0 else 0
+    #     return np.array([x, y, vx, vy, angle, angular_velocity, leg_1, leg_2])
 
     def reset(self) -> np.ndarray:
+        
         self.state = self.init_space.sample()
-        self.step_counter = 0
 
+        # Ensure legs start as 0 (bugged)
+        # self.state[6] = 0  
+        # self.state[7] = 0  
+
+        self.step_counter = 0
+        # self.state = self.fix_legs(self.state)
+
+       
+        print(f"Initial state: {self.state}")  # debugging
+
+        # retrun f(s)
         return self.state
-    
+
+
     def has_landed(self):
-        # Simple check for landing, needs to be defined based on your simulation parameters
-        x, y, vx, vy, angle, angular_velocity, leg_1, leg_2 = self.state
-        return y <= 0 and leg_1 and leg_2
+        # Simple check for landing
+        _, y, vx, vy, angle, _, leg_1, leg_2 = self.state
+        return y <= 0.1 and leg_1 and leg_2 and abs(vx) < 0.05 and abs(vy) < 0.05 and abs(angle) < 0.1
 
     def has_crashed(self):
-        # Simple check for crashing, needs to be defined based on your simulation parameters
-        x, y, vx, vy, angle, angular_velocity, leg_1, leg_2  = self.state
-        return y <= 0 and (np.abs(vx) > 0.5 or np.abs(vy) > 0.5 or np.abs(angle) > 0.5)
-  
+        # Simple check for crashing
+        _, y, vx, vy, angle, _, _, _ = self.state
+        return y <= 0.1 and (abs(vx) > 0.5 or abs(vy) > 0.5 or abs(angle) > 0.5)
+    
+    
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict[Any, Any]]:
-        # Unpack the state
         x, y, vx, vy, angle, angular_velocity, leg_1, leg_2  = self.state
 
         # Compute the dynamics based on action inputs
         main_throttle, lateral_throttle = action
-        thrust = main_throttle * 0.5  
-        lateral_thrust = lateral_throttle * 0.1  # Lateral thrust
+        thrust = main_throttle * 2 
+        lateral_thrust = lateral_throttle * 0.4  
         vx += thrust * np.cos(angle) - lateral_thrust * np.sin(angle)
         vy += thrust * np.sin(angle) + lateral_thrust * np.cos(angle) + self.gravity
 
@@ -110,62 +126,52 @@ class LunarLanderEnv(gym.Env):
         reward = -distance - (np.abs(vx) + np.abs(vy)) - np.abs(angle) * 10
         # reward += 10 * sum(leg_1 + leg_2)  # 10 points for each leg contact
         reward -= 0.3 if main_throttle > 0 else 0
+        
         reward -= 0.03 if lateral_throttle != 0 else 0
-
+        
         # Check for landing or crashing
         reward += 100 if self.has_landed() else 0
         reward -= 100 if self.has_crashed() else 0
 
+
+        # Not original
+        reward -= 10 if abs(x) > 4 else 0
+        reward -= 10 if abs (vx) or abs(vy) > 3.5 else 0
+        reward += 10 if abs (vx) or abs (vy) < 1.5 else 0
+
+
+
         # Check termination condition
+        if self.has_crashed():
+            print("the ship has crashed")
+            print("y", y, "vx", vx, "vy ", vy, "angle", angle)
+
+        if self.has_landed():
+            print("the ship has landed")
+
         done = self.step_counter >= self._max_episode_steps or self.has_crashed() or self.has_landed()
         self.step_counter += 1
 
+        #return f(s)
+
+
         return self.state, reward, done, {}
 
-
-    # def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict[Any, Any]]:
-    #     # Unpack the state
-    #     x, y, vx, vy, angle, angular_velocity = self.state
-
-    #     # Compute the dynamics
-    #     main_throttle, lateral_throttle = action
-    #     thrust = main_throttle * 0.5  # Scale thrust between 0 and 0.5
-    #     lateral_thrust = lateral_throttle * 0.1  # Scale lateral thrust
-
-    #     # Update the state based on the physics
-    #     # Placeholder physics, adjust according to the true dynamics of your environment
-    #     vx += thrust * np.cos(angle) - lateral_thrust * np.sin(angle)
-    #     vy += thrust * np.sin(angle) + lateral_thrust * np.cos(angle) + self.gravity
-
-    #     # Wind effects (if enabled)
-    #     if self.enable_wind:
-    #         vx += self.wind_power * np.random.randn()
-    #         vy += self.turbulence_power * np.random.randn()
-
-    #     # Update the position
-    #     x += vx
-    #     y += vy
-
-    #     self.state = np.array([x, y, vx, vy, angle, angular_velocity])
-
-    #     # Compute reward and check termination condition
-    #     reward = -np.sqrt(x**2 + y**2)  # Example reward function: negative distance from origin
-    #     done = self.step_counter >= self._max_episode_steps
-    #     self.step_counter += 1
-
-    #     return self.state, reward, done, {}
+    
 
     def predict_done(self, state: np.ndarray) -> bool:
         # Unpack the state array
-        x, y, vx, vy, angle, angular_velocity, leg_1, leg_2  = state
+        x, y, vx, vy, angle, _, leg_1, leg_2  = state
 
-        # Define landing and crashing conditions
+        # Landing and crashing conditions
+
         # Landed safely: close to target area with low velocity and minimal tilt
         landed = y <= 0.1 and leg_1 and leg_2 and abs(vx) < 0.05 and abs(vy) < 0.05 and abs(angle) < 0.1
        
         # Crashed: close to ground but with high velocity or excessive tilt
         crashed = y <= 0.1 and (abs(vx) > 0.1 or abs(vy) > 0.1 or abs(angle) > 0.2)
-        # Optionally, check if out of bounds, assuming some max distance from origin
+
+        # Check if out of bounds, assuming some max distance from origin
         out_of_bounds = np.abs(x) > 5 or np.abs(y) > 5  # Example bounds
 
         # Return True if any of the terminal conditions are met
@@ -176,16 +182,22 @@ class LunarLanderEnv(gym.Env):
         self.action_space.seed(seed)
         self.observation_space.seed(seed)
         self.init_space.seed(seed)
-
+    
+    
+    # Needs to get changed
     def unsafe(self, state: np.ndarray) -> bool:
         # Unpack the state array
-        x, y, vx, vy, angle, angular_velocity, leg_1, leg_2 = state
-
-        # Define unsafe conditions
-        high_velocity = np.abs(vx) > 1.0 or np.abs(vy) > 1.0
-        extreme_angle = np.abs(angle) > 0.25  # More conservative than safe angle
+        _, y, vx, vy, angle, _, _, _ = state
+    
+        #  Unsafe conditions
+        high_velocity_x = np.abs(vx) > 4.5
+        high_velocity_y =  np.abs(vy) > 4.5
+    
+        extreme_angle = np.abs(angle) > 0.25
         low_altitude_unsafe = y < 0.1 and (np.abs(vx) > 0.2 or np.abs(angle) > 0.1)
-        leg_danger = not (leg_1 or leg_2) and y < 0.1  # Unsafe if no legs are in contact close to ground
-
+        # leg_danger = not (leg_1 or leg_2) and y < 0.1  # Unsafe if no legs are in contact close to ground
+        print("Too fast sideways: ", high_velocity_x, "\n", "Too fast down: ", high_velocity_x, "\n", "Too much angle: ", extreme_angle, "\n", "Too low and fast: ", low_altitude_unsafe, "\n")
+        print(state)
         # Combine conditions
-        return high_velocity or extreme_angle or low_altitude_unsafe or leg_danger
+        return high_velocity_x or high_velocity_y or extreme_angle or low_altitude_unsafe #or leg_danger
+

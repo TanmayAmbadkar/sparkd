@@ -623,6 +623,10 @@ def get_environment_model(     # noqa: C901
 
     model.eval()
 
+
+    #replace with some cubic spliens model 
+    #find cubic splines library
+
     # Get a symbolic reward model
     reward_symb = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0,
                         endspan=terms, minspan=terms)

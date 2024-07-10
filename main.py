@@ -286,7 +286,7 @@ for i_episode in itertools.count(1):
                     done = True
                 if env.unsafe(next_state):
                     print("UNSAFE")
-                    print(state, action, next_state)
+                    print(state, "\n",  action, "\n", next_state)
                     unsafe_episodes += 1
                     done = True
                 if done:

@@ -33,5 +33,8 @@ def get_env_from_name(name):
     if name == 'lunar_lander':
         from .lunar_lander import LunarLanderEnv
         return LunarLanderEnv()
+    if name == 'lunar_lander_R':
+        from .lunar_lander_RedDim import LunarLanderEnv2
+        return LunarLanderEnv2()
     else:
         raise RuntimeError("Unkonwn environment: " + name)
