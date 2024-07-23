@@ -147,11 +147,15 @@ for i_episode in itertools.count(1):
             if env.unsafe(next_state):
                 episode_reward -= 10000
 
+
+# Bottom commented out just for lunar lander
+
+
             # Don't add states to the training data if they hit the edge of
             # the state space, this seems to cause problems for the regression.
-            if not (np.any(next_state <= env.observation_space.low) or
-                    np.any(next_state >= env.observation_space.high)):
-                real_buffer.append((state, action, reward, next_state, mask,
+            # if not (np.any(next_state <= env.observation_space.low) or
+            #         np.any(next_state >= env.observation_space.high)):
+            real_buffer.append((state, action, reward, next_state, mask,
                                     cost))
 
             state = next_state

@@ -5,7 +5,7 @@ from typing import Optional, List, Callable
 import numpy as np
 import torch
 import scipy.stats
-import pdb; pdb.set_trace()
+# import pdb; pdb.set_trace()
 
 
 class ResidualEnvModel(torch.nn.Module):
@@ -543,7 +543,7 @@ def get_environment_model(     # noqa: C901
     #         raise ValueError(f"Inhomogeneous element detected at row {i}")
 
     # Debugging: Fit a debug Earth model first
-    
+
     try:
         debug_model = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0, endspan=5, minspan=5)
         debug_model.fit(X, Y)
