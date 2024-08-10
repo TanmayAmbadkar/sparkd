@@ -64,6 +64,8 @@ print(args)
 env = envs.get_env_from_name(args.env_name)
 env.seed(args.seed)
 
+
+
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
@@ -87,6 +89,8 @@ total_unsafe_episodes = 0
 total_episodes = 0
 
 cost_model = None
+
+
 
 for i_episode in itertools.count(1):
     total_episodes = i_episode
@@ -148,27 +152,39 @@ for i_episode in itertools.count(1):
                 episode_reward -= 10000
 
 
-# Bottom commented out just for lunar lander
-
-
+#
             # Don't add states to the training data if they hit the edge of
             # the state space, this seems to cause problems for the regression.
-            # if not (np.any(next_state <= env.observation_space.low) or
-            #         np.any(next_state >= env.observation_space.high)):
-            real_buffer.append((state, action, reward, next_state, mask,
+            if not (np.any(next_state <= env.observation_space.low) or
+                    np.any(next_state >= env.observation_space.high)):
+                real_buffer.append((state, action, reward, next_state, mask,
                                     cost))
 
+
+            # if not (np.any(next_state <= env.observation_space.low) or np.any(next_state >= env.observation_space.high)):
+                    
+
+            #         # noise_level = np.random.uniform(0.20, 0.25)
+
+            #         # state = state + noise_level * np.random.randn(*state.shape)
+            #         # action = action + noise_level * np.random.randn(*action.shape)
+            #         real_buffer.append((state, action, reward, next_state, mask, cost))
+
             state = next_state
+
+
         for (state, action, reward, next_state, mask, _) in tmp_buffer:
             if cost > 0:
                 agent.add(state, action, reward, next_state, mask, 1)
             else:
                 agent.add(state, action, reward, next_state, mask, 0)
+
         for (state, action, rewards, next_state, mask, _) in real_buffer:
             if cost > 0:
                 real_data.push(state, action, reward, next_state, mask, 1)
             else:
                 real_data.push(state, action, reward, next_state, mask, 0)
+
         if safe_agent is not None:
             try:
                 s, a, t = safe_agent.report()

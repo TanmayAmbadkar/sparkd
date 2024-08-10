@@ -36,5 +36,11 @@ def get_env_from_name(name):
     if name == 'lunar_lander_R':
         from .lunar_lander_RedDim import LunarLanderEnv2
         return LunarLanderEnv2()
+    if name == 'carplatoon4':
+        from .CarPlatoon4 import CarPlatoonEnv
+        return CarPlatoonEnv()
+    if name == 'Oscillator':
+        from .Oscillator import OscillatorEnv
+        return OscillatorEnv()
     else:
         raise RuntimeError("Unkonwn environment: " + name)

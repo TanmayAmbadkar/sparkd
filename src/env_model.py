@@ -496,6 +496,7 @@ def get_environment_model(     # noqa: C901
         next_policy_actions = (actions - actions_mean) / actions_std
 
     X = np.concatenate((input_states, actions), axis=1)
+    X = X + np.random.normal(scale = .1, size = X.shape)
     Y = output_states
 
     """ Debugging when dealing with dimensionality reduction steps """
@@ -523,7 +524,8 @@ def get_environment_model(     # noqa: C901
     # print(np.allclose(X[:,5], np.zeros_like(X[:,5])))
 
     # Double check to convert all elements to a consistent numeric type (float32)
-    Y = np.array(Y, dtype=np.float32)
+    """ changed """ 
+    # Y = np.array(Y, dtype=np.float32)
 
     # print("Reshaped Y shape:", Y.shape)
 
@@ -596,8 +598,11 @@ def get_environment_model(     # noqa: C901
         np.concatenate((states_std, actions_std)),
         states_mean, states_std)
 
+
+
+
     # Convert the MARS model to our own representation.
-    if np.any(np.abs(coeffs) >= 1e3):
+    if np.any(np.abs(coeffs) >= 1e4):
         print("Coefficients are xding")
         with open("debug_dump" + str(seed), 'w') as dump:
             dump.write("Model:\n")
@@ -692,6 +697,7 @@ def get_environment_model(     # noqa: C901
               torch.tensor(losses, dtype=torch.float32).mean())
 
     model.eval()
+
 
 
     #replace with some cubic spliens model 
