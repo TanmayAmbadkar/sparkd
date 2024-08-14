@@ -499,51 +499,7 @@ def get_environment_model(     # noqa: C901
     X = X + np.random.normal(scale = .1, size = X.shape)
     Y = output_states
 
-    """ Debugging when dealing with dimensionality reduction steps """
-
-    # print("X shape:", X.shape)  # Debugging: Check shape of X
-    # print("Y shape:", Y.shape)  # Debugging: Check shape of Y
-
-    # for i, y in enumerate(Y):
-    #     print(f"Row {i}: {y}, type: {type(y)}, shape: {y.shape if isinstance(y, np.ndarray) else 'N/A'}")
-
-    # # Debuging but doesnt really show up
-    # if np.isnan(X).any() or np.isnan(Y).any():
-    #     raise ValueError("NaNs detected in X or Y")
-    # if np.isinf(X).any() or np.isinf(Y).any():
-    #     raise ValueError("Infinite values detected in X or Y")
-
-    # # Ensure Y is a 2D array with consistent shape and numerical values
-    # Y = np.array(Y)
-    # if Y.ndim == 1:
-    #     Y = Y.reshape(-1, 1)
-    # elif Y.ndim > 2:
-    #     raise ValueError("Y should be a 2D array")
-
-    # print("Are there only zeros for leg?")
-    # print(np.allclose(X[:,5], np.zeros_like(X[:,5])))
-
-    # Double check to convert all elements to a consistent numeric type (float32)
-    """ changed """ 
-    # Y = np.array(Y, dtype=np.float32)
-
-    # print("Reshaped Y shape:", Y.shape)
-
-    # print("\n\n\n: Y")
-    # # print(Y)
-
-    # Ensure each row of Y has the correct shape
-    # for i in range(len(Y)):
-    #     if Y[i].shape != (Y.shape[1],):
-    #         print(f"Correcting shape for row {i}")
-    #         Y[i] = np.resize(Y[i], (Y.shape[1],))
-
-    # Double-check homogeneity
-    # for i, y in enumerate(Y):
-    #     if y.shape != (Y.shape[1],):
-    #         print(f"Inhomogeneous element at row {i}: {y}, shape: {y.shape}")
-    #         raise ValueError(f"Inhomogeneous element detected at row {i}")
-
+ 
     # Debugging: Fit a debug Earth model first
 
     try:
@@ -555,16 +511,6 @@ def get_environment_model(     # noqa: C901
         raise e
 
 
-    #sanity check, does work
-
-    # L = np.random.rand(45, 9)
-    # M = np.random.rand(45, 7)
-
-    # model = Earth()
-    # model.fit(L, M)
-
-    # print(model.trace())
-    # print(model.summary())
 
 
 

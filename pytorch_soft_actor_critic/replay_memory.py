@@ -10,8 +10,7 @@ class ReplayMemory:
 
     def push(self, state, action, reward, next_state, done, cost):
 
-#change
-
+#optional for adding noise
         # noise_level = np.random.uniform(0.20, 0.25)
         # state = state + noise_level * np.random.randn(*state.shape)
         # next_state = next_state + noise_level * np.random.randn(*next_state.shape)
@@ -24,20 +23,7 @@ class ReplayMemory:
 
     def sample(self, batch_size, get_cost=False):
 
-
-        # if len(self.buffer) < batch_size:
-        #     raise ValueError("Not enough elements in the buffer to sample the requested batch size")
-        # # print(f"Sampling {batch_size} elements from buffer with {len(self.buffer)} elements.")
-
-
         batch = random.sample(self.buffer, batch_size)
-
-        # for i, item in enumerate(batch):
-        #     if item is None:
-        #         print(f"None item found in batch at index {i}")
-        #     else:
-        #         print(f"Batch item {i}: {item}")
-
 
         state, action, reward, next_state, done, cost =  map(np.stack, zip(*batch))
         if get_cost:

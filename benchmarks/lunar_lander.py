@@ -17,7 +17,6 @@ class LunarLanderEnv(gym.Env):
         self.done = False  
 
 
-
     def reduce_state(self, state: np.ndarray) -> np.ndarray:
         # print("state: ", state)
         return state
@@ -72,22 +71,7 @@ class LunarLanderEnv(gym.Env):
             self.env.observation_space.seed(seed)
 
     def predict_done(self, state: np.ndarray) -> bool:
-        # Unpack the state array
-        # x, y, vx, vy, angle, _, leg_1, leg_2  = state
-
-        # # Landing and crashing conditions
-
-        # # Landed safely: close to target area with low velocity and minimal tilt
-        # landed = y <= 0.1 and leg_1 and leg_2 and abs(vx) < 0.05 and abs(vy) < 0.05 and abs(angle) < 0.1
-       
-        # # Crashed: close to ground but with high velocity or excessive tilt
-        # crashed = y <= 0.1 and (abs(vx) > 0.1 or abs(vy) > 0.1 or abs(angle) > 0.2)
-
-        # # Check if out of bounds, assuming some max distance from origin
-        # out_of_bounds = np.abs(x) > 5 or np.abs(y) > 5  # Example bounds
-
-        # # Return True if any of the terminal conditions are met
-        # return landed or crashed or out_of_bounds
+        
         return self.done
 
     def unsafe(self, state: np.ndarray) -> bool:

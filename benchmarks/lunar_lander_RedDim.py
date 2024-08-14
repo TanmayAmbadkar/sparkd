@@ -7,6 +7,7 @@ class LunarLanderEnv2(gym.Env):
         self.env = gym.make("LunarLander-v2", continuous=True)
         self.action_space = self.env.action_space
         
+        # Forced  size for lowering dim 
         self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(6,)) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
 
         # self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))

@@ -152,7 +152,7 @@ for i_episode in itertools.count(1):
                 episode_reward -= 10000
 
 
-#
+
             # Don't add states to the training data if they hit the edge of
             # the state space, this seems to cause problems for the regression.
             if not (np.any(next_state <= env.observation_space.low) or
@@ -160,15 +160,6 @@ for i_episode in itertools.count(1):
                 real_buffer.append((state, action, reward, next_state, mask,
                                     cost))
 
-
-            # if not (np.any(next_state <= env.observation_space.low) or np.any(next_state >= env.observation_space.high)):
-                    
-
-            #         # noise_level = np.random.uniform(0.20, 0.25)
-
-            #         # state = state + noise_level * np.random.randn(*state.shape)
-            #         # action = action + noise_level * np.random.randn(*action.shape)
-            #         real_buffer.append((state, action, reward, next_state, mask, cost))
 
             state = next_state
 

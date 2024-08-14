@@ -1,3 +1,11 @@
+# Adaption to create an enviromet from this code
+
+#https://github.com/ZikangXiong/VRL_CodeReview/tree/master
+
+#https://github.com/ZikangXiong/VRL_CodeReview/blob/master/benchmarks/oscillator.py
+
+# Has exploding coeeficients error, need to remove constantly 0 or 1 values. 
+
 import gymnasium as gym
 import numpy as np
 

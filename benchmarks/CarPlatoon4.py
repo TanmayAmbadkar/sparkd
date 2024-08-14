@@ -1,3 +1,9 @@
+# Adaption to create an enviromet from this code
+
+#https://github.com/ZikangXiong/VRL_CodeReview/tree/master
+
+#https://github.com/ZikangXiong/VRL_CodeReview/blob/master/benchmarks/4-car-platoon.py
+
 import torch
 import gymnasium as gym
 import numpy as np
