@@ -11,13 +11,12 @@ from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 
 from benchmarks import envs
 from src.env_model import get_environment_model
-from src.policy import Shield, SACPolicy, ProjectionPolicy, CSCShield
+from src.policy import SACPolicy
 from abstract_interpretation import domains
-
 
 parser = argparse.ArgumentParser(description='SPICE Args')
 parser.add_argument('--env_name', default="lunar_lander_R",
-                    help='Environment (default: acc)')
+                    help='Environment (default: lunar_lander_R)')
 parser.add_argument('--policy', default="Gaussian",
                     help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
 parser.add_argument('--eval', type=bool, default=True,
@@ -66,33 +65,6 @@ env = envs.get_env_from_name(args.env_name)
 env.seed(args.seed)
 
 
-
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
-
-# Agent
-agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
-safe_agent = None
-
-# Tesnorboard
-writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
-    datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-    args.policy, "autotune" if args.automatic_entropy_tuning else ""))
-
-# Memory
-real_data = ReplayMemory(args.replay_size, args.seed)
-
-# Training Loop
-total_numsteps = 0
-updates = 0
-
-total_unsafe_episodes = 0
-total_episodes = 0
-
-cost_model = None
-
-
-
 # Define the observation space bounds
 obs_space_lower = env.observation_space.low
 obs_space_upper = env.observation_space.high
@@ -126,6 +98,32 @@ input_zonotope = domains.Zonotope(center, generators)
 
 env.safety = input_zonotope
 
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+
+# Initialize the SAC agent
+agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+
+# Initialize Replay Memory
+memory = ReplayMemory(args.replay_size, args.seed)
+
+# Training Loop
+total_numsteps = 0
+updates = 0
+
+# Memory
+real_data = ReplayMemory(args.replay_size, args.seed)
+
+# Training Loop
+total_numsteps = 0
+updates = 0
+
+total_unsafe_episodes = 0
+total_episodes = 0
+
+cost_model = None
+
+
 
 for i_episode in itertools.count(1):
     total_episodes = i_episode
@@ -142,10 +140,7 @@ for i_episode in itertools.count(1):
             if args.start_steps > total_numsteps:
                 action = env.action_space.sample()  # Sample random action
             else:
-                if safe_agent is not None:
-                    action = safe_agent(state)
-                else:
-                    action = agent(state)
+                action = agent(state)
 
             if len(agent.memory) > args.batch_size:
                 # Number of updates per step in environment
@@ -154,12 +149,6 @@ for i_episode in itertools.count(1):
                     critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
                         agent.train()
 
-                    writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar('loss/policy', policy_loss, updates)
-                    writer.add_scalar('loss/entropy_loss', ent_l, updates)
-                    writer.add_scalar('entropy_temprature/alpha', alph,
-                                      updates)
                     updates += 1
 
             next_state, reward, done, _ = env.step(action)
@@ -211,105 +200,16 @@ for i_episode in itertools.count(1):
             else:
                 real_data.push(state, action, reward, next_state, mask, 0)
 
-        if safe_agent is not None:
-            try:
-                s, a, t = safe_agent.report()
-                print("Shield steps:", s, "  Neural steps:", a)
-                print("Average time:", t / (s + a))
-                safe_agent.reset_count()
-            except Exception:
-                pass
-
-    else:
-        print(i_episode, ": Simulated data")
-        while not done:
-            if episode_steps % 100 == 0:
-                print(i_episode, episode_steps, total_numsteps)
-            if args.start_steps > total_numsteps:
-                action = env.action_space.sample()  # Sample random action
-            else:
-                action = agent(state)  # Sample action from policy
-
-            if len(agent.memory) > args.batch_size:
-                # Number of updates per step in environment
-                for i in range(args.updates_per_step):
-                    # Update parameters of all the networks
-                    critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
-                        agent.train()
-
-                    writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar('loss/policy', policy_loss, updates)
-                    writer.add_scalar('loss/entropy_loss', ent_l, updates)
-                    writer.add_scalar('entropy_temprature/alpha', alph,
-                                      updates)
-                    updates += 1
-
-            next_state, reward = env_model(state, action,
-                                           use_neural_model=False)
-            done = not np.all(np.abs(next_state) < 1e5) and \
-                not np.any(np.isnan(next_state))
-            done = done or env.predict_done(next_state)
-            done = done or episode_steps == env._max_episode_steps or \
-                not np.all(np.abs(next_state) < 1e5)
-            episode_steps += 1
-            total_numsteps += 1
-            episode_reward += reward
-
-            cost = 0
-            if env.unsafe(next_state):
-                total_unsafe_episodes += 1
-                episode_reward -= 1000
-                done = True
-                cost = 1
-
-            # Ignore the "done" signal if it comes from hitting the time
-            # horizon.
-            # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
-            mask = 1 if episode_steps == env._max_episode_steps \
-                else float(not done)
-
-            agent.add(state, action, reward, next_state, mask, cost)
-
-            state = next_state
-
-    if (i_episode - 9) % 100 == 0:
-        states, actions, rewards, next_states, dones, costs = \
-            real_data.sample(min(len(real_data), 50000), get_cost=True)
-        if args.neural_safety:
-            env_model, cost_model = get_environment_model(
-                    states, actions, next_states, rewards, costs,
-                    torch.tensor(env.observation_space.low),
-                    torch.tensor(env.observation_space.high),
-                    model_pieces=20, seed=args.seed, policy=agent,
-                    use_neural_model=False, cost_model=cost_model)
-        else:
-            env_model, cost_model = get_environment_model(
-                    states, actions, next_states, rewards, costs,
-                    torch.tensor(env.observation_space.low),
-                    torch.tensor(env.observation_space.high),
-                    model_pieces=20, seed=args.seed, policy=None,
-                    use_neural_model=False, cost_model=None)
-
-        if args.neural_safety:
-            safe_agent = CSCShield(agent, cost_model,
-                                   threshold=args.neural_threshold)
-        else:
-            shield = ProjectionPolicy(
-                env_model.get_symbolic_model(), env.observation_space,
-                env.action_space, args.horizon, env.polys, env.safe_polys)
-            safe_agent = Shield(shield, agent)
+        
 
     if total_numsteps > args.num_steps:
         break
 
-    writer.add_scalar('reward/train', episode_reward, i_episode)
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
 
-    if (i_episode - 99) % 1 == 0 and args.eval is True and \
-            safe_agent is not None:
+    if (i_episode - 99) % 10 == 0 and args.eval is True:
         print("starting testing...")
         avg_reward = 0.
         episodes = 1
@@ -322,7 +222,7 @@ for i_episode in itertools.count(1):
             episode_steps = 0
             trajectory = [state]
             while not done:
-                action = safe_agent(state)
+                action = agent(state)
 
                 next_state, reward, done, _ = env.step(action)
                 episode_reward += reward
@@ -337,11 +237,11 @@ for i_episode in itertools.count(1):
                     done = True
                 if done:
                     try:
-                        s, a, t = safe_agent.report()
+                        s, a, t = agent.report()
                         print("Finished test episode:", s, "shield and", a,
                               "neural")
                         print("Average time:", t / (s + a))
-                        safe_agent.reset_count()
+                        agent.reset_count()
                     except Exception:
                         pass
                     break
@@ -351,8 +251,6 @@ for i_episode in itertools.count(1):
             avg_length += episode_steps
         avg_reward /= episodes
         avg_length /= episodes
-
-        writer.add_scalar('avg_reward/test', avg_reward, i_episode)
 
         print("----------------------------------------")
         print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"

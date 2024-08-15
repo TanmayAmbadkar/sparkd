@@ -3,20 +3,22 @@ import torch
 import numpy as np
 
 class LunarLanderEnv2(gym.Env):
-    def __init__(self, state_processor=None, reduced_dim=None):
+    def __init__(self, state_processor=None, reduced_dim=None, safety=None):
         self.env = gym.make("LunarLander-v2", continuous=True)
         self.action_space = self.env.action_space
         
         # Forced  size for lowering dim 
-        self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(6,)) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.observation_space = gym.spaces.Box(low = np.array([-1.5, -1.5, -5., -5., -3.1415927, -5., ]), high = np.array([1.5, 1.5, 5., 5., 3.1415927, 5.,]), shape = (6,), ) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
 
         # self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
+        self.safety = safety
 
         self._max_episode_steps = 500
        
         self.step_counter = 0
         self.done = False  
+         
 
     def reduce_state(self, state: np.ndarray) -> np.ndarray:
         x, y, vx, vy, angle, angular_velocity = state[:6]
@@ -69,9 +71,10 @@ class LunarLanderEnv2(gym.Env):
         return self.done
 
     def unsafe(self, state: np.ndarray) -> bool:
-        x, y, vx, vy, angle, angular_velocity = state
-        high_velocity_x = np.abs(vx) > 2
-        high_velocity_y = np.abs(vy) > 2
-        return high_velocity_x or high_velocity_y
+        
+        return not self.safety.in_zonotope(state)
+        
+        # return high_velocity_x or high_velocity_y
+    
 
 
