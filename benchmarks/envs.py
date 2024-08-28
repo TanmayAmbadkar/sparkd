@@ -36,6 +36,9 @@ def get_env_from_name(name):
     if name == 'lunar_lander_R':
         from .lunar_lander_RedDim import LunarLanderEnv2
         return LunarLanderEnv2()
+    if name == 'bipedal_walker':
+        from .bipedal_walker import BipedalWalkerEnv
+        return BipedalWalkerEnv()
     if name == 'carplatoon4':
         from .CarPlatoon4 import CarPlatoonEnv
         return CarPlatoonEnv()

@@ -20,7 +20,6 @@ class Autoencoder(pl.LightningModule):
         self.reduced_dim = reduced_dim
         self.encoder = NeuralNetwork([LinearLayer(n_features, 12), ReLULayer(), LinearLayer(12, reduced_dim)])
         self.decoder = NeuralNetwork([LinearLayer(reduced_dim, 12), ReLULayer(), LinearLayer(12, n_features)])
-        
 
     def forward(self, x):
         """
@@ -107,9 +106,9 @@ class CustomDataset(Dataset):
         Returns:
         tuple: A tuple containing the sample and its corresponding label (the same sample).
         """
-        return self.data[idx], self.data[idx]
+        return torch.tensor(self.data[idx], dtype=torch.float32), torch.tensor(self.data[idx], dtype=torch.float32)
 
-def fit(observations, autoencoder):
+def fit_encoder(observations, autoencoder):
     """
     Fit the autoencoder to the observations data.
     
@@ -118,7 +117,7 @@ def fit(observations, autoencoder):
     autoencoder (Autoencoder): The autoencoder model to be trained.
     """
     dataset = CustomDataset(observations)
-    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
     # Initialize the trainer
     trainer = pl.Trainer(max_epochs=10, accelerator="cpu")

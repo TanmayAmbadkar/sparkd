@@ -1,5 +1,7 @@
 import random
 import numpy as np
+import pickle
+import os
 
 class ReplayMemory:
     def __init__(self, capacity, seed):
@@ -10,10 +12,10 @@ class ReplayMemory:
 
     def push(self, state, action, reward, next_state, done, cost):
 
-#optional for adding noise
-        # noise_level = np.random.uniform(0.20, 0.25)
-        # state = state + noise_level * np.random.randn(*state.shape)
-        # next_state = next_state + noise_level * np.random.randn(*next_state.shape)
+        # optional for adding noise
+        noise_level = np.random.uniform(0.40, 0.45)
+        state = state + noise_level * np.random.randn(*state.shape)
+        next_state = next_state + noise_level * np.random.randn(*next_state.shape)
 
 
         if len(self.buffer) < self.capacity:

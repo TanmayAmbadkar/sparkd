@@ -6,13 +6,16 @@ import argparse
 import datetime
 import itertools
 import torch
+import sys
 from torch.utils.tensorboard import SummaryWriter
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 
 from benchmarks import envs
 from src.env_model import get_environment_model
 from src.policy import Shield, SACPolicy, ProjectionPolicy, CSCShield
-from abstract_interpretation import domains
+from abstract_interpretation import domains, verification
+from encoder.autoencoder import Autoencoder, fit_encoder
+import gymnasium as gym
 
 
 parser = argparse.ArgumentParser(description='SPICE Args')
@@ -57,6 +60,10 @@ parser.add_argument('--neural_safety', default=False, action='store_true',
                     help='Use a neural safety signal')
 parser.add_argument('--neural_threshold', type=float, default=0.1,
                     help='Safety threshold for the neural model')
+parser.add_argument('--autoencoder', type=int, default=0,
+                    help='Timestep to switch to autoencoder')
+parser.add_argument('--red_dim', type=int, default=4,
+                    help='Reduced dimension size')
 args = parser.parse_args()
 
 print("Arguments:")
@@ -64,7 +71,6 @@ print(args)
 
 env = envs.get_env_from_name(args.env_name)
 env.seed(args.seed)
-
 
 
 torch.manual_seed(args.seed)
@@ -79,6 +85,11 @@ writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
+
+file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
+    datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
+    args.policy, "autotune" if args.automatic_entropy_tuning else ""), "w+")
+
 # Memory
 real_data = ReplayMemory(args.replay_size, args.seed)
 
@@ -91,43 +102,9 @@ total_episodes = 0
 
 cost_model = None
 
-
-
-# Define the observation space bounds
-obs_space_lower = env.observation_space.low
-obs_space_upper = env.observation_space.high
-
-# Calculate the center of the zonotope
-center = (obs_space_lower + obs_space_upper) / 2
-
-# Create generators to reflect the constraints on vx and vy
-generators = []
-# vx and vy constraints (-2 <= vx, vy <= 2)
-vx_gen = np.zeros(env.observation_space.shape[0])
-vx_gen[2] = 2
-
-vy_gen = np.zeros(env.observation_space.shape[0])
-vy_gen[3] = 2
-
-# Add these generators to the list
-generators.append(vx_gen)
-generators.append(vy_gen)
-
-# Additional generators for other dimensions can be added if necessary
-# Example: small perturbations in other dimensions
-for i in range(env.observation_space.shape[0]):
-    if i not in [2, 3]:
-        gen = np.zeros(env.observation_space.shape[0])
-        gen[i] = (obs_space_upper[i] - obs_space_lower[i]) / 2
-        generators.append(gen)
-
-# Create the zonotope
-input_zonotope = domains.Zonotope(center, generators)
-
-env.safety = input_zonotope
-
-
-for i_episode in itertools.count(1):
+iterator_loop = itertools.count(1)
+while True:
+    i_episode = next(iterator_loop)
     total_episodes = i_episode
     episode_reward = 0
     episode_steps = 0
@@ -171,7 +148,7 @@ for i_episode in itertools.count(1):
             if env.unsafe(next_state):
                 total_unsafe_episodes += 1
                 episode_reward -= 1000
-                print("UNSAFE (outside testing)")
+                print("UNSAFE (outside testing)", next_state)
                 done = True
                 cost = 1
 
@@ -190,9 +167,9 @@ for i_episode in itertools.count(1):
 
             # Don't add states to the training data if they hit the edge of
             # the state space, this seems to cause problems for the regression.
-            if not (np.any(next_state <= env.observation_space.low) or
-                    np.any(next_state >= env.observation_space.high)):
-                real_buffer.append((state, action, reward, next_state, mask,
+            if not (np.any(next_state < env.observation_space.low) or
+                    np.any(next_state > env.observation_space.high)):
+                    real_buffer.append((state, action, reward, next_state, mask,
                                     cost))
 
 
@@ -210,7 +187,6 @@ for i_episode in itertools.count(1):
                 real_data.push(state, action, reward, next_state, mask, 1)
             else:
                 real_data.push(state, action, reward, next_state, mask, 0)
-
         if safe_agent is not None:
             try:
                 s, a, t = safe_agent.report()
@@ -274,8 +250,11 @@ for i_episode in itertools.count(1):
             state = next_state
 
     if (i_episode - 9) % 100 == 0:
-        states, actions, rewards, next_states, dones, costs = \
-            real_data.sample(min(len(real_data), 50000), get_cost=True)
+        try:
+            states, actions, rewards, next_states, dones, costs = \
+                real_data.sample(min(len(real_data), 50000), get_cost=True)
+        except:
+            continue
         if args.neural_safety:
             env_model, cost_model = get_environment_model(
                     states, actions, next_states, rewards, costs,
@@ -300,8 +279,33 @@ for i_episode in itertools.count(1):
                 env.action_space, args.horizon, env.polys, env.safe_polys)
             safe_agent = Shield(shield, agent)
 
-    if total_numsteps > args.num_steps:
+    if total_numsteps > args.autoencoder and env.state_processor is None:
+        # Write code to include autoencoder, and switch agent and environments. 
+        states, _, _, _, _, _ = \
+            real_data.sample(min(len(real_data), args.autoencoder), get_cost=True)
+
+        encoder = Autoencoder(env.observation_space.shape[0], args.red_dim)
+        fit_encoder(states, encoder)
+        
+        env.state_processor = encoder.transform
+        env.safety = verification.get_constraints(encoder.encoder, env.safety)
+        env.observation_space = gym.spaces.Box(low=-1, high=1, shape=(args.red_dim,))
+        agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+        safe_agent = None
+        real_data = ReplayMemory(args.replay_size, args.seed)
+        iterator_loop = itertools.count(1)
+        total_numsteps = 0
+        cost_model = None
+        print("Total unsafe without AE:", total_unsafe_episodes, "/", total_episodes, file=file)
+        total_unsafe_episodes = 0
+        total_episodes = 0
+        continue
+        
+    
+    if total_numsteps > args.num_steps/2:
         break
+    
+        
 
     writer.add_scalar('reward/train', episode_reward, i_episode)
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
@@ -315,6 +319,8 @@ for i_episode in itertools.count(1):
         episodes = 1
         unsafe_episodes = 0
         avg_length = 0.
+        shield_count = 0
+        neural_count = 0
         for _ in range(episodes):
             state = env.reset()
             episode_reward = 0
@@ -340,6 +346,9 @@ for i_episode in itertools.count(1):
                         s, a, t = safe_agent.report()
                         print("Finished test episode:", s, "shield and", a,
                               "neural")
+                        shield_count+=s
+                        neural_count+=a
+                       
                         print("Average time:", t / (s + a))
                         safe_agent.reset_count()
                     except Exception:
@@ -351,6 +360,10 @@ for i_episode in itertools.count(1):
             avg_length += episode_steps
         avg_reward /= episodes
         avg_length /= episodes
+        shield_count /= episodes
+        neural_count /= episodes
+        writer.add_scalar('agent/shield', shield_count, updates)
+        writer.add_scalar('agent/neural', neural_count, updates)
 
         writer.add_scalar('avg_reward/test', avg_reward, i_episode)
 
@@ -364,3 +377,4 @@ for i_episode in itertools.count(1):
             print(trajectory)
 
 print("Total unsafe:", total_unsafe_episodes, "/", total_episodes)
+print("Total unsafe:", total_unsafe_episodes, "/", total_episodes, file=file)

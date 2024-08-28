@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from scipy.optimize import linprog
 
 class Zonotope:
     def __init__(self, center, generators):
@@ -28,28 +29,55 @@ class Zonotope:
         Each generator contributes two hyperplanes.
         """
         c = self.center.numpy()
-        G = np.array([g.numpy() for g in self.generators])
-
-        num_generators = G.shape[0]
-        A = np.vstack([G, -G])
-        b = np.ones(2 * num_generators)
+        G = np.array([g.numpy().T for g in self.generators])
 
         inequalities = []
-        for i in range(2 * num_generators):
-            inequalities.append((A[i], np.dot(A[i], c) + b[i]))
+        for g in G:
+            # Create two inequalities for each generator
+            inequalities.append((g, np.dot(g, c) + 1))  # Positive direction
+            inequalities.append((-g, -np.dot(g, c) + 1)) # Negative direction
         return inequalities
     
-    def in_zonotope(self, x):
+   
+    
+    def in_zonotope(self, y):
         """
-        Check whether the numpy array `x` is contained within the zonotope.
+        Check whether the numpy array `y` is contained within the zonotope using Linear Programming.
         """
-        x = np.array(x)
+        y = np.array(y, dtype=np.float32)
+        G = np.array([g.numpy() for g in self.generators])
+        c = self.center.numpy()
         
-        for A, b in self.inequalities:
-            if np.dot(A, x) > b:
-                return False
+        # Number of generators
+        num_generators = G.shape[0]
         
-        return True
+        # Objective: Minimize the auxiliary variable t
+        # The variable vector x will have size (num_generators + 1) where the last element is t
+        c_lp = np.zeros(num_generators + 1)
+        c_lp[-1] = 1  # We want to minimize the last variable (t)
+        
+        # Constraints: y = Gx + c, and -t <= x_i <= t
+        A_eq = np.hstack([G.T, np.zeros((G.shape[1], 1))])  # G * x = y - c, so A_eq is G and b_eq is y - c
+        b_eq = y - c
+        
+        # Inequality constraints for the t variable (infinity norm)
+        A_ub = np.vstack([np.hstack([np.eye(num_generators), -np.ones((num_generators, 1))]),
+                          np.hstack([-np.eye(num_generators), -np.ones((num_generators, 1))])])
+        b_ub = np.ones(2 * num_generators)
+        
+        # Bounds: x_i has no explicit bounds; t >= 0
+        bounds = [(None, None)] * num_generators + [(0, None)]
+        
+        # Solve the LP problem
+        res = linprog(c_lp, A_ub, b_ub, A_eq, b_eq, bounds=bounds, method='highs')
+        
+        # Check if the solution is feasible and if t <= 1
+        if res.success and res.x[-1] <= 1:
+            return True
+        else:
+            return False
+    
+    
     
 class Box:
     def __init__(self, lower, upper):

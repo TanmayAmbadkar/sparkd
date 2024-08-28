@@ -639,8 +639,8 @@ def get_environment_model(     # noqa: C901
             optim.zero_grad()
             loss_val.backward()
             optim.step()
-        print("Epoch:", epoch,
-              torch.tensor(losses, dtype=torch.float32).mean())
+        # print("Epoch:", epoch,
+        #       torch.tensor(losses, dtype=torch.float32).mean())
 
     model.eval()
 

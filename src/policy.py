@@ -262,7 +262,7 @@ class ProjectionPolicy:
                 best_u0 = u0
 
         if best_u0 is None:
-            best_u0 = self.backup(state)
+            best_u0 = action
 
         self.saved_state = state
         self.saved_action = best_u0
