@@ -29,12 +29,12 @@ class CarRacingEnv(gym.Env):
             np.array([[0.0, 1.0, 0.0, 0.0, -0.99]]),
             np.array([[0.0, -1.0, 0.0, 0.0, 2.01]])
         ]
-
+        self.state_processor = None
     def reset(self) -> np.ndarray:
         self.state = self.init_space.sample()
         self.steps = 0
         self.corner = False
-        return self.state
+        return self.state, {'state_original': self.state}
 
     def step(self, action: np.ndarray) -> \
             Tuple[np.ndarray, float, bool, Dict[Any, Any]]:
@@ -61,7 +61,7 @@ class CarRacingEnv(gym.Env):
             self.unsafe(self.state)
         self.steps += 1
 
-        return self.state, reward, done, {}
+        return self.state, reward, done, done, {'state_original': self.state}
 
     def predict_done(self, state: np.ndarray) -> bool:
         return False
@@ -71,6 +71,6 @@ class CarRacingEnv(gym.Env):
         self.observation_space.seed(seed)
         self.init_space.seed(seed)
 
-    def unsafe(self, state: np.ndarray) -> bool:
+    def unsafe(self, state: np.ndarray, simulated=False) -> bool:
         return self.state[0] >= 1.0 and self.state[0] <= 2.0 and \
             self.state[1] >= 1.0 and self.state[1] <= 2.0

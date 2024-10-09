@@ -9,6 +9,8 @@ import time
 from .env_model import MARSModel
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
+from scipy.optimize import linprog
+
 
 
 cvxopt.solvers.options['show_progress'] = False
@@ -24,7 +26,7 @@ class SACPolicy:
                  sac_args):
         self.agent = SAC(gym_env.observation_space.shape[0],
                          gym_env.action_space, sac_args)
-        self.memory = ReplayMemory(replay_size, seed)
+        self.memory = ReplayMemory(replay_size, gym_env.observation_space, seed)
         self.updates = 0
         self.batch_size = batch_size
 
@@ -68,7 +70,7 @@ class ProjectionPolicy:
         self.safe_polys = safe_polys
         self.saved_state = None
         self.saved_action = None
-
+        
     def backup(self, state: np.ndarray) -> np.ndarray:
         """
         Choose a backup action if the projection fails.
@@ -144,6 +146,7 @@ class ProjectionPolicy:
         # Return the first action
         return res['x'][:u_dim]
 
+
     def solve(self,    # noqa: C901
               state: np.ndarray,
               action: Optional[np.ndarray] = None,
@@ -153,6 +156,8 @@ class ProjectionPolicy:
         action and state because very often we will call unsafe and then
         __call__ on the same state.
         """
+        
+        shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
         # If we don't have a proposed action, look for actions with small
@@ -244,13 +249,16 @@ class ProjectionPolicy:
             h = cvxopt.matrix(-bias)
             try:
                 sol = cvxopt.solvers.qp(P, q, G, h)
-            except Exception:
+            except Exception as e:
                 # This seems to happen when the primal problem is infeasible
                 # sometimes
                 sol = {'status': 'infeasible'}
+                # print("SOLVER:", sol)
+                continue
 
             if sol['status'] != 'optimal':
                 # Infeasible or unsolvable problem
+                # print("SOLVER not OPTIMAL")
                 continue
             u0 = np.asarray(sol['x'][:u_dim]).squeeze()
             if len(u0.shape) == 0:
@@ -262,22 +270,24 @@ class ProjectionPolicy:
                 best_u0 = u0
 
         if best_u0 is None:
-            best_u0 = action
+            best_u0 = self.backup(state)
+            shielded = False
+            # best_u0 = action
 
         self.saved_state = state
         self.saved_action = best_u0
-        return best_u0
+        self.shielded = shielded
+        return best_u0, shielded
 
     def __call__(self, state: np.ndarray) -> np.ndarray:
-        if self.saved_state is not None and \
-                np.allclose(state, self.saved_state):
-            return self.saved_action
+        if self.saved_state is not None and np.allclose(state, self.saved_state):
+            return self.saved_action, self.shielded
         return self.solve(state)
 
     def unsafe(self,
                state: np.ndarray,
                action: np.ndarray) -> bool:
-        res = self.solve(state, action=action)
+        res = self.solve(state, action=action)[0]
         return not np.allclose(res, action)
 
 
@@ -293,6 +303,7 @@ class Shield:
         self.shield = shield_policy
         self.agent = unsafe_policy
         self.shield_times = 0
+        self.backup_times = 0
         self.agent_times = 0
         self.total_time = 0.
 
@@ -300,8 +311,10 @@ class Shield:
         start = time.time()
         proposed_action = self.agent(state, **kwargs)
         if self.shield.unsafe(state, proposed_action):
-            act = self.shield(state)
-            self.shield_times += 1
+            act, shielded  = self.shield(state)
+            self.shield_times += 1 if shielded else 0
+            self.backup_times += 1 if not shielded else 0
+            
             return act
         self.agent_times += 1
         end = time.time()
@@ -309,11 +322,12 @@ class Shield:
         return proposed_action
 
     def report(self) -> Tuple[int, int]:
-        return self.shield_times, self.agent_times, self.total_time
+        return self.shield_times, self.agent_times, self.backup_times, self.total_time
 
     def reset_count(self):
         self.shield_times = 0
         self.agent_times = 0
+        self.backup_times = 0
         self.total_time = 0.
 
 

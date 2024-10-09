@@ -5,7 +5,6 @@ from typing import Optional, List, Callable
 import numpy as np
 import torch
 import scipy.stats
-# import pdb; pdb.set_trace()
 
 
 class ResidualEnvModel(torch.nn.Module):
@@ -379,7 +378,9 @@ class EnvModel:
             symb_reward: MARSModel,
             net: ResidualEnvModel,
             reward: ResidualEnvModel,
-            use_neural_model: bool):
+            use_neural_model: bool,
+            observation_space_low,
+            observation_space_high):
         """
         Initialize an environment model.
 
@@ -393,6 +394,10 @@ class EnvModel:
         self.net = net
         self.reward = reward
         self.use_neural_model = use_neural_model
+        self
+        self.observation_space_low = np.array(observation_space_low)
+        self.observation_space_high = np.array(observation_space_high)
+        
 
     def __call__(self,
                  state: np.ndarray,
@@ -417,7 +422,8 @@ class EnvModel:
         else:
             neur = np.zeros_like(symb)
             rew = self.symb_reward(inp)[0]
-        return symb + neur, rew
+            
+        return np.clip(symb + neur, self.observation_space_low, self.observation_space_high), rew
 
     def get_symbolic_model(self) -> MARSModel:
         """
@@ -496,24 +502,7 @@ def get_environment_model(     # noqa: C901
         next_policy_actions = (actions - actions_mean) / actions_std
 
     X = np.concatenate((input_states, actions), axis=1)
-    X = X + np.random.normal(scale = .1, size = X.shape)
     Y = output_states
-
- 
-    # Debugging: Fit a debug Earth model first
-
-    try:
-        debug_model = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0, endspan=5, minspan=5)
-        debug_model.fit(X, Y)
-        print("Debug Earth model fit successfully")
-    except ValueError as e:
-        print("Error fitting debug Earth model:", e)
-        raise e
-
-
-
-
-
 
     terms = 20
     # Lower penalties allow more model complexity.
@@ -544,12 +533,9 @@ def get_environment_model(     # noqa: C901
         np.concatenate((states_std, actions_std)),
         states_mean, states_std)
 
-
-
-
     # Convert the MARS model to our own representation.
-    if np.any(np.abs(coeffs) >= 1e4):
-        print("Coefficients are xding")
+    if np.any(np.abs(coeffs) >= 1e3):
+        print("Coefficients are exploding")
         with open("debug_dump" + str(seed), 'w') as dump:
             dump.write("Model:\n")
             dump.write(str(parsed_mars))
@@ -639,15 +625,10 @@ def get_environment_model(     # noqa: C901
             optim.zero_grad()
             loss_val.backward()
             optim.step()
-        # print("Epoch:", epoch,
-        #       torch.tensor(losses, dtype=torch.float32).mean())
+        print("Epoch:", epoch,
+              torch.tensor(losses, dtype=torch.float32).mean())
 
     model.eval()
-
-
-
-    #replace with some cubic spliens model 
-    #find cubic splines library
 
     # Get a symbolic reward model
     reward_symb = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0,
@@ -767,4 +748,4 @@ def get_environment_model(     # noqa: C901
     print(reward_symb.summary())
 
     return EnvModel(parsed_mars, parsed_rew, model, rew_model,
-                    use_neural_model), cost_model
+                    use_neural_model, lows[:input_states.shape[1]], highs[:input_states.shape[1]]), cost_model

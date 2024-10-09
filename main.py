@@ -7,6 +7,7 @@ import datetime
 import itertools
 import torch
 import sys
+import os
 from torch.utils.tensorboard import SummaryWriter
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 
@@ -29,7 +30,7 @@ parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor for reward (default: 0.99)')
 parser.add_argument('--tau', type=float, default=0.005, metavar='G',
                     help='target smoothing coefficient (tau) (default: 0.005)')
-parser.add_argument('--lr', type=float, default=0.0003, metavar='G',
+parser.add_argument('--lr', type=float, default=0.00001, metavar='G',
                     help='learning rate (default: 0.0003)')
 parser.add_argument('--alpha', type=float, default=0.2, metavar='G',
                     help='Temperature parameter alpha determines the relative importance of the entropy\
@@ -38,8 +39,8 @@ parser.add_argument('--automatic_entropy_tuning', default=False, action='store_t
                     help='Automaically adjust alpha (default: False)')
 parser.add_argument('--seed', type=int, default=123456, metavar='N',
                     help='random seed (default: 123456)')
-parser.add_argument('--batch_size', type=int, default=256, metavar='N',
-                    help='batch size (default: 256)')
+parser.add_argument('--batch_size', type=int, default=1024, metavar='N',
+                    help='batch size (default: 1024)')
 parser.add_argument('--num_steps', type=int, default=10000000, metavar='N',
                     help='maximum number of steps (default: 10000000)')
 parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
@@ -60,7 +61,7 @@ parser.add_argument('--neural_safety', default=False, action='store_true',
                     help='Use a neural safety signal')
 parser.add_argument('--neural_threshold', type=float, default=0.1,
                     help='Safety threshold for the neural model')
-parser.add_argument('--autoencoder', type=int, default=0,
+parser.add_argument('--autoencoder', type=int, default=10000000,
                     help='Timestep to switch to autoencoder')
 parser.add_argument('--red_dim', type=int, default=4,
                     help='Reduced dimension size')
@@ -85,13 +86,15 @@ writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
+if not os.path.exists("logs"):
+    os.makedirs("logs")
 
 file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""), "w+")
 
 # Memory
-real_data = ReplayMemory(args.replay_size, args.seed)
+real_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
 
 # Training Loop
 total_numsteps = 0
@@ -101,51 +104,46 @@ total_unsafe_episodes = 0
 total_episodes = 0
 
 cost_model = None
-
+env_model = None
 iterator_loop = itertools.count(1)
 while True:
     i_episode = next(iterator_loop)
-    total_episodes = i_episode
     episode_reward = 0
     episode_steps = 0
     done = False
-    state = env.reset()
+    state, info = env.reset()
 
-    if (i_episode // 10) % 8 == 0:
+    if (i_episode // 10) % 8 == 0 or env_model is None:
         print(i_episode, ": Real data")
         tmp_buffer = []
         real_buffer = []
         while not done:
-            if args.start_steps > total_numsteps:
-                action = env.action_space.sample()  # Sample random action
+            if safe_agent is not None:
+                action = safe_agent(state)
             else:
-                if safe_agent is not None:
-                    action = safe_agent(state)
-                else:
-                    action = agent(state)
+                action = agent(state)
 
-            if len(agent.memory) > args.batch_size:
+            if len(agent.memory) > 10*args.batch_size:
                 # Number of updates per step in environment
                 for i in range(args.updates_per_step):
                     # Update parameters of all the networks
                     critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
                         agent.train()
 
-                    writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar('loss/policy', policy_loss, updates)
-                    writer.add_scalar('loss/entropy_loss', ent_l, updates)
-                    writer.add_scalar('entropy_temprature/alpha', alph,
-                                      updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/critic_1', critic_1_loss, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/critic_2', critic_2_loss, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/policy', policy_loss, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/entropy_loss', ent_l, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/alpha', alph, updates)
                     updates += 1
 
-            next_state, reward, done, _ = env.step(action)
+            next_state, reward, done, _, info = env.step(action)
             episode_steps += 1
             total_numsteps += 1
             episode_reward += reward
 
             cost = 0
-            if env.unsafe(next_state):
+            if env.unsafe(info['state_original'], False):
                 total_unsafe_episodes += 1
                 episode_reward -= 1000
                 print("UNSAFE (outside testing)", next_state)
@@ -160,8 +158,8 @@ while True:
 
             tmp_buffer.append((state, action, reward, next_state, mask, cost))
 
-            if env.unsafe(next_state):
-                episode_reward -= 10000
+            # if env.unsafe(next_state):
+            #     episode_reward -= 10000
 
 
 
@@ -176,25 +174,27 @@ while True:
             state = next_state
 
 
-        for (state, action, reward, next_state, mask, _) in tmp_buffer:
+        for (state, action, reward, next_state, mask, cost) in tmp_buffer:
             if cost > 0:
                 agent.add(state, action, reward, next_state, mask, 1)
             else:
                 agent.add(state, action, reward, next_state, mask, 0)
 
-        for (state, action, rewards, next_state, mask, _) in real_buffer:
+        for (state, action, rewards, next_state, mask, cost) in real_buffer:
             if cost > 0:
                 real_data.push(state, action, reward, next_state, mask, 1)
             else:
                 real_data.push(state, action, reward, next_state, mask, 0)
         if safe_agent is not None:
             try:
-                s, a, t = safe_agent.report()
-                print("Shield steps:", s, "  Neural steps:", a)
-                print("Average time:", t / (s + a))
+                s, a, b, t = safe_agent.report()
+                print("Shield steps:", s, "  Neural steps:", a, "  Backup steps:", b)
+                print("Average time:", t / (s + a + b))
                 safe_agent.reset_count()
             except Exception:
                 pass
+        
+        total_episodes += 1 
 
     else:
         print(i_episode, ": Simulated data")
@@ -205,7 +205,6 @@ while True:
                 action = env.action_space.sample()  # Sample random action
             else:
                 action = agent(state)  # Sample action from policy
-
             if len(agent.memory) > args.batch_size:
                 # Number of updates per step in environment
                 for i in range(args.updates_per_step):
@@ -213,11 +212,11 @@ while True:
                     critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
                         agent.train()
 
-                    writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar('loss/policy', policy_loss, updates)
-                    writer.add_scalar('loss/entropy_loss', ent_l, updates)
-                    writer.add_scalar('entropy_temprature/alpha', alph,
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/critic_1', critic_1_loss, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/critic_2', critic_2_loss, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/policy', policy_loss, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_loss/entropy_loss', ent_l, updates)
+                    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_entropy_temprature/alpha', alph,
                                       updates)
                     updates += 1
 
@@ -225,7 +224,7 @@ while True:
                                            use_neural_model=False)
             done = not np.all(np.abs(next_state) < 1e5) and \
                 not np.any(np.isnan(next_state))
-            done = done or env.predict_done(next_state)
+            # done = done or env.predict_done(next_state)
             done = done or episode_steps == env._max_episode_steps or \
                 not np.all(np.abs(next_state) < 1e5)
             episode_steps += 1
@@ -233,7 +232,8 @@ while True:
             episode_reward += reward
 
             cost = 0
-            if env.unsafe(next_state):
+            if env.unsafe(next_state, True):
+                print(next_state)
                 total_unsafe_episodes += 1
                 episode_reward -= 1000
                 done = True
@@ -248,6 +248,8 @@ while True:
             agent.add(state, action, reward, next_state, mask, cost)
 
             state = next_state
+        
+        total_episodes += 1 
 
     if (i_episode - 9) % 100 == 0:
         try:
@@ -258,15 +260,15 @@ while True:
         if args.neural_safety:
             env_model, cost_model = get_environment_model(
                     states, actions, next_states, rewards, costs,
-                    torch.tensor(env.observation_space.low),
-                    torch.tensor(env.observation_space.high),
+                    torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
+                    torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
                     model_pieces=20, seed=args.seed, policy=agent,
                     use_neural_model=False, cost_model=cost_model)
         else:
             env_model, cost_model = get_environment_model(
                     states, actions, next_states, rewards, costs,
-                    torch.tensor(env.observation_space.low),
-                    torch.tensor(env.observation_space.high),
+                    torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
+                    torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
                     model_pieces=20, seed=args.seed, policy=None,
                     use_neural_model=False, cost_model=None)
 
@@ -281,21 +283,59 @@ while True:
 
     if total_numsteps > args.autoencoder and env.state_processor is None:
         # Write code to include autoencoder, and switch agent and environments. 
-        states, _, _, _, _, _ = \
+        states, _, _, _, _, costs = \
             real_data.sample(min(len(real_data), args.autoencoder), get_cost=True)
 
         encoder = Autoencoder(env.observation_space.shape[0], args.red_dim)
-        fit_encoder(states, encoder)
+        fit_encoder(states, costs, encoder)
         
         env.state_processor = encoder.transform
         env.safety = verification.get_constraints(encoder.encoder, env.safety)
+        # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
         env.observation_space = gym.spaces.Box(low=-1, high=1, shape=(args.red_dim,))
         agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+        
+        
+        hyperplanes = env.safety.to_hyperplanes()
+        polys = []
+        for A, b in hyperplanes:
+            # print(f"Hyperplane: {A} * x <= {b}")
+            polys.append(np.append(A, -b))
+        
+          
+        # for i in range(env.observation_space.shape[0]):
+        #     A1 = np.zeros(env.observation_space.shape[0])
+        #     A2 = np.zeros(env.observation_space.shape[0])
+        #     A1[i] = 1
+        #     A2[i] = -1
+        #     polys.append(np.append(A1, -env.observation_space.high[i]))
+        #     polys.append(np.append(A2, env.observation_space.low[i]))
+            
+        env.safe_polys = [np.array(polys)]
+        
+        polys = []
+        for A, b in hyperplanes:
+            # print(f"Hyperplane: {A} * x <= {b}")
+            polys.append(np.append(-A, b))
+        
+        
+        for i in range(env.observation_space.shape[0]):
+            A1 = np.zeros(env.observation_space.shape[0])
+            A2 = np.zeros(env.observation_space.shape[0])
+            A1[i] = 1
+            A2[i] = -1
+            polys.append(np.append(A1, -env.observation_space.high[i]))
+            polys.append(np.append(A2, env.observation_space.low[i]))
+        
+        env.polys = [np.array(polys)]
+        
+        
         safe_agent = None
-        real_data = ReplayMemory(args.replay_size, args.seed)
+        real_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
         iterator_loop = itertools.count(1)
         total_numsteps = 0
         cost_model = None
+        env_model = None
         print("Total unsafe without AE:", total_unsafe_episodes, "/", total_episodes, file=file)
         total_unsafe_episodes = 0
         total_episodes = 0
@@ -307,10 +347,12 @@ while True:
     
         
 
-    writer.add_scalar('reward/train', episode_reward, i_episode)
+    writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_reward/train', episode_reward, i_episode)
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
+    if safe_agent is not None:
+        safe_agent.reset_count()
 
     if (i_episode - 99) % 1 == 0 and args.eval is True and \
             safe_agent is not None:
@@ -320,40 +362,42 @@ while True:
         unsafe_episodes = 0
         avg_length = 0.
         shield_count = 0
+        backup_count = 0
         neural_count = 0
         for _ in range(episodes):
-            state = env.reset()
+            state, info = env.reset()
             episode_reward = 0
             done = False
             episode_steps = 0
             trajectory = [state]
             while not done:
                 action = safe_agent(state)
-
-                next_state, reward, done, _ = env.step(action)
+                next_state, reward, done, _, info = env.step(action)
                 episode_reward += reward
                 episode_steps += 1
 
                 if episode_steps >= env._max_episode_steps:
                     done = True
-                if env.unsafe(next_state):
+                if env.unsafe(info['state_original'], False):
                     print("UNSAFE")
+                    episode_reward += -1000
                     print(state, "\n",  action, "\n", next_state)
                     unsafe_episodes += 1
                     done = True
                 if done:
                     try:
-                        s, a, t = safe_agent.report()
-                        print("Finished test episode:", s, "shield and", a,
+                        s, a, b, t = safe_agent.report()
+                        print("Finished test episode:", s, "shield and", b, "backup and", a,
                               "neural")
                         shield_count+=s
+                        backup_count+=b
                         neural_count+=a
                        
-                        print("Average time:", t / (s + a))
+                        print("Average time:", t / (s + a + b))
                         safe_agent.reset_count()
-                    except Exception:
+                    except Exception as e:
+                        print(e)
                         pass
-                    break
                 state = next_state
                 trajectory.append(state)
             avg_reward += episode_reward
@@ -362,10 +406,14 @@ while True:
         avg_length /= episodes
         shield_count /= episodes
         neural_count /= episodes
-        writer.add_scalar('agent/shield', shield_count, updates)
-        writer.add_scalar('agent/neural', neural_count, updates)
+        backup_count /= episodes
+        total_unsafe_episodes+=unsafe_episodes
+        writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_agent/shield', shield_count, i_episode)
+        writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_agent/neural', neural_count, i_episode)
+        writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_agent/backup', backup_count, i_episode)
+        writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_agent/total_unsafe_episodes', total_unsafe_episodes, i_episode)
 
-        writer.add_scalar('avg_reward/test', avg_reward, i_episode)
+        writer.add_scalar(f'{"spice" if env.state_processor is None else "lspice"}_reward/test', avg_reward, i_episode)
 
         print("----------------------------------------")
         print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"
@@ -374,7 +422,11 @@ while True:
         print("----------------------------------------")
         if (i_episode - 99) % 100 == 0:
             print("Trajectory:")
-            print(trajectory)
+            print(trajectory)    
+        total_episodes += 1 
+        
+        
+        
 
 print("Total unsafe:", total_unsafe_episodes, "/", total_episodes)
 print("Total unsafe:", total_unsafe_episodes, "/", total_episodes, file=file)

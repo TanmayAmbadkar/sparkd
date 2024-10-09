@@ -99,6 +99,7 @@ class GaussianPolicy(nn.Module):
         return mean, log_std
 
     def sample(self, state):
+        state = state.double()
         mean, log_std = self.forward(state)
         std = log_std.exp()
         normal = Normal(mean, std)

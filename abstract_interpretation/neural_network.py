@@ -21,6 +21,21 @@ class ReLULayer(nn.Module):
             return x.relu()
         else:
             return torch.relu(x)
+        
+class TanhLayer(nn.Module):
+    def forward(self, x):
+        if isinstance(x, Zonotope) or isinstance(x, Box):
+            return x.tanh()
+        else:
+            return torch.tanh(x)
+        
+
+class SigmoidLayer(nn.Module):
+    def forward(self, x):
+        if isinstance(x, Zonotope) or isinstance(x, Box):
+            return x.sigmoid()
+        else:
+            return torch.sigmoid(x)
 
 class NeuralNetwork(nn.Module):
     def __init__(self, layers):

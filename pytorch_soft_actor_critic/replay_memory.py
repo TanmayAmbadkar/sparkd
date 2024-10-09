@@ -4,20 +4,23 @@ import pickle
 import os
 
 class ReplayMemory:
-    def __init__(self, capacity, seed):
+    def __init__(self, capacity, observation_space, seed):
         random.seed(seed)
         self.capacity = capacity
         self.buffer = []
         self.position = 0
+        self.observation_space = observation_space
 
     def push(self, state, action, reward, next_state, done, cost):
 
         # optional for adding noise
-        noise_level = np.random.uniform(0.40, 0.45)
+        noise_level = np.random.uniform(0.2, 0.4)
         state = state + noise_level * np.random.randn(*state.shape)
         next_state = next_state + noise_level * np.random.randn(*next_state.shape)
 
-
+        state = np.clip(state, self.observation_space.low, self.observation_space.high)
+        state = np.clip(next_state, self.observation_space.low, self.observation_space.high)
+        
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
         self.buffer[self.position] = (state, action, reward, next_state, done, cost)

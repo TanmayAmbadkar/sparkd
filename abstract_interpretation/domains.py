@@ -23,20 +23,56 @@ class Zonotope:
             new_generators.append(new_g)
         return Zonotope(new_center, new_generators)
     
+    def sigmoid(self):
+        return self._nonlinear_transform(torch.sigmoid)
+
+    def tanh(self):
+        return self._nonlinear_transform(torch.tanh)
+
+    def _nonlinear_transform(self, func):
+        new_center = func(self.center)
+
+        new_generators = []
+        for g in self.generators:
+            # Calculate lower and upper bounds of the linear approximation
+            lower = self.center - torch.norm(g, p=1)  # Approximate lower bound
+            upper = self.center + torch.norm(g, p=1)  # Approximate upper bound
+            
+            # Apply the nonlinear function to the bounds
+            func_lower = func(lower)
+            func_upper = func(upper)
+
+            # Compute slopes λ and λ'
+            lambda_ = (func_upper - func_lower) / (upper - lower + 1e-9)  # Avoid division by zero
+            lambda_prime = torch.minimum(func_lower * (1 - func_lower), func_upper * (1 - func_upper))
+
+            # Define new generators based on the slopes
+            new_g = g * torch.where(self.center > 0, lambda_, lambda_prime)
+            new_generators.append(new_g)
+
+        return Zonotope(new_center, new_generators)
+    
     def to_hyperplanes(self):
         """
         Convert the zonotope to a set of hyperplane inequalities.
         Each generator contributes two hyperplanes.
         """
-        c = self.center.numpy()
-        G = np.array([g.numpy().T for g in self.generators])
-
+        c = self.center  # Assuming center is already a NumPy array
+        G = np.array(self.generators)  # Convert the list of generators to a NumPy array
+        
         inequalities = []
         for g in G:
-            # Create two inequalities for each generator
-            inequalities.append((g, np.dot(g, c) + 1))  # Positive direction
-            inequalities.append((-g, -np.dot(g, c) + 1)) # Negative direction
+            # For each generator, create two inequalities representing the positive and negative halfspaces
+            norm_positive = np.dot(g, c) + np.linalg.norm(g)  # Positive direction bound
+            norm_negative = -np.dot(g, c) + np.linalg.norm(g)  # Negative direction bound
+            
+            # Append the inequality for the positive direction
+            inequalities.append((g, norm_positive))  # Ax <= b for positive direction
+            # Append the inequality for the negative direction
+            inequalities.append((-g, norm_negative))  # Ax <= b for negative direction
+            
         return inequalities
+
     
    
     
