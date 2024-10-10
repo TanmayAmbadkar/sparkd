@@ -1,9 +1,9 @@
-# SPICE
+# Latent-SPICE
 
 SPICE is a tool for allowing reinforcement learning agents to explore their
 environment safely, and is introduced in the paper "Guiding Safe Exploration
-with Weakest Preconditions." This repository contains the implementation of
-SPICE used for the experiments presented in that paper.
+with Weakest Preconditions." This repository contains an extension to the original paper, 
+allowing environments with larger state spaces to work wih SPICE. 
 
 ## Requirements
 
@@ -23,18 +23,12 @@ GitHub](https://github.com/scikit-learn-contrib/py-earth).
 The entry point for all experiments is `main.py`. To replicate the experiments
 from the paper, run
 
-    python main.py --env_name acc --automatic_entropy_tuning
+    python main_e2c.py --env_name bipedal_walker --num_steps 500000 --red_dim 3
 
-where `acc` may be replaced with the name of any other benchmark. To replicate
-the conservative safety critic experiments, run
-
-    python main.py --env_name acc --automatic_entropy_tuning --neural_safety
-
+where `bipedal_walker` may be replaced with the name of any other benchmark. 
 To see a full list of options, run `python main.py --help`.
 
 ## Acknowledgements
 
 The code in `pytorch_soft_actor_critic` along with `main.py` is adapted from
-<https://github.com/pranz24/pytorch-soft-actor-critic>. The implementation of
-conservative safety critics (`--neural-safety`) is based on Bharadhwaj, et.
-al., "Conservative safety critics for exploration," ICLR 2021.
+<https://github.com/pranz24/pytorch-soft-actor-critic>. 

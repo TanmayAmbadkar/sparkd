@@ -42,10 +42,9 @@ class E2CPredictor(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, u, x_next = batch
-        x = x.view(-1, self.encoder.obs_dim).double().to(self.device)
-        u = u.double().to(self.device)
-        
-        x_next = x_next.view(-1, self.encoder.obs_dim).double().to(self.device)
+        x = x.view(-1, self.encoder.obs_dim).double()
+        u = u.double()
+        x_next = x_next.view(-1, self.encoder.obs_dim).double()
 
         # Forward pass
         x_recon, x_next_pred, z_t_next, z_t_pred = self._forward_step(x, u, x_next)
@@ -56,12 +55,13 @@ class E2CPredictor(pl.LightningModule):
         loss = self.compute_loss(x, x_next, x_recon, x_next_pred, z_t_next, z_t_pred, lamda)
 
         # Log training loss
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
         return loss
 
     def _forward_step(self, x, u, x_next):
         # Step 1: Encode the current state x to get latent z_t
         z_t = self.encoder(x)
+        
         
         # Step 2: Get the latent state z_t and predict A_t, B_t, o_t
         z_t_next, A_t, B_t, o_t = self.forward(x, u)

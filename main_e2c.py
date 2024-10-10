@@ -60,14 +60,14 @@ parser.add_argument('--neural_safety', default=False, action='store_true',
                     help='Use a neural safety signal')
 parser.add_argument('--neural_threshold', type=float, default=0.1,
                     help='Safety threshold for the neural model')
-parser.add_argument('--autoencoder', type=int, default=10000000,
-                    help='Timestep to switch to autoencoder')
 parser.add_argument('--red_dim', type=int, default=4,
                     help='Reduced dimension size')
 args = parser.parse_args()
 
 print("Arguments:")
 print(args)
+hyperparams = vars(args)
+
 
 env = envs.get_env_from_name(args.env_name)
 env.seed(args.seed)
@@ -85,6 +85,7 @@ writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
+print(hyperparams)
 if not os.path.exists("logs"):
     os.makedirs("logs")
 
@@ -217,7 +218,6 @@ else:
 updates = 0
 unsafe_test_episodes = 0
 total_test_episodes = 0
-iterator_loop = itertools.count(1)
 while True:
     i_episode = next(iterator_loop)
     episode_reward = 0
@@ -520,5 +520,9 @@ while True:
 total_episodes = next(iterator_loop) - 1
 print("Total unsafe:", total_unsafe_episodes, "/", total_episodes)
 print("Total unsafe:", total_unsafe_episodes, "/", total_episodes, file=file)
-print("Total unsafe Test:", unsafe_test_episodes, "/", total_episodes)
-print("Total Test:", total_test_episodes, "/", total_episodes, file=file)
+print("Total unsafe Test:", unsafe_test_episodes, "/", total_test_episodes)
+print("Total unsafe Test:", unsafe_test_episodes, "/", total_test_episodes, file=file)
+
+
+writer.add_hparams(hparam_dict = hyperparams, metric_dict = {"Unsafe Episodes": total_unsafe_episodes, "Unsafe Test Episodes": unsafe_test_episodes,
+                                 "Total Episodes": total_episodes, "Total Test Episodes":total_test_episodes})

@@ -15,11 +15,11 @@ class ReplayMemory:
 
         # optional for adding noise
         noise_level = np.random.uniform(0.2, 0.4)
-        state = state + noise_level * np.random.randn(*state.shape)
-        next_state = next_state + noise_level * np.random.randn(*next_state.shape)
+        # state = state + noise_level * np.random.randn(*state.shape)
+        # next_state = next_state + noise_level * np.random.randn(*next_state.shape)
 
-        state = np.clip(state, self.observation_space.low, self.observation_space.high)
-        state = np.clip(next_state, self.observation_space.low, self.observation_space.high)
+        # state = np.clip(state, self.observation_space.low, self.observation_space.high)
+        # state = np.clip(next_state, self.observation_space.low, self.observation_space.high)
         
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
