@@ -12,25 +12,26 @@ class ReplayMemory:
         self.observation_space = observation_space
 
     def push(self, state, action, reward, next_state, done, cost):
-
-        # optional for adding noise
-        noise_level = np.random.uniform(0.2, 0.4)
-        # state = state + noise_level * np.random.randn(*state.shape)
-        # next_state = next_state + noise_level * np.random.randn(*next_state.shape)
-
-        # state = np.clip(state, self.observation_space.low, self.observation_space.high)
-        # state = np.clip(next_state, self.observation_space.low, self.observation_space.high)
-        
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
         self.buffer[self.position] = (state, action, reward, next_state, done, cost)
         self.position = (self.position + 1) % self.capacity
 
-    def sample(self, batch_size, get_cost=False):
+    def sample(self, batch_size, get_cost=False, remove_samples=False):
+        # Get random sample indices
+        sample_indices = random.sample(range(len(self.buffer)), batch_size)
 
-        batch = random.sample(self.buffer, batch_size)
+        # Retrieve the sampled elements
+        batch = [self.buffer[i] for i in sample_indices]
+        state, action, reward, next_state, done, cost = map(np.stack, zip(*batch))
 
-        state, action, reward, next_state, done, cost =  map(np.stack, zip(*batch))
+        # Remove the sampled elements if requested
+        if remove_samples:
+            # Create a new buffer excluding the sampled elements
+            new_buffer = [self.buffer[i] for i in range(len(self.buffer)) if i not in sample_indices]
+            self.buffer = new_buffer
+            self.position = len(self.buffer) % self.capacity
+
         if get_cost:
             return state, action, reward, next_state, done, cost
         return state, action, reward, next_state, done

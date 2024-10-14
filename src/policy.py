@@ -47,8 +47,7 @@ class SACPolicy:
 
     def load_checkpoint(self, path):
         self.agent.load_checkpoint(path)
-
-
+     
 class ProjectionPolicy:
     """
     Wrap an underlying policy in a safety layer based on prejection onto a
@@ -147,19 +146,24 @@ class ProjectionPolicy:
         return res['x'][:u_dim]
 
 
-    def solve(self, state: np.ndarray, action: Optional[np.ndarray] = None, debug: bool = False) -> np.ndarray:
+    def solve(self,    # noqa: C901
+              state: np.ndarray,
+              action: Optional[np.ndarray] = None,
+              debug: bool = False) -> np.ndarray:
         """
-        Solve the synthesis problem and store the result.
+        Solve the synthesis problem and store the result. This sets the saved
+        action and state because very often we will call unsafe and then
+        __call__ on the same state.
         """
+        
         shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
-
-        # If no proposed action, initialize action with zeros
+        # If we don't have a proposed action, look for actions with small
+        # magnitude
         if action is None:
             action = np.zeros(u_dim)
-
-        # Get the local dynamics matrices at the current point
+        # Get the local dynamics
         point = np.concatenate((state, action))
         mat, eps = self.env.get_matrix_at_point(point, s_dim)
         A = mat[:, :s_dim]
@@ -173,9 +177,9 @@ class ProjectionPolicy:
             P = poly[:, :-1]
             b = poly[:, -1]
             if not np.all(np.dot(P, state) + b <= 0.0):
-                continue  # We are not starting in this polytope
-
-            # Generate safety constraints
+                # We are not starting in this polytope so we can skip it
+                continue
+            # Generate the safety constraints
             F = []
             G = []
             h = []
@@ -183,73 +187,93 @@ class ProjectionPolicy:
                 F.append([None] * (j + 1))
                 G.append([None] * (j + 1))
                 h.append([None] * (j + 1))
-                F[j - 1][j] = P
-                G[j - 1][j] = np.zeros((b.shape[0], u_dim))
-                h[j - 1][j] = b
+                F[j-1][j] = P
+                G[j-1][j] = np.zeros((b.shape[0], u_dim))
+                h[j-1][j] = b
                 for t in range(j - 1, -1, -1):
-                    F[j - 1][t] = np.dot(F[j - 1][t + 1], A)
-                    G[j - 1][t] = np.dot(F[j - 1][t + 1], B)
-                    epsmax = np.dot(np.abs(F[j - 1][t + 1]), eps)
-                    h[j - 1][t] = np.dot(F[j - 1][t + 1], c) + h[j - 1][t + 1] + epsmax
-
-            # Create the matrix for the constraints
-            mat = np.zeros((self.horizon * P.shape[0] + 2 * self.horizon * u_dim, self.horizon * u_dim))
-            bias = np.zeros(self.horizon * P.shape[0] + 2 * self.horizon * u_dim)
+                    # At each time step, we need to propogate the previous
+                    # constraint backwards (see Google Doc) and add a new
+                    # constraint. The new constraint is P x_t + b <= 0
+                    F[j-1][t] = np.dot(F[j-1][t+1], A)
+                    G[j-1][t] = np.dot(F[j-1][t+1], B)
+                    # \eps is an interval so abs(F) \eps gives the maximum
+                    # value of F e for e \in \eps
+                    epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
+                    h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1] + epsmax
+            # Now for an action sequence u_0, ..., u_{H-1}, we have that x_i
+            # is safe if
+            # F[i][0] x_0 + \sum_{t=0}^{h-1} G[i][t] u_t + h[i][0] <= 0
+            # So we need to assert this constraint for all 1 <= i <= H
+            mat = np.zeros((self.horizon * P.shape[0] +
+                            2 * self.horizon * u_dim,
+                            self.horizon * u_dim))
+            bias = np.zeros(self.horizon * P.shape[0] +
+                            2 * self.horizon * u_dim)
             ind = 0
             step = P.shape[0]
             for j in range(self.horizon):
-                G[j] += [np.zeros((P.shape[0], u_dim))] * (self.horizon - j - 1)
-                mat[ind:ind + step, :] = np.concatenate(G[j][:-1], axis=1)
-                bias[ind:ind + step] = h[j][0] + np.dot(F[j][0], state)
+                G[j] += [np.zeros((P.shape[0], u_dim))] * \
+                    (self.horizon - j - 1)
+                # G[j] = [np.zeros((P.shape[0], u_dim))] * (self.horizon + 1)
+                mat[ind:ind+step, :] = np.concatenate(G[j][:-1], axis=1)
+                bias[ind:ind+step] = h[j][0] + np.dot(F[j][0], state)
+                # bias[ind:ind+step] = -np.ones(step)
                 ind += step
 
             # Add action bounds
             ind2 = 0
             for j in range(self.horizon):
-                mat[ind:ind + u_dim, ind2:ind2 + u_dim] = np.eye(u_dim)
-                bias[ind:ind + u_dim] = -self.action_space.high
+                mat[ind:ind+u_dim, ind2:ind2+u_dim] = np.eye(u_dim)
+                bias[ind:ind+u_dim] = -self.action_space.high
                 ind += u_dim
-                mat[ind:ind + u_dim, ind2:ind2 + u_dim] = -np.eye(u_dim)
-                bias[ind:ind + u_dim] = self.action_space.low
+                mat[ind:ind+u_dim, ind2:ind2+u_dim] = -np.eye(u_dim)
+                bias[ind:ind+u_dim] = self.action_space.low
                 ind += u_dim
                 ind2 += u_dim
 
-            # Now define the QP problem
-            # Regularize P by adding epsilon to its diagonal
-            epsilon = 1e-4  # Small regularization term
-            P_matrix = 1e-4 * np.eye(self.horizon * u_dim)  # Original small regularization
-            P_matrix[:u_dim, :u_dim] = np.eye(u_dim)
-            P_matrix += epsilon * np.eye(self.horizon * u_dim)  # Adding regularization to the diagonal
-
-            P = cvxopt.matrix(P_matrix)
+            # Now we satisfy the constraints whenever
+            # mat (u_1 u_2 ... u_H)^T + bias <= 0
+            # Our objective is || u* - u_0 ||^2 = (u* - u_0)^T (u* - u_0)
+            # = u*T u* - 2 u*^T u_0 + u_0^T u_0
+            # Since u*^T u* is constant we can leave it out
+            # That means we want P to be [[I 0] [0 0]] the objective has a 0.5
+            # coefficient on u^T P u, so we use q = -u* rather than q = -2 u^*
+            # rather than adding a factor of 2 to P.
+            P = np.eye(self.horizon * u_dim)
+            P[:u_dim, :u_dim] = np.eye(u_dim)
+            P += np.eye(self.horizon * u_dim) * 1e-4
+            
+            P = cvxopt.matrix(P)
             q = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))
             q = cvxopt.matrix(q)
             G = cvxopt.matrix(mat)
             h = cvxopt.matrix(-bias)
-
             try:
                 sol = cvxopt.solvers.qp(P, q, G, h)
             except Exception as e:
+                # This seems to happen when the primal problem is infeasible
+                # sometimes
                 sol = {'status': 'infeasible'}
+                # print("SOLVER:", sol)
                 continue
 
             if sol['status'] != 'optimal':
-                continue  # Problem is infeasible or solver failed
-
-            # Extract the optimal action from the solution
+                # Infeasible or unsolvable problem
+                # print("SOLVER not OPTIMAL")
+                continue
             u0 = np.asarray(sol['x'][:u_dim]).squeeze()
             if len(u0.shape) == 0:
-                u0 = u0[None]  # Ensure correct shape if it gets squeezed to a scalar
-
+                # Squeeze breaks one-dimensional actions
+                u0 = u0[None]
             score = np.linalg.norm(u0 - action)
             if score < best_score:
                 best_score = score
                 best_u0 = u0
 
-        # If no feasible action is found, fall back to a backup action
         if best_u0 is None:
             best_u0 = self.backup(state)
             shielded = False
+            # best_u0 = action
 
         self.saved_state = state
         self.saved_action = best_u0

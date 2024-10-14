@@ -95,9 +95,10 @@ file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
 
 # Memory
 real_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
+e2c_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
 
-total_unsafe_episodes = 0
-total_episodes = 0
+real_unsafe_episodes = 0
+total_real_episodes = 0
 total_numsteps = 0
 
 
@@ -125,7 +126,7 @@ while total_numsteps < args.start_steps:
 
         cost = 0
         if env.unsafe(next_state, False):
-            total_unsafe_episodes += 1
+            real_unsafe_episodes += 1
             episode_reward -= 1000
             print("UNSAFE (outside testing)", next_state)
             done = True
@@ -150,8 +151,18 @@ while total_numsteps < args.start_steps:
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
     
+    total_real_episodes += 1
+    
 states, actions, rewards, next_states, dones, costs = \
-    real_data.sample(args.start_steps, get_cost=True)
+    real_data.sample(args.start_steps, get_cost=True, remove_samples = True)
+
+for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+    e2c_data.push(state, action, rewards, next_state, mask, cost)
+
+# print("E2C DATA", len(e2c_data))
+
+states, actions, rewards, next_states, dones, costs = \
+    e2c_data.sample(args.start_steps, get_cost=True)
     
 env.observation_space = gym.spaces.Box(low=-1, high=1, shape=(args.red_dim,))
 agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
@@ -218,6 +229,8 @@ else:
 updates = 0
 unsafe_test_episodes = 0
 total_test_episodes = 0
+unsafe_sim_episodes = 0
+total_sim_episodes = 0
 while True:
     i_episode = next(iterator_loop)
     episode_reward = 0
@@ -258,7 +271,7 @@ while True:
 
             cost = 0
             if env.unsafe(info['state_original'], False):
-                total_unsafe_episodes += 1
+                real_unsafe_episodes += 1
                 episode_reward -= 1000
                 print("UNSAFE (outside testing)", next_state)
                 done = True
@@ -306,7 +319,7 @@ while True:
             except Exception:
                 pass
         
-        # total_episodes += 1 
+        total_real_episodes += 1 
 
     else:
         print(i_episode, ": Simulated data")
@@ -346,7 +359,7 @@ while True:
             cost = 0
             if env.unsafe(next_state, True):
                 print(next_state)
-                total_unsafe_episodes += 1
+                unsafe_sim_episodes += 1
                 episode_reward -= 1000
                 done = True
                 cost = 1
@@ -361,12 +374,29 @@ while True:
 
             state = next_state
         
-        # total_episodes += 1 
+        total_sim_episodes += 1 
 
     if (i_episode - 9) % 100 == 0:
         try:
+            
+            
             states, actions, rewards, next_states, dones, costs = \
-                real_data.sample(min(len(real_data), 100000), get_cost=True)
+                real_data.sample(min(len(real_data), 70000), get_cost=True, removes_samples = True)
+                
+            states_e2c, actions_e2c, rewards_e2c, next_states_e2c, dones_e2c, costs_e2c = \
+                real_data.sample(min(len(real_data), 30000), get_cost=True)
+                
+            
+            for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+                e2c_data.push(state, action, rewards, next_state, mask, cost)
+                
+            states = np.vstack([states, states_e2c])
+            actions = np.vstack([actions, actions_e2c])
+            rewards = np.vstack([rewards, rewards_e2c])
+            next_states = np.vstack([next_states, next_states_e2c])
+            dones = np.vstack([dones, dones_e2c])
+            costs = np.vstack([costs, costs_e2c])
+            
         except:
             continue
         
@@ -498,10 +528,12 @@ while True:
         writer.add_scalar(f'agent/shield', shield_count, i_episode)
         writer.add_scalar(f'agent/neural', neural_count, i_episode)
         writer.add_scalar(f'agent/backup', backup_count, i_episode)
-        writer.add_scalar(f'agent/total_unsafe_episodes', total_unsafe_episodes, i_episode)
-        writer.add_scalar(f'agent/total_unsafe_episodes_ratio', total_unsafe_episodes/i_episode, i_episode)
-        writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, i_episode)
-        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', unsafe_test_episodes/total_test_episodes, i_episode)
+        writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_real_episodes)
+        writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_real_episodes)
+        writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_sim_episodes)
+        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', unsafe_sim_episodes/total_sim_episodes, total_sim_episodes)
+        writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_test_episodes)
+        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', unsafe_test_episodes/total_test_episodes, total_test_episodes)
 
         writer.add_scalar(f'reward/test', avg_reward, i_episode)
 
@@ -518,11 +550,22 @@ while True:
         
         
 total_episodes = next(iterator_loop) - 1
-print("Total unsafe:", total_unsafe_episodes, "/", total_episodes)
-print("Total unsafe:", total_unsafe_episodes, "/", total_episodes, file=file)
+print("Total unsafe real:", real_unsafe_episodes, "/", total_real_episodes)
+print("Total unsafe real:", real_unsafe_episodes, "/", total_real_episodes, file=file)
+print("Total unsafe sim:", unsafe_sim_episodes, "/", total_sim_episodes)
+print("Total unsafe sim:", unsafe_sim_episodes, "/", total_sim_episodes, file=file)
 print("Total unsafe Test:", unsafe_test_episodes, "/", total_test_episodes)
 print("Total unsafe Test:", unsafe_test_episodes, "/", total_test_episodes, file=file)
 
 
-writer.add_hparams(hparam_dict = hyperparams, metric_dict = {"Unsafe Episodes": total_unsafe_episodes, "Unsafe Test Episodes": unsafe_test_episodes,
-                                 "Total Episodes": total_episodes, "Total Test Episodes":total_test_episodes})
+writer.add_hparams(
+    hparam_dict = hyperparams, 
+    metric_dict = {
+        "Unsafe Real Episodes": real_unsafe_episodes, 
+        "Unsafe Sim Episodes": unsafe_sim_episodes, 
+        "Unsafe Test Episodes": unsafe_test_episodes,
+        "Total Real Episodes": total_real_episodes, 
+        "Total Sim Episodes": total_sim_episodes, 
+        "Total Test Episodes":total_test_episodes
+    }
+)
