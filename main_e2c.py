@@ -181,7 +181,7 @@ else:
             torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
             torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
             model_pieces=20, seed=args.seed, policy=None,
-            use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim)
+            use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon)
 
 env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
 # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
@@ -222,7 +222,14 @@ else:
         env_model.get_symbolic_model(), env.observation_space,
         env.action_space, args.horizon, env.polys, env.safe_polys)
     safe_agent = Shield(shield, agent)
-    
+
+# Push collected training data to agent
+
+
+for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+    agent.add(env_model.mars.e2c_predictor.transform(state), action, rewards, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
+
+
     
 # Start main training
 
@@ -414,7 +421,7 @@ while True:
                     torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
                     torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
                     model_pieces=20, seed=args.seed, policy=None,
-                    use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim)
+                    use_neural_model=False, cost_model=None, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon)
     
         env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
         # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
@@ -531,9 +538,9 @@ while True:
         writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_real_episodes)
         writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_real_episodes)
         writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_sim_episodes)
-        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', unsafe_sim_episodes/total_sim_episodes, total_sim_episodes)
+        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_sim_episodes)
         writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_test_episodes)
-        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', unsafe_test_episodes/total_test_episodes, total_test_episodes)
+        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_test_episodes)
 
         writer.add_scalar(f'reward/test', avg_reward, i_episode)
 

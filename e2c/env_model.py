@@ -185,6 +185,7 @@ def get_environment_model(     # noqa: C901
         data_stddev: float = 0.01,
         model_pieces: int = 10,
         latent_dim: int = 4,
+        horizon: int = 5,
         e2c_predictor = None) -> EnvModel:
     """
     Get a neurosymbolic model of the environment.
@@ -206,9 +207,9 @@ def get_environment_model(     # noqa: C901
     """
 
     
-    
-    e2c_predictor = E2CPredictor(input_states.shape[1], latent_dim, actions.shape[1])
-    fit_e2c(input_states, actions, output_states, e2c_predictor)
+    if e2c_predictor is None:
+        e2c_predictor = E2CPredictor(input_states.shape[1], latent_dim, actions.shape[1], horizon = horizon)
+    fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon)
 
     
     input_states = e2c_predictor.transform(input_states)
@@ -232,6 +233,8 @@ def get_environment_model(     # noqa: C901
     
     X = np.concatenate((input_states, actions), axis=1)
     Yh = np.array([parsed_mars(state, normalized=True) for state in X]).reshape(input_states.shape[0], -1)
+    
+    print("Model estimation error:", np.mean((Yh - output_states)**2))
 
     
     input_states = (input_states - states_mean) / states_std

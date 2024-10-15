@@ -31,44 +31,40 @@ class LunarLanderEnv(gym.Env):
 
         generators = []
 
-        # Horizontal position constraint (x)
+        # Horizontal position constraint (x) - relaxed
         x_gen = np.zeros(self.observation_space.shape[0])
-        x_gen[0] = 0.75
+        x_gen[0] = 1.0  # Increased from 0.75 to 1.0
         generators.append(x_gen)
 
-        # Vertical position constraint (y)
+        # Vertical position constraint (y) - relaxed
         y_gen = np.zeros(self.observation_space.shape[0])
-        center[1] = 0.75  # Safe height above ground
-        y_gen[1] = 0.75
+        center[1] = 1.0  # Safe height above ground, increased from 0.75 to 1.0
+        y_gen[1] = 1.0
         generators.append(y_gen)
 
-        # Horizontal velocity constraint (vx)
+        # Horizontal velocity constraint (vx) - relaxed
         vx_gen = np.zeros(self.observation_space.shape[0])
-        vx_gen[2] = 0.5  # Limit horizontal drift speed
+        vx_gen[2] = 1.0  # Increased from 0.5 to 0.75
         generators.append(vx_gen)
 
-        # Vertical velocity constraint (vy)
+        # Vertical velocity constraint (vy) - relaxed
         vy_gen = np.zeros(self.observation_space.shape[0])
         center[3] = -0.2  # Descent speed
-        vy_gen[3] = 0.5   # Prevent rapid descent
+        vy_gen[3] = 1.0   # Increased from 0.5 to 0.75
         generators.append(vy_gen)
 
-        # Angle constraint (theta)
+        # Angle constraint (theta) - relaxed
         angle_gen = np.zeros(self.observation_space.shape[0])
-        angle_gen[4] = 0.4  # Slight tilting allowed
+        angle_gen[4] = 1.0  # Increased from 0.4 to 0.6
         generators.append(angle_gen)
 
-        # Angular velocity constraint (omega)
+        # Angular velocity constraint (omega) - relaxed
         angular_velocity_gen = np.zeros(self.observation_space.shape[0])
-        angular_velocity_gen[5] = 0.3  # Limit rotational speed
+        angular_velocity_gen[5] = 1.0  # Increased from 0.3 to 0.5
         generators.append(angular_velocity_gen)
-
-        # Additional generators for other dimensions can be added if necessary
-        # Example: small perturbations in other dimensions
 
         polys = []
         for i, gen in enumerate(generators):
-            
             cen = center[i]
             bound = gen[i]
             A1 = np.zeros(self.observation_space.shape[0])
@@ -77,27 +73,27 @@ class LunarLanderEnv(gym.Env):
             A2[i] = -1
             polys.append(np.append(A1, -(cen + bound)))
             polys.append(np.append(A2, (cen - bound)))
-             
-        
+
         for i in range(self.observation_space.shape[0]):
             if i not in [0, 1, 2, 3, 4, 5]:
                 gen = np.zeros(self.observation_space.shape[0])
                 gen[i] = (obs_space_upper[i] - obs_space_lower[i]) / 2
                 generators.append(gen)
-                
+
                 A1 = np.zeros(self.observation_space.shape[0])
                 A2 = np.zeros(self.observation_space.shape[0])
                 A1[i] = 1
                 A2[i] = -1
                 polys.append(np.append(A1, -obs_space_upper[i]))
                 polys.append(np.append(A2, obs_space_lower[i]))
-                
+
         input_zonotope = domains.Zonotope(center, generators)
-        
+
         self.original_safe_polys = [np.array(polys)]
         self.safe_polys = [np.array(polys)]
         self.safety = input_zonotope
         self.original_safety = input_zonotope
+
         
         
     def unsafe_constraints(self):

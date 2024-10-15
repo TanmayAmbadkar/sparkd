@@ -1,208 +1,126 @@
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
-# import torch.optim as optim
-# from torch.distributions import Beta, Normal
-# import numpy as np
-# import gym
-# from collections import deque
-# from ppo.utils import *
-# # PPO Agent Definition
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
 
-# class PPOAgent:
-#     def __init__(
-#         self,
-#         state_dim,
-#         action_dim,
-#         net_width=64,
-#         lr=3e-4,
-#         gamma=0.99,
-#         lam=0.95,
-#         clip_epsilon=0.2,
-#         update_epochs=10,
-#         minibatch_size=64,
-#         entropy_coef=0.0,
-#         value_coef=0.5,
-#         max_grad_norm=0.5,
-#         use_gpu=False
-#     ):
-#         self.device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
+# Actor-Critic Model
+class ActorCritic(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_dim):
+        super(ActorCritic, self).__init__()
+        # Actor network
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+            nn.Softmax(dim=-1)
+        )
+        # Critic network
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
 
-#         # Initialize the actor and critic networks
-#         self.actor = GaussianActor_mu(state_dim, action_dim, net_width).to(self.device)
-#         self.critic = Critic(state_dim, net_width).to(self.device)
+    def forward(self, state):
+        action_probs = self.actor(state)
+        value = self.critic(state)
+        return action_probs, value
 
-#         # Optimizers
-#         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
-#         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
 
-#         # Hyperparameters
-#         self.gamma = gamma
-#         self.lam = lam
-#         self.clip_epsilon = clip_epsilon
-#         self.update_epochs = update_epochs
-#         self.minibatch_size = minibatch_size
-#         self.entropy_coef = entropy_coef
-#         self.value_coef = value_coef
-#         self.max_grad_norm = max_grad_norm
+# PPO Agent
+class PPOAgent:
+    def __init__(self, state_dim, action_dim, hidden_dim = 64, clip_param=0.2, lr=3e-4, gamma=0.99, gae_lambda=0.95, epochs=10, batch_size=128):
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+        self.clip_param = clip_param
+        self.epochs = epochs
+        self.batch_size = batch_size
 
-#         # Storage for training
-#         self.states = []
-#         self.actions = []
-#         self.log_probs = []
-#         self.rewards = []
-#         self.masks = []
-#         self.values = []
+        self.model = ActorCritic(state_dim, action_dim, hidden_dim=hidden_dim)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.old_model = ActorCritic(state_dim, action_dim, hidden_dim=hidden_dim)
+        self.old_model.load_state_dict(self.model.state_dict())
 
-#     def select_action(self, state):
-#         state_tensor = torch.FloatTensor(state).to(self.device)
-#         dist = self.actor.get_dist(state_tensor)
-#         value = self.critic(state_tensor)
-#         action = dist.sample()
-#         action = action.clamp(-1.0, 1.0)  # Assuming action space is between -1 and 1
-#         log_prob = dist.log_prob(action).sum(dim=-1)
-#         return action.cpu().detach().numpy(), log_prob.cpu().detach().numpy(), value.cpu().detach().numpy()
+    def action(self, state):
+        state = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
+            action_probs, _ = self.model(state)
+        dist = torch.distributions.Categorical(action_probs)
+        action = dist.sample()
+        log_prob = dist.log_prob(action).item()
+        return action.item(), log_prob
+    
+    def select_action(self, state):
+        action, log_prob = self.action(state)
+        return action
 
-#     def store_transition(self, state, action, reward, log_prob, value, mask):
-#         self.states.append(state)
-#         self.actions.append(action)
-#         self.rewards.append(reward)
-#         self.log_probs.append(log_prob)
-#         self.values.append(value)
-#         self.masks.append(mask)
 
-#     def compute_returns_and_advantages(self, next_value):
-#         rewards = []
-#         gae = 0
-#         values = self.values + [next_value]
-#         for step in reversed(range(len(self.rewards))):
-#             delta = self.rewards[step] + self.gamma * values[step + 1] * self.masks[step] - values[step]
-#             gae = delta + self.gamma * self.lam * self.masks[step] * gae
-#             rewards.insert(0, gae + values[step])
-#         return rewards
+    def compute_advantages(self, rewards, values, dones):
+        advantages = []
+        gae = 0
+        for i in reversed(range(len(rewards))):
+            delta = rewards[i] + self.gamma * values[i + 1] * (1 - dones[i]) - values[i]
+            gae = delta + self.gamma * self.gae_lambda * (1 - dones[i]) * gae
+            advantages.insert(0, gae)
+        return advantages
 
-#     def update(self):
-#         # Convert buffers to tensors
-#         states = torch.FloatTensor(self.states).to(self.device)
-#         actions = torch.FloatTensor(self.actions).to(self.device)
-#         old_log_probs = torch.FloatTensor(self.log_probs).to(self.device)
-#         returns = torch.FloatTensor(self.compute_returns_and_advantages(next_value=0)).to(self.device)
-#         advantages = returns - torch.FloatTensor(self.values).to(self.device)
+    def optimize(self, memory):
+        states, actions, rewards, next_states, dones = memory.sample(len(memory))
+        
+        
+        states = torch.FloatTensor(states)
+        actions = torch.LongTensor(actions)
+        rewards = torch.FloatTensor(rewards)
+        next_states = torch.FloatTensor(next_states)
+        dones = torch.FloatTensor(dones)
+        old_log_probs = torch.FloatTensor(log_probs)
 
-#         # Normalize advantages
-#         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        _, values = self.old_model(states)
+        _, next_values = self.old_model(next_states)
+        values = values.squeeze()
+        next_values = next_values.squeeze()
 
-#         # PPO Update
-#         for _ in range(self.update_epochs):
-#             for idx in self.mini_batch_generator(len(self.states)):
-#                 sampled_states = states[idx]
-#                 sampled_actions = actions[idx]
-#                 sampled_old_log_probs = old_log_probs[idx]
-#                 sampled_returns = returns[idx]
-#                 sampled_advantages = advantages[idx]
+        advantages = self.compute_advantages(rewards, values.detach().numpy(), dones)
+        advantages = torch.FloatTensor(advantages)
 
-#                 dist = self.actor.get_dist(sampled_states)
-#                 entropy = dist.entropy().mean()
-#                 new_log_probs = dist.log_prob(sampled_actions).sum(dim=-1)
-#                 ratio = torch.exp(new_log_probs - sampled_old_log_probs)
+        returns = advantages + values
 
-#                 # Surrogate loss
-#                 surr1 = ratio * sampled_advantages
-#                 surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * sampled_advantages
-#                 actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy
+        for _ in range(self.epochs):
+            for batch_start in range(0, len(states), self.batch_size):
+                batch_end = batch_start + self.batch_size
+                batch_indices = slice(batch_start, batch_end)
+                
+                # Get batches
+                state_batch = states[batch_indices]
+                action_batch = actions[batch_indices]
+                return_batch = returns[batch_indices]
+                advantage_batch = advantages[batch_indices].detach()
+                old_log_prob_batch = old_log_probs[batch_indices].detach()
 
-#                 # Value function loss
-#                 value = self.critic(sampled_states).squeeze()
-#                 critic_loss = self.value_coef * F.mse_loss(value, sampled_returns)
+                # Calculate current policy and value
+                action_probs, values = self.model(state_batch)
+                dist = torch.distributions.Categorical(action_probs)
+                log_probs = dist.log_prob(action_batch)
 
-#                 # Update actor
-#                 self.actor_optimizer.zero_grad()
-#                 actor_loss.backward()
-#                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-#                 self.actor_optimizer.step()
+                # Calculate ratio
+                ratios = torch.exp(log_probs - old_log_prob_batch)
 
-#                 # Update critic
-#                 self.critic_optimizer.zero_grad()
-#                 critic_loss.backward()
-#                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-#                 self.critic_optimizer.step()
+                # Clip the ratio to avoid large policy updates
+                surr1 = ratios * advantage_batch
+                surr2 = torch.clamp(ratios, 1.0 - self.clip_param, 1.0 + self.clip_param) * advantage_batch
+                policy_loss = -torch.min(surr1, surr2).mean()
 
-#         # Clear storage
-#         self.states = []
-#         self.actions = []
-#         self.log_probs = []
-#         self.rewards = []
-#         self.masks = []
-#         self.values = []
+                # Value loss
+                value_loss = (return_batch - values.squeeze()).pow(2).mean()
 
-#     def mini_batch_generator(self, batch_size):
-#         indices = np.arange(batch_size)
-#         np.random.shuffle(indices)
-#         for start_idx in range(0, batch_size, self.minibatch_size):
-#             end_idx = start_idx + self.minibatch_size
-#             yield indices[start_idx:end_idx]
+                # Total loss
+                loss = policy_loss + 0.5 * value_loss
 
-#     def train(self, env, total_timesteps, log_interval=10):
-#         timestep = 0
-#         episode_rewards = deque(maxlen=10)
-#         state = env.reset()
-#         episode_reward = 0
-#         episode_length = 0
+                # Update the model
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
 
-#         while timestep < total_timesteps:
-#             action, log_prob, value = self.select_action(state)
-#             next_state, reward, done, _ = env.step(action)
-#             mask = 0 if done else 1
-#             self.store_transition(state, action, reward, log_prob, value, mask)
+        # Update the old model after training
+        self.old_model.load_state_dict(self.model.state_dict())
 
-#             state = next_state
-#             episode_reward += reward
-#             episode_length += 1
-#             timestep += 1
-
-#             if done:
-#                 state = env.reset()
-#                 episode_rewards.append(episode_reward)
-#                 episode_reward = 0
-#                 episode_length = 0
-
-#             # Update agent after collecting a batch of data
-#             if len(self.states) >= self.minibatch_size:
-#                 with torch.no_grad():
-#                     next_state_tensor = torch.FloatTensor(next_state).to(self.device)
-#                     next_value = self.critic(next_state_tensor).cpu().numpy()
-#                 self.update()
-
-#             # Logging
-#             if timestep % (log_interval * self.minibatch_size) == 0:
-#                 avg_reward = np.mean(episode_rewards) if episode_rewards else 0
-#                 print(f"Time step: {timestep}, Average Reward: {avg_reward:.2f}")
-
-# # Training Loop Example
-
-# if __name__ == "__main__":
-#     # Create environment
-#     env = gym.make('Pendulum-v1')  # Continuous action space between -1 and 1
-#     state_dim = env.observation_space.shape[0]
-#     action_dim = env.action_space.shape[0]
-
-#     # Initialize agent
-#     agent = PPOAgent(
-#         state_dim=state_dim,
-#         action_dim=action_dim,
-#         net_width=64,
-#         lr=3e-4,
-#         gamma=0.99,
-#         lam=0.95,
-#         clip_epsilon=0.2,
-#         update_epochs=10,
-#         minibatch_size=64,
-#         entropy_coef=0.0,
-#         value_coef=0.5,
-#         max_grad_norm=0.5,
-#         use_gpu=False  # Set to True if you have a CUDA-compatible GPU
-#     )
-
-#     # Train the agent
-#     total_timesteps = 1_000_000
-#     agent.train(env, total_timesteps)
