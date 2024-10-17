@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from e2c.networks import Encoder, Transition, Decoder
 
@@ -10,9 +11,9 @@ class E2CPredictor(pl.LightningModule):
         super(E2CPredictor, self).__init__()
         self.encoder = Encoder(n_features, z_dim)
         transition_net = nn.Sequential(
-            nn.Linear(z_dim, 64),
+            nn.Linear(z_dim, 12),
             nn.Tanh(),
-            nn.Linear(64, 32),
+            nn.Linear(12, 12),
             nn.Tanh(),
         )
         self.transition = Transition(transition_net, z_dim, u_dim)
@@ -22,6 +23,8 @@ class E2CPredictor(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.horizon = horizon
+        self.states_mean = None
+        self.states_std = None
 
     def forward(self, x_t, u_t=None):
         """
@@ -68,18 +71,19 @@ class E2CPredictor(pl.LightningModule):
         z_t_next = []
         x_recon = []
         x_next_recon = []
-        for idx in range(x.shape[0]):
-            z_t.append(self.encoder(x[idx]))
-            z_t_next.append(self.encoder(x_next[idx]))
-            x_recon.append(self.decoder(z_t[idx]))
-            x_next_recon.append(self.decoder(z_t[idx]))
-            
+        with torch.no_grad():
+            for idx in range(x.shape[0]):
+                z_t.append(self.encoder(x[idx]))
+                z_t_next.append(self.encoder(x_next[idx]))
+                x_recon.append(self.decoder(z_t[idx]))
+                x_next_recon.append(self.decoder(z_t[idx]))
+                
         z_t = torch.stack(z_t)
         z_t_next = torch.stack(z_t_next)
         x_recon = torch.stack(x_recon)
         x_next_recon = torch.stack(x_next_recon)
         
-        return z_t, z_t_next, F.mse_loss(x, x_recon) + F.mse_loss(x_next, x_next_recon)
+        return z_t, z_t_next, F.mse_loss(x[:,1], self.decoder(self.encoder(x[:,1]))) + F.mse_loss(x_next[:,1], self.decoder(self.encoder(x_next[:,1])))
         
     
     def _forward_transition_step(self, z_t, u, z_t_next, x_next):
@@ -106,6 +110,7 @@ class E2CPredictor(pl.LightningModule):
         return optimizer
     
     def transform(self, x):
+        # x = (torch.tensor(x).double() - self.states_mean)/self.states_std
         x = torch.tensor(x).double()
         with torch.no_grad():
             z_t = self.encoder(x)
@@ -137,6 +142,14 @@ class E2CDataset(Dataset):
         self.actions = actions
         self.next_states = next_states
         self.horizon = horizon
+        
+        self.states_mean = np.concatenate((states, next_states),
+                                 axis=0).mean(axis=0)
+        self.states_std = np.maximum(np.concatenate((states, next_states),
+                                           axis=0).std(axis=0), 1e-5)
+        
+        # self.states = (self.states - self.states_mean)/self.states_std
+        # self.next_states = (self.next_states - self.states_mean)/self.states_std
 
     def __len__(self):
         return len(self.states) - self.horizon
@@ -164,9 +177,11 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
     """
     dataset = E2CDataset(states, actions, next_states, horizon)
     train_loader = DataLoader(dataset, batch_size=128, shuffle=True)
+    e2c_predictor.states_mean = dataset.states_mean
+    e2c_predictor.states_std = dataset.states_std
 
     # Initialize the trainer
-    trainer = pl.Trainer(max_epochs=30, accelerator="cpu")
+    trainer = pl.Trainer(max_epochs=20, accelerator="cpu")
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)

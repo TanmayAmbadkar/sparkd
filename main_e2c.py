@@ -126,10 +126,10 @@ while total_numsteps < args.start_steps:
 
         cost = 0
         if env.unsafe(next_state, False):
-            real_unsafe_episodes += 1
+            # real_unsafe_episodes += 1
             episode_reward -= 1000
             print("UNSAFE (outside testing)", next_state)
-            done = True
+            # done = True
             cost = 1
 
         real_buffer.append((state, action, reward, next_state, done,
@@ -151,7 +151,7 @@ while total_numsteps < args.start_steps:
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
     
-    total_real_episodes += 1
+    # total_real_episodes += 1
     
 states, actions, rewards, next_states, dones, costs = \
     real_data.sample(args.start_steps, get_cost=True, remove_samples = True)
@@ -536,11 +536,11 @@ while True:
         writer.add_scalar(f'agent/neural', neural_count, i_episode)
         writer.add_scalar(f'agent/backup', backup_count, i_episode)
         writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_real_episodes)
-        writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_real_episodes)
+        # writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_real_episodes)
         writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_sim_episodes)
-        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_sim_episodes)
+        # writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_sim_episodes)
         writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_test_episodes)
-        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_test_episodes)
+        # writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_test_episodes)
 
         writer.add_scalar(f'reward/test', avg_reward, i_episode)
 
