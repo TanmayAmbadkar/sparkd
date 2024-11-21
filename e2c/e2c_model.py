@@ -10,9 +10,9 @@ class E2CPredictor(pl.LightningModule):
         super(E2CPredictor, self).__init__()
         self.encoder = Encoder(n_features, z_dim)
         transition_net = nn.Sequential(
-            nn.Linear(z_dim, 64),
+            nn.Linear(z_dim, 32),
             nn.Tanh(),
-            nn.Linear(64, 32),
+            nn.Linear(32, 12),
             nn.Tanh(),
         )
         self.transition = Transition(transition_net, z_dim, u_dim)
@@ -59,7 +59,9 @@ class E2CPredictor(pl.LightningModule):
 
         # Log training loss
         loss = ae_loss + transition_loss
-        self.log('train_loss', loss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        self.log('train_loss', loss, prog_bar=True, logger=True, on_epoch=True)
+        self.log('ae_loss', ae_loss, prog_bar=True, logger=True, on_epoch=True)
+        self.log('tran_loss', transition_loss, prog_bar=True, logger=True, on_epoch=True)
         return loss
 
     def _forward_ae_step(self, x, x_next):
@@ -112,6 +114,13 @@ class E2CPredictor(pl.LightningModule):
         
         return z_t.numpy()
     
+    def inverse_transform(self, x):
+        x = torch.tensor(x).double()
+        with torch.no_grad():
+            z_t = self.decoder(x)
+        
+        return z_t.numpy()
+    
     def get_next_state(self, x, u):
         x = torch.tensor(x).double()
         u = torch.tensor(u).double()
@@ -150,6 +159,30 @@ class E2CDataset(Dataset):
         next_state = torch.tensor(self.next_states[idx:idx + self.horizon], dtype=torch.float32)
         
         return (state, action, next_state)
+    
+def verify_e2c(e2c_predictor, states, actions, next_states):
+    
+    recon_error = 0
+    states = torch.tensor(states).double()
+    actions = torch.tensor(actions).double()
+    next_states = torch.tensor(next_states).double()
+    with torch.no_grad():
+        recon = e2c_predictor.decoder(e2c_predictor.encoder(states))
+        print(recon.shape)
+        print(states.shape)
+        recon_error = F.mse_loss(states, recon).item()
+        print("RECONSTRUCTION ERROR:", recon_error)
+        
+    with torch.no_grad():
+        
+        enc_state = e2c_predictor.encoder(states)
+        trans_enc_next_state, _, _, _ = e2c_predictor.transition(enc_state, actions)
+        enc_next_state = e2c_predictor.encoder(next_states)
+        print("Transition error:", F.mse_loss(trans_enc_next_state, enc_next_state))
+        dec_next_state = e2c_predictor.decoder(trans_enc_next_state)
+        print("Reconstructed transition states error:", F.mse_loss(next_states, dec_next_state))
+        
+        
 
 
 # Fit the Autoencoder with Triplet Loss
@@ -166,7 +199,11 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
     train_loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
     # Initialize the trainer
-    trainer = pl.Trainer(max_epochs=30, accelerator="cpu")
+    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)
+    
+    verify_e2c(e2c_predictor, states, actions, next_states)
+    
+    

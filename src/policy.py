@@ -9,7 +9,6 @@ import time
 from .env_model import MARSModel
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
-from ppo.ppo import PPOAgent
 from scipy.optimize import linprog
 
 
@@ -40,38 +39,6 @@ class SACPolicy:
     def train(self):
         ret = self.agent.update_parameters(self.memory, self.batch_size,
                                            self.updates)
-        self.updates += 1
-        return ret
-
-    def report(self):
-        return 0, 0
-
-    def load_checkpoint(self, path):
-        self.agent.load_checkpoint(path)
-
-
-class PPOPolicy:
-
-    def __init__(self,
-                 gym_env: gym.Env,
-                 replay_size: int,
-                 seed: int,
-                 batch_size: int,
-                 ppo_args):
-        self.agent = PPOAgent(gym_env.observation_space.shape[0],
-                         gym_env.action_space, lr=ppo_args.lr, gamma = ppo_args.gamma, hidden_dim=ppo_args.hidden_size, batch_size=ppo_args.batch_size)
-        self.memory = ReplayMemory(replay_size, gym_env.observation_space, seed)
-        self.updates = 0
-        self.batch_size = batch_size
-
-    def __call__(self, state: np.ndarray, evaluate: bool = False):
-        return self.agent.select_action(state)
-
-    def add(self, state, action, reward, next_state, done, cost):
-        self.memory.push(state, action, reward, next_state, done, cost)
-
-    def train(self):
-        ret = self.agent.optimize(self.memory)
         self.updates += 1
         return ret
 
@@ -273,9 +240,9 @@ class ProjectionPolicy:
             # That means we want P to be [[I 0] [0 0]] the objective has a 0.5
             # coefficient on u^T P u, so we use q = -u* rather than q = -2 u^*
             # rather than adding a factor of 2 to P.
-            P = np.eye(self.horizon * u_dim)
-            P[:u_dim, :u_dim] = np.eye(u_dim)
-            P += np.eye(self.horizon * u_dim) * 1e-4
+            P = 1e-4 * np.eye(self.horizon * u_dim)
+            P[:u_dim, :u_dim] += np.eye(u_dim)
+            # P = np.eye((self.horizon-1) * (u_dim))
             
             P = cvxopt.matrix(P)
             q = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))

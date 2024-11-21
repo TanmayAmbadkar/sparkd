@@ -39,6 +39,15 @@ def get_env_from_name(name):
     if name == 'bipedal_walker':
         from .bipedal_walker import BipedalWalkerEnv
         return BipedalWalkerEnv()
+    if name == 'inverted_pendulum':
+        from .inverted_pendulum import InvertedDoublePendulumEnv
+        return InvertedDoublePendulumEnv()
+    if name == 'hopper':
+        from .hopper import HopperEnv
+        return HopperEnv()
+    if name == 'safety_point':
+        from .safety_gym import SafetyPointGoalEnv
+        return SafetyPointGoalEnv()
     if name == 'carplatoon4':
         from .CarPlatoon4 import CarPlatoonEnv
         return CarPlatoonEnv()

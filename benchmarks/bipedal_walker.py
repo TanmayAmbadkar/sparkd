@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from abstract_interpretation import domains, verification
 import sys
+from benchmarks.utils import *
 
 class BipedalWalkerEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
@@ -19,105 +20,60 @@ class BipedalWalkerEnv(gym.Env):
         self.done = False  
         self.safe_polys = []
         self.polys = []
-        
+        self.MAX = np.array(self.env.observation_space.high)
+        self.MIN = np.array(self.env.observation_space.low)
         self.safety_constraints()
         self.unsafe_constraints()
         
-        # print(self.unsafe(np.array([ 0.41278508,  0.11044428,  0.03596416, -0.0501044,  -0.520235,   -0.7669368,
-        #         0.55146146, -1.,          0.,         -0.3183163,  -1.0000002,   0.109326,
-        #         0.9999997,   0.,          0.46180838,  0.4670529,   0.48339868,  0.51286566,
-        #         0.55954015,  0.63115406,  0.7429231,   0.92812556,  1.,          1.,        ])))
-        # sys.exit()
-        
-        
     def safety_constraints(self):
-        
         # Define the observation space bounds
         obs_space_lower = self.observation_space.low
         obs_space_upper = self.observation_space.high
 
-        # Calculate the center of the zonotope
+        # Calculate the center of the observation space
         center = (obs_space_lower + obs_space_upper) / 2
 
-        # Create generators to reflect the constraints on vx and vy
-        generators = []
-        
+        # Initialize the lower and upper bounds arrays
+        lower_bounds = np.copy(obs_space_lower)
+        upper_bounds = np.copy(obs_space_upper)
+
+        # Modify the specific components based on the constraints
         # Angular Speed
-        hull_ang_gen = np.zeros(self.observation_space.shape[0])
-        hull_ang_gen[0] = 0.7
+        hull_ang_gen = 0.7
+        vang_gen = 0.9
+        vhor_gen = 0.8
+        vver_gen = 0.8
+        hipjoinang_gen = 1.1
 
-        vang_gen = np.zeros(self.observation_space.shape[0])
-        vang_gen[1] = 0.9
-        center[1] = 0.25
+        # Set the new bounds for each relevant component
+        lower_bounds[0] = center[0] - hull_ang_gen
+        upper_bounds[0] = center[0] + hull_ang_gen
 
-        vhor_gen = np.zeros(self.observation_space.shape[0])
-        vhor_gen[2] = 0.8
+        lower_bounds[1] = 0.25 - vang_gen
+        upper_bounds[1] = 0.25 + vang_gen
 
-        vver_gen = np.zeros(self.observation_space.shape[0])
-        vver_gen[3] = 0.8
-        
-        hipjoinang_gen = np.zeros(self.observation_space.shape[0])
-        hipjoinang_gen[4] = 1.1
-        center[4] = 0.15
+        lower_bounds[2] = center[2] - vhor_gen
+        upper_bounds[2] = center[2] + vhor_gen
 
-        
-        # Add these generators to the list
-        generators.append(hull_ang_gen)
-        generators.append(vang_gen)
-        generators.append(vhor_gen)
-        generators.append(vver_gen)
-        generators.append(hipjoinang_gen)
+        lower_bounds[3] = center[3] - vver_gen
+        upper_bounds[3] = center[3] + vver_gen
 
-        # Additional generators for other dimensions can be added if necessary
-        # Example: small perturbations in other dimensions
+        lower_bounds[4] = 0.15 - hipjoinang_gen
+        upper_bounds[4] = 0.15 + hipjoinang_gen
 
-        polys = []
-        for i, gen in enumerate(generators):
-            
-            cen = center[i]
-            bound = gen[i]
-            A1 = np.zeros(self.observation_space.shape[0])
-            A2 = np.zeros(self.observation_space.shape[0])
-            A1[i] = 1
-            A2[i] = -1
-            polys.append(np.append(A1, -(cen + bound)))
-            polys.append(np.append(A2, (cen - bound)))
-             
-        
-        for i in range(self.observation_space.shape[0]):
-            if i not in [0, 1, 2, 3, 4]:
-                # if i in range(14, 24, 1):
-                #     gen = np.zeros(self.observation_space.shape[0])
-                #     gen[i] = 0.9
-                #     center[i] = 0
-                #     generators.append(gen)
-                # else:
-                gen = np.zeros(self.observation_space.shape[0])
-                gen[i] = (obs_space_upper[i] - obs_space_lower[i]) / 2
-                generators.append(gen)
-                
-                A1 = np.zeros(self.observation_space.shape[0])
-                A2 = np.zeros(self.observation_space.shape[0])
-                A1[i] = 1
-                A2[i] = -1
-                polys.append(np.append(A1, -obs_space_upper[i]))
-                polys.append(np.append(A2, obs_space_lower[i]))
-                
-        # hyperplanes = input_zonotope.to_hyperplanes()
-        # for i, poly in enumerate(polys):
-        #     A = poly[:-1]
-        #     b = -poly[-1]
-        #     print(f"x_{i//2} {'<=' if A[i//2] > 0 else '>='} {b/sum(A)}")
-            # polys.append(np.append(A, -b))        
+        # Construct the polyhedra constraints (polys)
+           
+        lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX)
+        upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX)
+        input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
+        polys = input_deeppoly_domain.to_hyperplanes()
 
-        # # Create the zonotope
-        input_zonotope = domains.Zonotope(center, generators)
-        
-        self.original_safe_polys = [np.array(polys)]
+        # Set the safety constraints using the DeepPolyDomain and the polys
+        self.safety = input_deeppoly_domain
+        self.original_safety = input_deeppoly_domain
         self.safe_polys = [np.array(polys)]
-        self.safety = input_zonotope
-        self.original_safety = input_zonotope
-        
+        self.original_safe_polys = [np.array(polys)]
+            
         
     def unsafe_constraints(self):
         
@@ -126,18 +82,9 @@ class BipedalWalkerEnv(gym.Env):
         unsafe_regions = []
         for polys in self.safe_polys:
             for i, poly in enumerate(polys):
-                if i//2 in [0, 1, 2, 3, 4]:
-                    A = poly[:-1]
-                    b = -poly[-1]
-                    unsafe_regions.append(np.append(-A, b))
-            # print(f"x_{i//2} {'<=' if A[i//2] > 0 else '>='} {1/sum(A/-b)}")
-                # else:
-                #     A1 = np.zeros(self.observation_space.shape[0])
-                #     A2 = np.zeros(self.observation_space.shape[0])
-                #     A1[i//2] = 1
-                #     A2[i//2] = -1
-                #     unsafe_regions.append(np.append(A1, -obs_space_upper[i//2]))
-                #     unsafe_regions.append(np.append(A2, obs_space_lower[i//2]))
+                A = poly[:-1]
+                b = -poly[-1]
+                unsafe_regions.append(np.append(-A, b))
         
         for i in range(self.observation_space.shape[0]):
             A1 = np.zeros(self.observation_space.shape[0])
@@ -162,8 +109,10 @@ class BipedalWalkerEnv(gym.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-        # else:
-            # state = self.reduce_state(state)
+            original_state = normalize_constraints(original_state, self.MIN, self.MAX)
+        else:
+            state = normalize_constraints(state, self.MIN, self.MAX)
+            
         self.step_counter+=1
         
         return state, reward, self.done, truncation, {"state_original": original_state}
@@ -181,8 +130,9 @@ class BipedalWalkerEnv(gym.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-        # else:
-            # state = self.reduce_state(state)
+            original_state = normalize_constraints(original_state, self.MIN, self.MAX)
+        else:
+            state = normalize_constraints(state, self.MIN, self.MAX)
         return state, {"state_original": original_state}
 
     def render(self, mode='human'):

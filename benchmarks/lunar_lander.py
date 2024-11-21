@@ -6,7 +6,7 @@ import sys
 
 class LunarLanderEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("LunarLander-v2", continuous=True)
+        self.env = gym.make("LunarLander-v3", continuous=True)
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
@@ -27,74 +27,68 @@ class LunarLanderEnv(gym.Env):
     def safety_constraints(self):
         obs_space_lower = self.observation_space.low
         obs_space_upper = self.observation_space.high
+
+        # Initialize lower and upper bounds as the observation space limits
+        lower_bounds = np.copy(obs_space_lower)
+        upper_bounds = np.copy(obs_space_upper)
+
+        # Adjust the center for specific constraints
         center = (obs_space_lower + obs_space_upper) / 2
 
-        generators = []
-
         # Horizontal position constraint (x) - relaxed
-        x_gen = np.zeros(self.observation_space.shape[0])
-        x_gen[0] = 1.0  # Increased from 0.75 to 1.0
-        generators.append(x_gen)
+        lower_bounds[0] = center[0] - 0.75  # Increased from 0.75 to 1.0
+        upper_bounds[0] = center[0] + 0.75
 
         # Vertical position constraint (y) - relaxed
-        y_gen = np.zeros(self.observation_space.shape[0])
-        center[1] = 1.0  # Safe height above ground, increased from 0.75 to 1.0
-        y_gen[1] = 1.0
-        generators.append(y_gen)
+        
+        lower_bounds[1] = 0.0
+        upper_bounds[1] = 1.75
+        center[1] = (upper_bounds[1] + lower_bounds[1])/2
 
         # Horizontal velocity constraint (vx) - relaxed
-        vx_gen = np.zeros(self.observation_space.shape[0])
-        vx_gen[2] = 1.0  # Increased from 0.5 to 0.75
-        generators.append(vx_gen)
+        lower_bounds[2] = center[2] - 1.5  # Increased from 0.5 to 0.75
+        upper_bounds[2] = center[2] + 1.5
 
         # Vertical velocity constraint (vy) - relaxed
-        vy_gen = np.zeros(self.observation_space.shape[0])
-        center[3] = -0.2  # Descent speed
-        vy_gen[3] = 1.0   # Increased from 0.5 to 0.75
-        generators.append(vy_gen)
+        center[3] = -0.5  # Descent speed
+        lower_bounds[3] = -1.5  # Increased from 0.5 to 0.75
+        upper_bounds[3] = 0.5
 
         # Angle constraint (theta) - relaxed
-        angle_gen = np.zeros(self.observation_space.shape[0])
-        angle_gen[4] = 1.0  # Increased from 0.4 to 0.6
-        generators.append(angle_gen)
+        lower_bounds[4] = center[4] - 1.5  # Increased from 0.4 to 0.6
+        upper_bounds[4] = center[4] + 1.5
 
         # Angular velocity constraint (omega) - relaxed
-        angular_velocity_gen = np.zeros(self.observation_space.shape[0])
-        angular_velocity_gen[5] = 1.0  # Increased from 0.3 to 0.5
-        generators.append(angular_velocity_gen)
+        lower_bounds[5] = center[5] - 1.0  # Increased from 0.3 to 0.5
+        upper_bounds[5] = center[5] + 1.0
 
         polys = []
-        for i, gen in enumerate(generators):
-            cen = center[i]
-            bound = gen[i]
+        center = (upper_bounds + lower_bounds)/2
+        generators = [np.zeros(center.shape) for _ in range(center.shape[0])]
+
+        # Create polyhedral constraints (polys) based on the bounds
+        for i in range(self.observation_space.shape[0]):
             A1 = np.zeros(self.observation_space.shape[0])
             A2 = np.zeros(self.observation_space.shape[0])
+
+            # Upper bound constraint: A[i] * x[i] <= u_i
             A1[i] = 1
+            polys.append(np.append(A1, -upper_bounds[i]))
+
+            # Lower bound constraint: A[i] * x[i] >= l_i, or -A[i] * x[i] <= -l_i
             A2[i] = -1
-            polys.append(np.append(A1, -(cen + bound)))
-            polys.append(np.append(A2, (cen - bound)))
+            polys.append(np.append(A2, lower_bounds[i]))
+            generators[i][i] = (upper_bounds[i] - lower_bounds[i])/2
 
-        for i in range(self.observation_space.shape[0]):
-            if i not in [0, 1, 2, 3, 4, 5]:
-                gen = np.zeros(self.observation_space.shape[0])
-                gen[i] = (obs_space_upper[i] - obs_space_lower[i]) / 2
-                generators.append(gen)
-
-                A1 = np.zeros(self.observation_space.shape[0])
-                A2 = np.zeros(self.observation_space.shape[0])
-                A1[i] = 1
-                A2[i] = -1
-                polys.append(np.append(A1, -obs_space_upper[i]))
-                polys.append(np.append(A2, obs_space_lower[i]))
-
-        input_zonotope = domains.Zonotope(center, generators)
-
+        # Set the safety constraints using the DeepPoly domain
+        # input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
+        input_deeppoly = domains.Zonotope(center, generators)
+    
         self.original_safe_polys = [np.array(polys)]
         self.safe_polys = [np.array(polys)]
-        self.safety = input_zonotope
-        self.original_safety = input_zonotope
-
-        
+        self.safety = input_deeppoly
+        self.original_safety = input_deeppoly
+ 
         
     def unsafe_constraints(self):
         
@@ -103,10 +97,10 @@ class LunarLanderEnv(gym.Env):
         unsafe_regions = []
         for polys in self.safe_polys:
             for i, poly in enumerate(polys):
-                if i//2 in [0, 1, 2, 3, 4, 5]:
-                    A = poly[:-1]
-                    b = -poly[-1]
-                    unsafe_regions.append(np.append(-A, b))
+            
+                A = poly[:-1]
+                b = -poly[-1]
+                unsafe_regions.append(np.append(-A, b))
             
         for i in range(self.observation_space.shape[0]):
             A1 = np.zeros(self.observation_space.shape[0])
@@ -182,7 +176,6 @@ class LunarLanderEnv(gym.Env):
                 
                 A = polys[:,:-1]
                 b = -polys[:,-1]
-                # print(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
                 return not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
     
 

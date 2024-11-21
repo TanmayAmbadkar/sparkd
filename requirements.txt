@@ -1,7 +1,16 @@
-cvxopt==1.3.0
-gymnasium==0.29.1
-numpy==1.23.3
-pytorch_lightning==2.4.0
-scipy==1.9.1
-sklearn_contrib_py_earth==0.1.0+16.g400f84d
-torch==2.4.0
+# cvxopt==1.3.0
+# gymnasium==0.29.1
+# numpy==1.23.3
+# pytorch_lightning==2.4.0
+# scipy==1.9.1
+# sklearn_contrib_py_earth==0.1.0+16.g400f84d
+# torch==2.4.0
+imagehash>=3.4
+ipdb
+Pillow>=4.0.0
+pycparser>=2.17.0
+pytest>=3.0.5
+pytest-instafail==0.3.0
+sphinx
+sphinx_rtd_theme
+numpydoc
