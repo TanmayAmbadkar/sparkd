@@ -17,6 +17,8 @@ from src.policy import Shield, SACPolicy, ProjectionPolicy, CSCShield
 from abstract_interpretation import domains, verification
 import gymnasium as gym
 from sklearn.metrics import classification_report
+import itertools
+
 
 
 parser = argparse.ArgumentParser(description='SPICE Args')
@@ -217,17 +219,36 @@ if not args.no_safety:
                 model_pieces=20, seed=args.seed, policy=None,
                 use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon)
 
-    env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.safety)
-    recovered_safety = verification.get_constraints(env_model.mars.e2c_predictor.decoder.net, env.safety)
+    
+    # new_unsafe_domains = []
+    # for unsafe_domain in env.unsafe_domains:
+    #     new_unsafe_domains.append(verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_domain))
+    
+    # print(new_unsafe_domains)
+    
+    
+    # env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.safety)
+    # recovered_safety = verification.get_constraints(env_model.mars.e2c_predictor.decoder.net, env.safety)
     # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
-    env.observation_space = gym.spaces.Box(low=-1, high=1, shape=(args.red_dim,))
+    
+    
+    new_obs_space = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(-np.ones(60, ), np.ones(60, )))
+    
+    env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
+    # print(new_unsafe_domains)
+    # print(domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), new_unsafe_domains))
+    env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
+    
+    
+    new_unsafe_domains = domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), [env.safety])
+    
     agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
 
     polys = env.safety.to_hyperplanes()
 
     env.safe_polys = [np.array(polys)]
     env.state_processor = env_model.mars.e2c_predictor.transform
-    env.unsafe_constraints()
+    env.polys = [np.array(domain.to_hyperplanes()) for domain in new_unsafe_domains]
 
 
     if args.neural_safety:
@@ -471,14 +492,32 @@ while True:
         
         env.state_processor = env_model.mars.e2c_predictor.transform
 
-        hyperplanes = env.safety.to_hyperplanes()
-        polys = []
-        for A, b in hyperplanes:
-            polys.append(np.append(A, -b))
+        # hyperplanes = env.safety.to_hyperplanes()
+        # polys = []
+        # for A, b in hyperplanes:
+        #     polys.append(np.append(A, -b))
+
+        # env.safe_polys = [np.array(polys)]
+        
+        # env.unsafe_constraints()
+        new_obs_space = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(-np.ones(60, ), np.ones(60, )))
+    
+        env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
+        # print(new_unsafe_domains)
+        # print(domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), new_unsafe_domains))
+        env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
+        
+        new_unsafe_domains = domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), [env.safety])
+        
+        agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+
+        polys = env.safety.to_hyperplanes()
 
         env.safe_polys = [np.array(polys)]
+        env.state_processor = env_model.mars.e2c_predictor.transform
+        env.polys = [np.array(domain.to_hyperplanes()) for domain in new_unsafe_domains]
+
         
-        env.unsafe_constraints()
         
         if args.neural_safety:
             safe_agent = CSCShield(agent, cost_model,
@@ -534,7 +573,7 @@ while True:
                     done = True
                 if env.unsafe(info['state_original'], False):
                     print("UNSAFE")
-                    episode_reward += -1000
+                    episode_reward += -10
                     print(state, "\n",  action, "\n", next_state)
                     unsafe_episodes += 1
                     done = True

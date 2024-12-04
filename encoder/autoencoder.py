@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torch.utils.data import Dataset, DataLoader
-from abstract_interpretation.neural_network import LinearLayer, ReLULayer, TanhLayer, NeuralNetwork
+from abstract_interpretation.neural_network import LinearLayer, ReLULayer, TanhLayer,SigmoidLayer, NeuralNetwork
 
 from torch.nn import TripletMarginLoss
 
@@ -52,8 +52,8 @@ class Autoencoder(pl.LightningModule):
         super().__init__()
         self.n_features = n_features
         self.reduced_dim = reduced_dim
-        self.encoder = NeuralNetwork([LinearLayer(n_features, 12), ReLULayer(), LinearLayer(12, reduced_dim), TanhLayer()])
-        self.decoder = NeuralNetwork([LinearLayer(reduced_dim, 12), ReLULayer(), LinearLayer(12, n_features), TanhLayer()])
+        self.encoder = NeuralNetwork([LinearLayer(n_features, 12), TanhLayer(), LinearLayer(12, reduced_dim), TanhLayer()])
+        self.decoder = NeuralNetwork([LinearLayer(reduced_dim, 12), TanhLayer(), LinearLayer(12, n_features)])
         self.loss_fn = TripletMarginLoss(margin=margin)
 
     def forward(self, x):

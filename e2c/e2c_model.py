@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, Dataset
 from e2c.networks import Encoder, Transition, Decoder
 
 class E2CPredictor(pl.LightningModule):
-    def __init__(self, n_features, z_dim, u_dim, lr=1e-3, weight_decay=1e-4, horizon = 1):
+    def __init__(self, n_features, z_dim, u_dim, lr=1e-3, weight_decay=1e-4, horizon = 1, train_ae = True):
         super(E2CPredictor, self).__init__()
         self.encoder = Encoder(n_features, z_dim)
         transition_net = nn.Sequential(
@@ -22,6 +22,7 @@ class E2CPredictor(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.horizon = horizon
+        self.train_ae = train_ae
 
     def forward(self, x_t, u_t=None):
         """
@@ -50,18 +51,23 @@ class E2CPredictor(pl.LightningModule):
 
         # Forward pass
         # x_recon, x_next_pred, z_t_next, z_t_pred = self._forward_step(x, u, x_next)
-
+        
         z_t, z_t_next, ae_loss = self._forward_ae_step(x, x_next)
-        transition_loss = self._forward_transition_step(z_t, u, z_t_next, x_next)
+        transition_loss = 0
+        if not self.train_ae:
+            z_t, z_t_next, ae_loss = z_t.detach(), z_t_next.detach(), ae_loss.detach()
+            transition_loss = self._forward_transition_step(z_t, u, z_t_next, x_next)
         # Compute loss
         lamda = 0.25  # You can parameterize this value
         # loss = self.compute_loss(x, x_next, x_recon, x_next_pred, z_t_next, z_t_pred, lamda)
 
         # Log training loss
         loss = ae_loss + transition_loss
-        self.log('train_loss', loss, prog_bar=True, logger=True, on_epoch=True)
-        self.log('ae_loss', ae_loss, prog_bar=True, logger=True, on_epoch=True)
-        self.log('tran_loss', transition_loss, prog_bar=True, logger=True, on_epoch=True)
+        if self.train_ae:
+        # self.log('train_loss', loss, prog_bar=True, logger=True, on_epoch=True)
+            self.log('ae_loss', ae_loss, prog_bar=True, logger=True, on_epoch=True)
+        else:
+            self.log('tran_loss', transition_loss, prog_bar=True, logger=True, on_epoch=True)
         return loss
 
     def _forward_ae_step(self, x, x_next):
@@ -96,7 +102,7 @@ class E2CPredictor(pl.LightningModule):
                 z_t_next_pred = A_t.bmm(z_t_curr.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u[:, idx].unsqueeze(-1)).squeeze(-1) + o_t
                 
                 transition_loss += F.mse_loss(z_t_next_pred, z_t_next[:, idx])
-                consistency_loss += F.mse_loss(x_next[:, idx], self.decoder(z_t_next_pred))
+                # consistency_loss += F.mse_loss(x_next[:, idx], self.decoder(z_t_next_pred))
                 z_t_curr = z_t_next_pred
                 
                 
@@ -199,11 +205,26 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
     train_loader = DataLoader(dataset, batch_size=128, shuffle=True)
 
     # Initialize the trainer
-    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
+    e2c_predictor.train_ae = True
+    e2c_predictor.encoder.requires_grad = True
+    e2c_predictor.decoder.requires_grad = True
+    e2c_predictor.transition.requires_grad = False
+    trainer = pl.Trainer(max_epochs=20, accelerator="gpu", devices = 1)
+
+    # Train the autoencoder
+    trainer.fit(e2c_predictor, train_loader)
+    
+    e2c_predictor.train_ae = False
+    e2c_predictor.encoder.requires_grad = False
+    e2c_predictor.decoder.requires_grad = False
+    e2c_predictor.transition.requires_grad = True
+    # Initialize the trainer
+    trainer = pl.Trainer(max_epochs=20, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)
     
     verify_e2c(e2c_predictor, states, actions, next_states)
+    del train_loader
     
     
