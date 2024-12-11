@@ -330,7 +330,7 @@ class Shield:
         self.shield_times = 0
         self.agent_times = 0
         self.backup_times = 0
-        self.total_time = 0.
+        self.total_time = 0
 
 
 class CSCShield:

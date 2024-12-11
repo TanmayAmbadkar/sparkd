@@ -316,29 +316,31 @@ class Box:
 #         return resulting_boxes
 
 class DeepPoly:
-    def __init__(self, lower_bounds, upper_bounds, A_L=None, c_L=None, A_U=None, c_U=None):
+    def __init__(self, lower_bounds, upper_bounds, parent = None, A_L = None, A_U = None):
         """
+        
         Initialize the DeepPoly domain with lower and upper bounds.
         No relational constraints are given.
         """
         self.lower = torch.tensor(lower_bounds, dtype=torch.float32)
         self.upper = torch.tensor(upper_bounds, dtype=torch.float32)
+        self.parent = parent
+        self.name = None
         if self.lower.shape != self.upper.shape:
             raise ValueError("Lower and upper bounds must have the same shape.")
 
-        input_size = self.lower.shape[0]
         if A_L is None:
-            # Initialize affine expressions for input variables
-            self.A_L = -torch.eye(input_size, dtype=torch.float32)
-            self.A_U = torch.eye(input_size, dtype=torch.float32)
-            self.c_L = -self.lower.clone()
-            self.c_U = -self.upper.clone()
+            input_size = self.lower.shape[0]
+            self.A_L = torch.ones((input_size, 2)).double()
+            self.A_U = torch.ones((input_size, 2)).double()
+            self.A_L[:, 0] = self.lower
+            self.A_U[:, 0] = self.upper
+            self.A_L[:,1] = 0
+            self.A_U[:,1] = 0
         else:
             self.A_L = A_L
-            self.c_L = c_L
             self.A_U = A_U
-            self.c_U = c_U
-
+        
     def affine_transform(self, W, b):
         """
         Perform affine transformation and compute bounds using the abstract affine transformer
@@ -351,127 +353,43 @@ class DeepPoly:
         Returns:
             DeepPoly: New DeepPoly domain with updated bounds.
         """
-        W = W.clone().detach().float()
-        b = b.clone().detach().float()
+        W = W
+        b = b
         output_dim, input_dim = W.shape
 
-        # Initialize new affine expressions
-        new_A_L = []
-        new_c_L = []
-        new_A_U = []
-        new_c_U = []
-        new_lower = []
-        new_upper = []
+        new_A_L = np.hstack([W, b.reshape(-1, 1)])
+        new_A_U = np.hstack([W, b.reshape(-1, 1)])
+        
+        pos_w = W >= 0.0
+        neg_w = W < 0.0
 
-        # For each output neuron i
-        for i in range(output_dim):
-            # Initialize affine expressions for x_i
-            # a'_i^≤ x = v_i + sum_j w_ij * x_j
-            a_L_i = W[i, :].clone()
-            c_L_i = b[i].clone()
-            a_U_i = W[i, :].clone()
-            c_U_i = b[i].clone()
-
-            # Compute l'_i by substituting bounds recursively
-            l_i = self.compute_bound(a_L_i, c_L_i, lower=True)
-
-            # Compute u'_i by substituting bounds recursively
-            u_i = self.compute_bound(a_U_i, c_U_i, lower=False)
-
-            # Since we have substituted all variables, set affine expressions to zero
-            # Append the constants as new affine expressions (which are constants)
-            new_A_L.append(torch.zeros_like(a_L_i))
-            new_c_L.append(torch.tensor(l_i))
-            new_A_U.append(torch.zeros_like(a_U_i))
-            new_c_U.append(torch.tensor(u_i))
-
-            # Update bounds
-            new_lower.append(l_i)
-            new_upper.append(u_i)
-
-        # Convert lists to tensors
-        new_A_L = torch.stack(new_A_L)
-        new_c_L = torch.stack(new_c_L)
-        new_A_U = torch.stack(new_A_U)
-        new_c_U = torch.stack(new_c_U)
-        new_lower = torch.tensor(new_lower)
-        new_upper = torch.tensor(new_upper)
-
+            # No backsubstitution
+        ub = self.upper @ (pos_w.T * W.T) + self.lower @ (neg_w.T * W.T) + b
+        lb = self.lower @ (pos_w.T * W.T) + self.upper @ (neg_w.T * W.T) + b
+        
         # Create new DeepPoly domain with updated variables
-        return DeepPoly(new_lower, new_upper, new_A_L, new_c_L, new_A_U, new_c_U)
+        self.name = "AFFINE"
+        # print("BOUNDS", lb, ub)
+        # print(new_A_L)
+        # print(new_A_U)
 
-    def compute_bound(self, a_i, c_i, lower=True):
-        """
-        Recursively compute the bound (lower or upper) by substituting affine expressions.
-
-        Args:
-            a_i (torch.Tensor): Affine coefficients for the current neuron.
-            c_i (float): Constant term for the current neuron.
-            lower (bool): True for lower bound, False for upper bound.
-
-        Returns:
-            bound (float): Computed lower or upper bound.
-        """
-        # Initialize the current affine expression
-        a_current = a_i.clone()
-        c_current = c_i.clone()
-
-        # Start substitution loop
-        while True:
-            # Indices of variables to substitute
-            indices_to_substitute = (a_current != 0).nonzero(as_tuple=True)[0]
-            new_indices = []
-
-            substitution_made = False
-
-            for idx in indices_to_substitute:
-                if idx >= self.lower.shape[0]:
-                    # Variable is from previous layer, substitute its affine expression
-                    coeff = a_current[idx]
-                    a_current[idx] = 0  # Remove the variable
-
-                    if lower:
-                        a_current += coeff * self.A_L[idx]
-                        c_current += coeff * self.c_L[idx]
-                    else:
-                        a_current += coeff * self.A_U[idx]
-                        c_current += coeff * self.c_U[idx]
-
-                    substitution_made = True
-                else:
-                    # Input variable, cannot substitute further
-                    new_indices.append(idx)
-
-            if not substitution_made:
-                # No more substitutions can be made
-                break
-
-        # Now, a_current contains only input variables
-        if lower:
-            # Compute lower bound
-            pos_coeffs = torch.clamp(a_current, min=0)
-            neg_coeffs = torch.clamp(a_current, max=0)
-            bound = c_current + torch.dot(pos_coeffs, self.lower) + torch.dot(neg_coeffs, self.upper)
-        else:
-            # Compute upper bound
-            pos_coeffs = torch.clamp(a_current, min=0)
-            neg_coeffs = torch.clamp(a_current, max=0)
-            bound = c_current + torch.dot(pos_coeffs, self.upper) + torch.dot(neg_coeffs, self.lower)
-
-        return bound.item()
-
+        return DeepPoly(lb, ub, self, torch.tensor(new_A_L), torch.tensor(new_A_U))
 
     
     def relu(self):
         """
         Apply ReLU activation, following the abstract transformer from the DeepPoly paper.
         """
-        new_lower = self.lower.clone()
-        new_upper = self.upper.clone()
-        new_A_L = self.A_L.clone()
-        new_c_L = self.c_L.clone()
-        new_A_U = self.A_U.clone()
-        new_c_U = self.c_U.clone()
+        # Create new DeepPoly domain with updated variables
+        self.name = "RELU"
+        
+        
+        new_lower = self.lower.clone().detach().numpy()
+        new_upper = self.upper.clone().detach().numpy()
+        new_A_L = torch.ones((self.lower.shape[0], 2))
+        new_A_U = torch.ones((self.lower.shape[0], 2))
+        new_A_L[:,-1] = 0
+        new_A_U[:,-1] = 0
 
         # Compute masks for the three cases
         case1 = self.upper <= 0  # u_j <= 0
@@ -482,10 +400,8 @@ class DeepPoly:
         idx_case1 = case1.nonzero(as_tuple=True)[0]
         new_lower[idx_case1] = 0
         new_upper[idx_case1] = 0
-        new_A_L[idx_case1, :] = 0
-        new_c_L[idx_case1] = 0
-        new_A_U[idx_case1, :] = 0
-        new_c_U[idx_case1] = 0
+        new_A_L[idx_case1] = 0
+        new_A_U[idx_case1] = 0
 
         # Handle Case 2: l_j >= 0
         # No changes needed; affine expressions and bounds remain the same
@@ -497,28 +413,31 @@ class DeepPoly:
 
         # Upper bound: x_i ≤ (u_j / (u_j - l_j))(x_j - l_j)
         lambda_u = u_j / (u_j - l_j)
-        new_A_U[idx_case3, :] = lambda_u.unsqueeze(1) * self.A_U[idx_case3, :]
-        new_c_U[idx_case3] = lambda_u * (self.c_U[idx_case3] - l_j)
+        new_A_U[idx_case3, 0] = lambda_u * new_A_U[idx_case3, 0]
+        new_A_U[idx_case3, 1] = lambda_u * (- l_j)
 
         # Update new_upper
-        pos_coeffs = torch.clamp(new_A_U[idx_case3, :], min=0)
-        neg_coeffs = torch.clamp(new_A_U[idx_case3, :], max=0)
-        new_upper[idx_case3] = new_c_U[idx_case3] + pos_coeffs @ self.upper + neg_coeffs @ self.lower
+        pos_coeffs = torch.clamp(new_A_U[idx_case3, 0], min=0)
+        neg_coeffs = torch.clamp(new_A_U[idx_case3, 0], max=0)
+        new_upper[idx_case3] = new_A_U[idx_case3, 1] + pos_coeffs * self.upper[idx_case3] + neg_coeffs * self.lower[idx_case3]
 
         # Lower bound: Choose λ ∈ {0,1} that minimizes the area
         # According to the paper, we can choose λ = 0 when l_j < -u_j, else λ = 1
         # For simplicity, we'll choose λ = 0 since l_j < 0
-        new_A_L[idx_case3, :] = 0
-        new_c_L[idx_case3] = 0
+        new_A_L[idx_case3] = 0
         new_lower[idx_case3] = 0
+        # print("BOUNDS", new_lower, new_upper)
+        # print(new_A_L)
+        # print(new_A_U)
 
-        return DeepPoly(new_lower, new_upper, new_A_L, new_c_L, new_A_U, new_c_U)
+        return DeepPoly(new_lower, new_upper, self, new_A_L, new_A_U)
 
 
     def sigmoid(self):
         """
         Apply the Sigmoid activation function using the abstract transformer.
         """
+        self.name = "RELU"
         return self.activation_transform(
             func=torch.sigmoid,
             func_prime=lambda x: torch.sigmoid(x) * (1 - torch.sigmoid(x))
@@ -528,6 +447,7 @@ class DeepPoly:
         """
         Apply the Tanh activation function using the abstract transformer.
         """
+        self.name = "TANH"
         return self.activation_transform(
             func=torch.tanh,
             func_prime=lambda x: 1 - torch.tanh(x) ** 2
@@ -537,28 +457,24 @@ class DeepPoly:
         """
         General method for applying activation functions using abstract transformers.
         """
-        l_j = self.lower
-        u_j = self.upper
+        l_j = self.lower.clone()
+        u_j = self.upper.clone()
+        new_A_L = torch.ones((self.lower.shape[0], 2)).double()
+        new_A_U = torch.ones((self.lower.shape[0], 2)).double()
 
-        l_prime = func(l_j)
-        u_prime = func(u_j)
 
-        new_lower = l_prime.clone()
-        new_upper = u_prime.clone()
-        new_A_L = self.A_L.clone()
-        new_c_L = self.c_L.clone()
-        new_A_U = self.A_U.clone()
-        new_c_U = self.c_U.clone()
+        l_prime = func(l_j).double()
+        u_prime = func(u_j).double()
 
         # Identify indices where l_j == u_j
         equal_mask = (l_j == u_j)
         idx_equal = equal_mask.nonzero(as_tuple=True)[0]
 
         # Handle the case where l_j == u_j
-        new_A_L[idx_equal, :] = 0
-        new_c_L[idx_equal] = l_prime[idx_equal]
-        new_A_U[idx_equal, :] = 0
-        new_c_U[idx_equal] = u_prime[idx_equal]
+        new_A_L[idx_equal, 0] = 0
+        new_A_L[idx_equal, 1] = l_prime[idx_equal]
+        new_A_U[idx_equal, 0] = 0
+        new_A_U[idx_equal, 1] = u_prime[idx_equal]
 
         # Indices where l_j != u_j
         idx_neq = (~equal_mask).nonzero(as_tuple=True)[0]
@@ -566,17 +482,15 @@ class DeepPoly:
         if idx_neq.numel() > 0:
             l_j_neq = l_j[idx_neq]
             u_j_neq = u_j[idx_neq]
-            A_L_neq = self.A_L[idx_neq, :]
-            c_L_neq = self.c_L[idx_neq]
-            A_U_neq = self.A_U[idx_neq, :]
-            c_U_neq = self.c_U[idx_neq]
+            A_L_neq = self.A_L[idx_neq]
+            A_U_neq = self.A_U[idx_neq]
 
             # Compute lambda and lambda_prime
             denominator = u_j_neq - l_j_neq
             # Avoid division by zero
             denominator = torch.where(denominator == 0, torch.full_like(denominator, 1e-6), denominator)
             lambda_val = (func(u_j_neq) - func(l_j_neq)) / denominator
-            lambda_prime = torch.min(func_prime(l_j_neq), func_prime(u_j_neq))
+            lambda_prime = torch.min(func_prime(l_j_neq), func_prime(u_j_neq)).double()
 
             # For lower affine expression
             l_positive_mask = (l_j_neq > 0)
@@ -586,15 +500,15 @@ class DeepPoly:
             # Update lower affine expressions where l_j > 0
             if idx_l_positive.numel() > 0:
                 lambda_lp = lambda_val[l_positive_mask]
-                new_A_L[idx_l_positive, :] = lambda_lp.unsqueeze(1) * A_L_neq[l_positive_mask, :]
-                new_c_L[idx_l_positive] = lambda_lp * c_L_neq[l_positive_mask] + \
+                new_A_L[idx_l_positive, 0] = lambda_lp * A_L_neq[l_positive_mask, 0]
+                new_A_L[idx_l_positive, 1] = lambda_lp * new_A_L[l_positive_mask, 1] + \
                                           (func(l_j_neq[l_positive_mask]) - lambda_lp * l_j_neq[l_positive_mask])
 
             # Update lower affine expressions where l_j <= 0
             if idx_l_nonpositive.numel() > 0:
                 lambda_lnp = lambda_prime[~l_positive_mask]
-                new_A_L[idx_l_nonpositive, :] = lambda_lnp.unsqueeze(1) * A_L_neq[~l_positive_mask, :]
-                new_c_L[idx_l_nonpositive] = lambda_lnp * c_L_neq[~l_positive_mask] + \
+                new_A_L[idx_l_nonpositive, 0] = lambda_lnp * A_L_neq[~l_positive_mask, 0]
+                new_A_L[idx_l_nonpositive, 1] = lambda_lnp * new_A_L[~l_positive_mask, 1] + \
                                              (func(l_j_neq[~l_positive_mask]) - lambda_lnp * l_j_neq[~l_positive_mask])
 
             # For upper affine expression
@@ -605,19 +519,24 @@ class DeepPoly:
             # Update upper affine expressions where u_j <= 0
             if idx_u_nonpositive.numel() > 0:
                 lambda_unp = lambda_prime[u_nonpositive_mask]
-                new_A_U[idx_u_nonpositive, :] = lambda_unp.unsqueeze(1) * A_U_neq[u_nonpositive_mask, :]
-                new_c_U[idx_u_nonpositive] = lambda_unp * c_U_neq[u_nonpositive_mask] + \
+                new_A_U[idx_u_nonpositive, 0] = lambda_unp * A_U_neq[u_nonpositive_mask, 0]
+                new_A_U[idx_u_nonpositive, 1] = lambda_unp * new_A_U[u_nonpositive_mask, 1] + \
                                              (func(u_j_neq[u_nonpositive_mask]) - lambda_unp * u_j_neq[u_nonpositive_mask])
 
             # Update upper affine expressions where u_j > 0
             if idx_u_positive.numel() > 0:
                 lambda_up = lambda_val[~u_nonpositive_mask]
-                new_A_U[idx_u_positive, :] = lambda_up.unsqueeze(1) * A_U_neq[~u_nonpositive_mask, :]
-                new_c_U[idx_u_positive] = lambda_up * c_U_neq[~u_nonpositive_mask] + \
+                new_A_U[idx_u_positive, 0] = lambda_up * A_U_neq[~u_nonpositive_mask, 0]
+                new_A_U[idx_u_positive, 1] = lambda_up * new_A_U[~u_nonpositive_mask, 1] + \
                                           (func(u_j_neq[~u_nonpositive_mask]) - lambda_up * u_j_neq[~u_nonpositive_mask])
 
+        
+        # print("BOUNDS", l_prime, u_prime)
+        # print(new_A_L)
+        # print(new_A_U)
+
         # Return the new DeepPoly domain
-        return DeepPoly(new_lower, new_upper, new_A_L, new_c_L, new_A_U, new_c_U)
+        return DeepPoly(l_prime, u_prime, self, new_A_L, new_A_U)
 
     def __repr__(self):
         """
@@ -625,7 +544,110 @@ class DeepPoly:
         """
         return f"DeepPolyDomain(lower={np.round(self.lower.numpy(), 2)}, upper={np.round(self.upper.numpy(), 2)})"
 
+    def calculate_bounds(self, A_L = None, A_U = None):
+        """
+        Compute the concrete bounds for the current DeepPoly domain by recursively
+        backsubstituting through the parent domains until we reach the input domain.
 
+        Returns:
+            (lower, upper): Two torch.Tensor vectors containing the concrete lower 
+                            and upper bounds of the current domain's variables.
+        """
+        # Base case: If no parent, we are at the input domain with concrete bounds
+        # print(A_L, A_U, self.parent)
+        
+        if A_L is None and self.parent is None:
+            return self.lower, self.upper
+        if self.parent is None:
+            
+            # LOWER BOUND
+            # print(A_L)
+            # print(self.A_L)
+            
+            
+            pos_w = torch.clamp(A_L[:,:-1], min = 0).double()
+            neg_w = torch.clamp(A_L[:,:-1], max = 0.0).double()
+            lower_bound = pos_w * self.A_L[:, :-1] + neg_w * self.A_U[:, :-1]
+            
+            pos_w = torch.clamp(A_U[:,:-1], min = 0).double()
+            neg_w = torch.clamp(A_U[:,:-1], max = 0.0).double()
+            upper_bound = pos_w * self.A_U[:, :-1] + neg_w * self.A_L[:, :-1]
+            
+            return lower_bound.reshape(-1, ), upper_bound.reshape(-1, )
+        
+        else:
+            if A_L is None:
+                return self.parent.calculate_bounds(self.A_L.double(), self.A_U.double())
+            
+            else:
+                # LOWER BOUND
+                # print(A_U)
+                # print(self.A_U)
+                
+                pos_w = torch.clamp(A_L[:,:-1], min = 0.0).double()
+                neg_w = torch.clamp(A_L[:,:-1], max = 0.0).double()
+                lower_bound = self.A_L[:,:-1].double() * pos_w  + self.A_U[:,:-1].double() * neg_w + A_L[:, -1] + A_L[:,:-1] * self.A_L[:,-1]
+                
+                
+                pos_w = torch.clamp(A_U[:,:-1], min = 0).double()
+                neg_w = torch.clamp(A_U[:,:-1], max = 0.0).double()
+                upper_bound = self.A_U[:,:-1].double() * pos_w + self.A_L[:,:-1].double() * neg_w + A_U[:, -1]  + A_U[:,:-1] * self.A_U[:,-1]
+                
+                print(lower_bound, upper_bound)
+                
+                return self.parent.calculate_bounds(A_L = lower_bound, A_U = upper_bound)
+            
+        
+    def to_hyperplanes(self):
+        """
+        Convert the box domain to a set of hyperplane inequalities.
+        Each dimension contributes two hyperplanes.
+        """
+        inequalities = []
+        for i in range(self.lower.shape[0]):
+            # Upper bound constraint: A[i] * x[i] <= u_i
+            A_upper = np.zeros(self.lower.shape[0])
+            A_upper[i] = 1
+            inequalities.append(np.append(A_upper, -self.upper[i]))
+
+            # Lower bound constraint: A[i] * x[i] >= l_i, or -A[i] * x[i] <= -l_i
+            A_lower = np.zeros(self.lower.shape[0])
+            A_lower[i] = -1
+            inequalities.append(np.append(A_lower, self.lower[i]))
+
+        return inequalities
+    
+    def intersects(self, other):
+        """
+        Check if this box intersects with another box.
+        """
+        return torch.all(self.lower < other.upper) and torch.all(self.upper > other.lower)
+
+    def subtract(self, other):
+        """
+        Subtract another DeepPoly box from this box.
+        Returns a list of resulting DeepPoly boxes after subtraction.
+        """
+        if not self.intersects(other):
+            return [self]  # No intersection, return the original box
+
+        resulting_boxes = []
+        for dim in range(len(self.lower)):
+            if other.lower[dim] > self.lower[dim]:
+                # Create a box below the intersection along this dimension
+                new_lower = self.lower.clone()
+                new_upper = self.upper.clone()
+                new_upper[dim] = other.lower[dim]
+                resulting_boxes.append(DeepPoly(new_lower.tolist(), new_upper.tolist()))
+
+            if other.upper[dim] < self.upper[dim]:
+                # Create a box above the intersection along this dimension
+                new_lower = self.lower.clone()
+                new_upper = self.upper.clone()
+                new_lower[dim] = other.upper[dim]
+                resulting_boxes.append(DeepPoly(new_lower.tolist(), new_upper.tolist()))
+
+        return resulting_boxes           
 
 def recover_safe_region(observation_box, unsafe_boxes):
     """
