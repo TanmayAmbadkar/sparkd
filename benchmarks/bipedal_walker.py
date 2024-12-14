@@ -10,7 +10,10 @@ class BipedalWalkerEnv(gym.Env):
         self.env = gym.make("BipedalWalker-v3")
         self.action_space = self.env.action_space
         
-        self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.original_obs_space = self.env.observation_space
+        # self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(self.env.observation_space.shape[0],)) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        
         self.state_processor = state_processor
         self.safety = safety
 
@@ -20,15 +23,15 @@ class BipedalWalkerEnv(gym.Env):
         self.done = False  
         self.safe_polys = []
         self.polys = []
-        self.MAX = np.array(self.env.observation_space.high)
-        self.MIN = np.array(self.env.observation_space.low)
+        self.MAX = np.array(self.original_obs_space.high)
+        self.MIN = np.array(self.original_obs_space.low)
         self.safety_constraints()
         self.unsafe_constraints()
         
     def safety_constraints(self):
         # Define the observation space bounds
-        obs_space_lower = self.observation_space.low
-        obs_space_upper = self.observation_space.high
+        obs_space_lower = self.original_obs_space.low
+        obs_space_upper = self.original_obs_space.high
 
         # Calculate the center of the observation space
         center = (obs_space_lower + obs_space_upper) / 2
@@ -75,26 +78,36 @@ class BipedalWalkerEnv(gym.Env):
         self.original_safe_polys = [np.array(polys)]
             
         
+    # def unsafe_constraints(self):
+        
+    #     obs_space_lower = self.original_obs_space.low
+    #     obs_space_upper = self.original_obs_space.high
+    #     unsafe_regions = []
+    #     for polys in self.safe_polys:
+    #         for i, poly in enumerate(polys):
+    #             A = poly[:-1]
+    #             b = -poly[-1]
+    #             unsafe_regions.append(np.append(-A, b))
+        
+    #     for i in range(self.observation_space.shape[0]):
+    #         A1 = np.zeros(self.observation_space.shape[0])
+    #         A2 = np.zeros(self.observation_space.shape[0])
+    #         A1[i] = 1
+    #         A2[i] = -1
+    #         unsafe_regions.append(np.append(A1, -obs_space_upper[i]))
+    #         unsafe_regions.append(np.append(A2, obs_space_lower[i]))
+        
+    #     self.polys = [np.array(unsafe_regions)]
+
     def unsafe_constraints(self):
         
-        obs_space_lower = self.observation_space.low
-        obs_space_upper = self.observation_space.high
-        unsafe_regions = []
-        for polys in self.safe_polys:
-            for i, poly in enumerate(polys):
-                A = poly[:-1]
-                b = -poly[-1]
-                unsafe_regions.append(np.append(-A, b))
+        unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
+        self.polys = []
+        self.unsafe_domains = unsafe_deeppolys
         
-        for i in range(self.observation_space.shape[0]):
-            A1 = np.zeros(self.observation_space.shape[0])
-            A2 = np.zeros(self.observation_space.shape[0])
-            A1[i] = 1
-            A2[i] = -1
-            unsafe_regions.append(np.append(A1, -obs_space_upper[i]))
-            unsafe_regions.append(np.append(A2, obs_space_lower[i]))
         
-        self.polys = [np.array(unsafe_regions)]
+        for poly in unsafe_deeppolys:
+            self.polys.append(np.array(poly.to_hyperplanes()))
 
     def step(self, action):
         
@@ -102,14 +115,16 @@ class BipedalWalkerEnv(gym.Env):
         self.done = done or self.step_counter >= self._max_episode_steps# Store the done flag
 
         original_state = np.copy(state)
+        
+        original_state = normalize_constraints(original_state, self.MIN, self.MAX)
         if self.state_processor is not None:
             # state = self.reduce_state(state)
             # state = torch.Tensor(state, dtype = torch.float64)
+            
             with torch.no_grad():
-                state = self.state_processor(state.reshape(1, -1))
+                state = self.state_processor(original_state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-            original_state = normalize_constraints(original_state, self.MIN, self.MAX)
         else:
             state = normalize_constraints(state, self.MIN, self.MAX)
             

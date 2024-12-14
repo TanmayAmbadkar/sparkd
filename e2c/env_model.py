@@ -7,7 +7,7 @@ import torch
 import scipy.stats
 from src.env_model import MARSModel, MARSComponent, ResidualEnvModel, get_environment_model
 from e2c.e2c_model import E2CPredictor, fit_e2c
-
+from abstract_interpretation.verification import get_constraints 
 
 
 class MarsE2cModel:
@@ -175,8 +175,7 @@ def get_environment_model(     # noqa: C901
         output_states: np.ndarray,
         rewards: np.ndarray,
         costs: np.ndarray,
-        lows: torch.Tensor,
-        highs: torch.Tensor,
+        domain,
         seed: int = 0,
         use_neural_model: bool = True,
         arch: Optional[List[int]] = None,
@@ -206,15 +205,18 @@ def get_environment_model(     # noqa: C901
     arch: A neural architecture for the residual and reward models.
     """
 
-    
     if e2c_predictor is None:
         e2c_predictor = E2CPredictor(input_states.shape[1], latent_dim, actions.shape[1], horizon = horizon)
     fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon)
 
+    domain = get_constraints(e2c_predictor.encoder.net, domain)
+    lows, highs = domain.calculate_bounds()
     
     input_states = e2c_predictor.transform(input_states)
     output_states = e2c_predictor.transform(output_states)
 
+    
+    
     states_mean = np.concatenate((input_states, output_states),
                                  axis=0).mean(axis=0)
     states_std = np.maximum(np.concatenate((input_states, output_states),

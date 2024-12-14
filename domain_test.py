@@ -1,14 +1,11 @@
 from abstract_interpretation import domains
+from abstract_interpretation.neural_network import *
+from abstract_interpretation.verification import get_constraints
 import numpy as np
-import warnings
-warnings.filterwarnings("ignore")
-domain = domains.DeepPoly(lower_bounds=[-1, -1], upper_bounds=[1, 1])
-# print("CONCRETE BOUNDS: ", domain.calculate_bounds())
-new_dom = domain.affine_transform(W = np.array([[1.0, 1], [1.0, -1.0]]), b = np.array([0, 0]))
-print("CONCRETE BOUNDS: ", new_dom.calculate_bounds())
-new_dom = new_dom.relu()
-print("CONCRETE BOUNDS: ", new_dom.calculate_bounds())
-new_dom = new_dom.affine_transform(W = np.array([[1.0, 1], [1.0, -1.0]]), b = np.array([0, 0]))
-print("CONCRETE BOUNDS", new_dom.calculate_bounds())
-# new_dom = new_dom.relu()
-# new_dom = new_dom.affine_transform(W = np.array([[1, 1], [0, 1]]), b = np.array([0, 0]))
+
+net = NeuralNetwork([LinearLayer(16, 12), TanhLayer(), LinearLayer(12, 8), TanhLayer(), LinearLayer(8, 12), TanhLayer(), LinearLayer(12, 16)])
+
+domain = domains.DeepPoly(lower_bounds = -np.ones(16, ), upper_bounds=np.ones(16, ))
+
+get_constraints(net, domain)
+

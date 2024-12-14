@@ -11,7 +11,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.env = gym.make("SafetyPointGoal1-v0")
         self.action_space = self.env.action_space
         
-        self.observation_space = gymnasium.spaces.Box(low=-0.5, high=0.5, shape=self.env.observation_space.shape) if state_processor is None else gymnasium.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=self.env.observation_space.shape) if state_processor is None else gymnasium.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
         self.safety = safety
 
@@ -66,8 +66,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
             lower_bounds[i] = 0
             upper_bounds[i] = 0.8
             
-        lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-0.5, 0.5))
-        upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-0.5, 0.5))
+        lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
+        upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         
         input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
         polys = input_deeppoly_domain.to_hyperplanes()
@@ -77,7 +77,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.original_safety = input_deeppoly_domain
         self.safe_polys = [np.array(polys)]
         self.original_safe_polys = [np.array(polys)]
-
+        print(self.original_safety)
+        # print(self.observation_space)
         
     def unsafe_constraints(self):
         
@@ -85,10 +86,11 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.polys = []
         self.unsafe_domains = unsafe_deeppolys
         
+        
         for poly in unsafe_deeppolys:
             self.polys.append(np.array(poly.to_hyperplanes()))
             
-            
+        
     def step(self, action):
         
         state, reward, cost, done, truncation, info = self.env.step(action)
@@ -102,9 +104,9 @@ class SafetyPointGoalEnv(gymnasium.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-            original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-0.5, 0.5))
+            original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
         else:
-            state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-0.5, 0.5))
+            state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
             
         self.step_counter+=1
         
@@ -123,9 +125,9 @@ class SafetyPointGoalEnv(gymnasium.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-            original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-0.5, 0.5))
+            original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
         else:
-            state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-0.5, 0.5))
+            state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
         return state, {"state_original": original_state}
 
     def render(self, mode='human'):
@@ -146,18 +148,24 @@ class SafetyPointGoalEnv(gymnasium.Env):
     def unsafe(self, state: np.ndarray, simulated:bool = False) -> bool:
         
         if simulated:
+            
+            truth = []
             for polys in self.safe_polys:
                 
                 A = polys[:,:-1]
                 b = -polys[:,-1]
-                return not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
+                truth.append(not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1)))
+            return all(truth)
         else:
+            truth = []
             for polys in self.original_safe_polys:
                 
                 A = polys[:,:-1]
                 b = -polys[:,-1]
                 # print(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
-                return not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
+                truth.append(not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1)))
+            
+            return all(truth)
     
 
 

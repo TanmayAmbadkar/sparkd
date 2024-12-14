@@ -184,7 +184,7 @@ def verify_e2c(e2c_predictor, states, actions, next_states):
         enc_state = e2c_predictor.encoder(states)
         trans_enc_next_state, _, _, _ = e2c_predictor.transition(enc_state, actions)
         enc_next_state = e2c_predictor.encoder(next_states)
-        print("Transition error:", F.mse_loss(trans_enc_next_state, enc_next_state))
+        # print("Transition error:", F.mse_loss(trans_enc_next_state, enc_next_state))
         dec_next_state = e2c_predictor.decoder(trans_enc_next_state)
         print("Reconstructed transition states error:", F.mse_loss(next_states, dec_next_state))
         

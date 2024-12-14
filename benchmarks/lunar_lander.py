@@ -6,7 +6,7 @@ import sys
 
 class LunarLanderEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("LunarLander-v3", continuous=True)
+        self.env = gym.make("LunarLander-v2", continuous=True)
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
@@ -32,85 +32,41 @@ class LunarLanderEnv(gym.Env):
         lower_bounds = np.copy(obs_space_lower)
         upper_bounds = np.copy(obs_space_upper)
 
-        # Adjust the center for specific constraints
-        center = (obs_space_lower + obs_space_upper) / 2
-
         # Horizontal position constraint (x) - relaxed
-        lower_bounds[0] = center[0] - 0.75  # Increased from 0.75 to 1.0
-        upper_bounds[0] = center[0] + 0.75
+        lower_bounds[0] = -1.5  # Increased from 0.75 to 1.0
+        upper_bounds[0] = 1.5
 
         # Vertical position constraint (y) - relaxed
         
         lower_bounds[1] = 0.0
-        upper_bounds[1] = 1.75
-        center[1] = (upper_bounds[1] + lower_bounds[1])/2
+        upper_bounds[1] = 2.5
 
         # Horizontal velocity constraint (vx) - relaxed
-        lower_bounds[2] = center[2] - 1.5  # Increased from 0.5 to 0.75
-        upper_bounds[2] = center[2] + 1.5
+        lower_bounds[2] = -2 # Increased from 0.5 to 0.75
+        upper_bounds[2] = 2
 
         # Vertical velocity constraint (vy) - relaxed
-        center[3] = -0.5  # Descent speed
-        lower_bounds[3] = -1.5  # Increased from 0.5 to 0.75
-        upper_bounds[3] = 0.5
+        lower_bounds[3] = -2  # Increased from 0.5 to 0.75
+        upper_bounds[3] = 2
 
-        # Angle constraint (theta) - relaxed
-        lower_bounds[4] = center[4] - 1.5  # Increased from 0.4 to 0.6
-        upper_bounds[4] = center[4] + 1.5
-
-        # Angular velocity constraint (omega) - relaxed
-        lower_bounds[5] = center[5] - 1.0  # Increased from 0.3 to 0.5
-        upper_bounds[5] = center[5] + 1.0
-
-        polys = []
-        center = (upper_bounds + lower_bounds)/2
-        generators = [np.zeros(center.shape) for _ in range(center.shape[0])]
-
-        # Create polyhedral constraints (polys) based on the bounds
-        for i in range(self.observation_space.shape[0]):
-            A1 = np.zeros(self.observation_space.shape[0])
-            A2 = np.zeros(self.observation_space.shape[0])
-
-            # Upper bound constraint: A[i] * x[i] <= u_i
-            A1[i] = 1
-            polys.append(np.append(A1, -upper_bounds[i]))
-
-            # Lower bound constraint: A[i] * x[i] >= l_i, or -A[i] * x[i] <= -l_i
-            A2[i] = -1
-            polys.append(np.append(A2, lower_bounds[i]))
-            generators[i][i] = (upper_bounds[i] - lower_bounds[i])/2
-
-        # Set the safety constraints using the DeepPoly domain
-        # input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
-        input_deeppoly = domains.Zonotope(center, generators)
+        input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
     
-        self.original_safe_polys = [np.array(polys)]
-        self.safe_polys = [np.array(polys)]
+        self.original_safe_polys = [np.array(input_deeppoly.to_hyperplanes())]
+        self.safe_polys = [np.array(input_deeppoly.to_hyperplanes())]
         self.safety = input_deeppoly
         self.original_safety = input_deeppoly
  
         
     def unsafe_constraints(self):
         
-        obs_space_lower = self.observation_space.low
-        obs_space_upper = self.observation_space.high
-        unsafe_regions = []
-        for polys in self.safe_polys:
-            for i, poly in enumerate(polys):
-            
-                A = poly[:-1]
-                b = -poly[-1]
-                unsafe_regions.append(np.append(-A, b))
-            
-        for i in range(self.observation_space.shape[0]):
-            A1 = np.zeros(self.observation_space.shape[0])
-            A2 = np.zeros(self.observation_space.shape[0])
-            A1[i] = 1
-            A2[i] = -1
-            unsafe_regions.append(np.append(A1, -obs_space_upper[i]))
-            unsafe_regions.append(np.append(A2, obs_space_lower[i]))
         
-        self.polys = [np.array(unsafe_regions)]
+        unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
+        self.polys = []
+        self.unsafe_domains = unsafe_deeppolys
+        
+        
+        for poly in unsafe_deeppolys:
+            self.polys.append(np.array(poly.to_hyperplanes()))
 
     def step(self, action):
         

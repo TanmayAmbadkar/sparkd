@@ -18,7 +18,7 @@ from abstract_interpretation import domains, verification
 import gymnasium as gym
 from sklearn.metrics import classification_report
 import itertools
-
+import matplotlib.pyplot as plt
 
 
 parser = argparse.ArgumentParser(description='SPICE Args')
@@ -115,7 +115,7 @@ agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
 
 
 # PRETRAINING 
-
+original_obs_space = env.observation_space
 updates = 0
 while total_numsteps < args.start_steps:
     
@@ -199,9 +199,6 @@ if not args.no_safety:
 
     states, actions, rewards, next_states, dones, costs = \
         e2c_data.sample(args.start_steps, get_cost=True)
-        
-    env.observation_space = gym.spaces.Box(low=-1, high=1, shape=(args.red_dim,))
-    agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
 
 
     if args.neural_safety:
@@ -214,43 +211,28 @@ if not args.no_safety:
     else:
         env_model, cost_model = get_environment_model(
                 states, actions, next_states, rewards, costs,
-                torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
-                torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
+                domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                 model_pieces=20, seed=args.seed, policy=None,
                 use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon)
 
-    
-    # new_unsafe_domains = []
-    # for unsafe_domain in env.unsafe_domains:
-    #     new_unsafe_domains.append(verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_domain))
-    
-    # print(new_unsafe_domains)
-    
-    
-    # env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.safety)
-    # recovered_safety = verification.get_constraints(env_model.mars.e2c_predictor.decoder.net, env.safety)
-    # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
-    
-    
-    new_obs_space = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(-np.ones(60, ), np.ones(60, )))
-    
+        
+    new_obs_space = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)).calculate_bounds())
     env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
-    # print(new_unsafe_domains)
-    # print(domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), new_unsafe_domains))
-    env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
-    
-    
-    new_unsafe_domains = domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), [env.safety])
-    
     agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+    
+    env.safety = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety).calculate_bounds())
+    
+    
+    unsafe_domains_list = [verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_dom) for unsafe_dom in env.unsafe_domains]
+    unsafe_domains_list = [domains.DeepPoly(*unsafe_dom.calculate_bounds()) for unsafe_dom in unsafe_domains_list]
+        
+    
+    polys = [np.array(env.safety.to_hyperplanes())]
 
-    polys = env.safety.to_hyperplanes()
-
-    env.safe_polys = [np.array(polys)]
+    env.safe_polys = polys
     env.state_processor = env_model.mars.e2c_predictor.transform
-    env.polys = [np.array(domain.to_hyperplanes()) for domain in new_unsafe_domains]
-
-
+    env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
+    
     if args.neural_safety:
         safe_agent = CSCShield(agent, cost_model,
                                 threshold=args.neural_threshold)
@@ -269,31 +251,18 @@ if not args.no_safety:
 else:
     safe_agent=None
 # Start main training
-
 # VERIFICATION
-truth = []
-predicted = []
-for state in next_states:
-    truth.append(env.unsafe(state, False))
-    predicted.append(env.unsafe(env_model.mars.e2c_predictor.transform(state), simulated = True))
-print(classification_report(truth, predicted))
+# truth = []
+# predicted = []
+# for state in next_states:
+#     truth.append(env.unsafe(state, False))
+#     predicted.append(env.unsafe(env_model.mars.e2c_predictor.transform(state), simulated = True))
+# print(classification_report(truth, predicted))
 
-truth = []
-predicted = []
-for i in range(1000):
-    point1 = np.random.uniform(high = env.safety.lower.numpy(), low = -np.ones(env.safety.lower.shape))
-    point2 = np.random.uniform(low = env.safety.upper.numpy(), high = np.ones(env.safety.lower.shape))
-    predicted.append(env.unsafe(point1, simulated = True))
-    predicted.append(env.unsafe(point2, simulated = True))
-    truth.append(env.unsafe(env_model.mars.e2c_predictor.inverse_transform(point1)))
-    truth.append(env.unsafe(env_model.mars.e2c_predictor.inverse_transform(point2)))
-
-print(classification_report(truth, predicted))
-
-    
+# sys.exit()
 
 
-print(sum(truth))
+# print(sum(truth))
 
 unsafe_test_episodes = 0
 total_test_episodes = 0
@@ -418,6 +387,7 @@ while True:
 
             next_state, reward = env_model(state, action,
                                            use_neural_model=False)
+            
             done = not np.all(np.abs(next_state) < 1e5) and \
                 not np.any(np.isnan(next_state))
             # done = done or env.predict_done(next_state)
@@ -482,33 +452,22 @@ while True:
         else:
             env_model, cost_model = get_environment_model(
                     states, actions, next_states, rewards, costs,
-                    torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
-                    torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
+                    domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                     model_pieces=20, seed=args.seed, policy=None,
                     use_neural_model=False, cost_model=None, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon)
-    
-        env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
-        # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
         
-        env.state_processor = env_model.mars.e2c_predictor.transform
-
-        # hyperplanes = env.safety.to_hyperplanes()
-        # polys = []
-        # for A, b in hyperplanes:
-        #     polys.append(np.append(A, -b))
-
-        # env.safe_polys = [np.array(polys)]
         
-        # env.unsafe_constraints()
-        new_obs_space = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(-np.ones(60, ), np.ones(60, )))
-    
+        new_obs_space = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(original_obs_space.low, original_obs_space.high))
+        new_obs_space = domains.DeepPoly(*new_obs_space.calculate_bounds())
+        # env.safety = domains.recover_safe_region(new_obs_space, new_unsafe_domains)
+        env.safety = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety).calculate_bounds())
+        
         env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
         # print(new_unsafe_domains)
         # print(domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), new_unsafe_domains))
-        env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
+        # env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
         
-        new_unsafe_domains = domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), [env.safety])
-        
+        new_unsafe_domains = domains.get_unsafe_region(obs_space=new_obs_space, safe_space=[env.safety])
         agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
 
         polys = env.safety.to_hyperplanes()
@@ -517,8 +476,17 @@ while True:
         env.state_processor = env_model.mars.e2c_predictor.transform
         env.polys = [np.array(domain.to_hyperplanes()) for domain in new_unsafe_domains]
 
-        
-        
+
+        if args.neural_safety:
+            safe_agent = CSCShield(agent, cost_model,
+                                    threshold=args.neural_threshold)
+        else:
+            shield = ProjectionPolicy(
+                env_model.get_symbolic_model(), env.observation_space,
+                env.action_space, args.horizon, env.polys, env.safe_polys)
+            safe_agent = Shield(shield, agent)
+
+        # Push collected training data to agent
         if args.neural_safety:
             safe_agent = CSCShield(agent, cost_model,
                                     threshold=args.neural_threshold)
