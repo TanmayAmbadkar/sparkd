@@ -99,8 +99,8 @@ file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
     args.policy, "autotune" if args.automatic_entropy_tuning else ""), "w+")
 
 # Memory
-real_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
-e2c_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
+real_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
+e2c_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
 
 real_unsafe_episodes = 0
 total_real_episodes = 0
@@ -167,8 +167,7 @@ while total_numsteps < args.start_steps:
 
         state = next_state
 
-
-    for (state, action, rewards, next_state, mask, cost) in real_buffer:
+    for (state, action, reward, next_state, mask, cost) in real_buffer:
         if cost > 0:
             real_data.push(state, action, reward, next_state, mask, 1)
         else:
@@ -226,6 +225,10 @@ if not args.no_safety:
     unsafe_domains_list = [verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_dom) for unsafe_dom in env.unsafe_domains]
     unsafe_domains_list = [domains.DeepPoly(*unsafe_dom.calculate_bounds()) for unsafe_dom in unsafe_domains_list]
         
+    
+    print(unsafe_domains_list)
+    print(env.safety)
+    print(env.observation_space)
     
     polys = [np.array(env.safety.to_hyperplanes())]
 
@@ -390,7 +393,7 @@ while True:
             
             done = not np.all(np.abs(next_state) < 1e5) and \
                 not np.any(np.isnan(next_state))
-            # done = done or env.predict_done(next_state)
+            # done = done or env.pred`ict_done(next_state)
             done = done or episode_steps == env._max_episode_steps or \
                 not np.all(np.abs(next_state) < 1e5)
             episode_steps += 1
@@ -425,7 +428,7 @@ while True:
                 real_data.sample(min(len(real_data), 70000), get_cost=True, removes_samples = True)
                 
             states_e2c, actions_e2c, rewards_e2c, next_states_e2c, dones_e2c, costs_e2c = \
-                e2c_data.sample(min(len(real_data), 30000), get_cost=True, removes_samples = True)
+                e2c_data.sample(min(len(real_data), 30000), get_cost=True, removes_samples = False)
                 
             
             for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
@@ -452,29 +455,27 @@ while True:
         else:
             env_model, cost_model = get_environment_model(
                     states, actions, next_states, rewards, costs,
-                    domains.DeepPoly(env.observation_space.low, env.observation_space.high),
+                    domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
                     model_pieces=20, seed=args.seed, policy=None,
                     use_neural_model=False, cost_model=None, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon)
         
         
-        new_obs_space = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(original_obs_space.low, original_obs_space.high))
-        new_obs_space = domains.DeepPoly(*new_obs_space.calculate_bounds())
-        # env.safety = domains.recover_safe_region(new_obs_space, new_unsafe_domains)
+        new_obs_space = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high)).calculate_bounds())
+        env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
+        agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+        
         env.safety = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety).calculate_bounds())
         
-        env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
-        # print(new_unsafe_domains)
-        # print(domains.recover_safe_region(domains.DeepPoly(env.observation_space.low, env.observation_space.high), new_unsafe_domains))
-        # env.safety = verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety)
         
-        new_unsafe_domains = domains.get_unsafe_region(obs_space=new_obs_space, safe_space=[env.safety])
-        agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
+        unsafe_domains_list = [verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_dom) for unsafe_dom in env.unsafe_domains]
+        unsafe_domains_list = [domains.DeepPoly(*unsafe_dom.calculate_bounds()) for unsafe_dom in unsafe_domains_list]
+            
+        
+        polys = [np.array(env.safety.to_hyperplanes())]
 
-        polys = env.safety.to_hyperplanes()
-
-        env.safe_polys = [np.array(polys)]
+        env.safe_polys = polys
         env.state_processor = env_model.mars.e2c_predictor.transform
-        env.polys = [np.array(domain.to_hyperplanes()) for domain in new_unsafe_domains]
+        env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
 
 
         if args.neural_safety:
@@ -496,13 +497,6 @@ while True:
                 env.action_space, args.horizon, env.polys, env.safe_polys)
             safe_agent = Shield(shield, agent)
             
-
-
-
-    
-    if total_numsteps > args.num_steps:
-        break
-    
         
 
     writer.add_scalar(f'reward/train', episode_reward, i_episode)
@@ -579,7 +573,6 @@ while True:
         writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_sim_episodes)
         writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_test_episodes)
         writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_test_episodes)
-
         writer.add_scalar(f'reward/test', avg_reward, i_episode)
 
         print("----------------------------------------")
@@ -591,7 +584,11 @@ while True:
             print("Trajectory:")
             print(trajectory)    
         # total_episodes += 1 
-        
+    
+    
+    if total_numsteps > args.num_steps:
+        break
+    
         
         
 total_episodes = next(iterator_loop) - 1

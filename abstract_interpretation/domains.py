@@ -434,11 +434,9 @@ class DeepPoly:
                 neg_w = torch.clamp(A_L, max = 0.0).double()
                 new_A_L = pos_w @ self.A_L+ neg_w @ self.A_U 
                 
-                
                 pos_w = torch.clamp(A_U, min = 0).double()
                 neg_w = torch.clamp(A_U, max = 0.0).double()
                 new_A_U = pos_w @ self.A_U + neg_w @ self.A_L
-                
                 lower_bound, upper_bound = self.parent.calculate_bounds(new_A_L[:,:-1].double(), new_A_U[:,:-1].double())
                 
                 return lower_bound + new_A_L[:, -1], upper_bound + new_A_U[:, -1]

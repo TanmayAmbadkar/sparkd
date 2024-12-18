@@ -3,7 +3,6 @@ import omnisafe
 
 env_id = 'SafetyPointGoal1-v0'
 
-agent = omnisafe.Agent('CPO', env_id)
-# agent.learn()
+agent = omnisafe.Agent('CPO', env_id).learn()
 
-print(dir(agent.agent))
+# print(dir(agent.agent))

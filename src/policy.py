@@ -26,7 +26,7 @@ class SACPolicy:
                  sac_args):
         self.agent = SAC(gym_env.observation_space.shape[0],
                          gym_env.action_space, sac_args)
-        self.memory = ReplayMemory(replay_size, gym_env.observation_space, seed)
+        self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
         self.updates = 0
         self.batch_size = batch_size
 

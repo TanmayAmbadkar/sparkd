@@ -3,11 +3,16 @@ from pyearth._basis import ConstantBasisFunction, LinearBasisFunction, \
     HingeBasisFunction
 from typing import Optional, List, Callable
 import numpy as np
-import torch
 import scipy.stats
 from src.env_model import MARSModel, MARSComponent, ResidualEnvModel, get_environment_model
 from e2c.e2c_model import E2CPredictor, fit_e2c
 from abstract_interpretation.verification import get_constraints 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from typing import Union
+
 
 
 class MarsE2cModel:
@@ -81,6 +86,78 @@ class MarsE2cModel:
     def __str__(self):
         return "MarsE2cModel using E2CPredictor"
 
+class RewardModel:
+    
+    def __init__(self, input_size, 
+            input_lows: np.ndarray,
+            input_highs: np.ndarray,
+            output_lows: np.ndarray,
+            output_highs: np.ndarray):
+        self.model = nn.Sequential(
+            nn.Linear(input_size, 8),
+            nn.ReLU(),
+            nn.Linear(8, 8),
+            nn.ReLU(),
+            nn.Linear(8, 1)
+        )
+        
+        self.input_lows = input_lows
+        self.input_highs = input_highs
+        self.output_lows = output_lows
+        self.output_highs = output_highs
+        
+    def train(self, X, y):
+            
+        # Convert inputs and rewards to tensors
+        X = torch.Tensor(X)
+        rewards = torch.Tensor(y)
+        
+        # Define the loss function and optimizer
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001)
+        
+        # Create DataLoader for batching
+        dataset = TensorDataset(X, rewards)
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        
+        # Training loop
+        epochs = 100
+        self.model.train()
+        for epoch in range(epochs):
+            total_loss = 0.0
+            for batch_X, batch_rewards in dataloader:
+                # Zero the gradients
+                optimizer.zero_grad()
+                
+                # Forward pass
+                predictions = self.model(batch_X)
+                
+                # Compute loss
+                loss = criterion(predictions.squeeze(), batch_rewards)
+                
+                # Backward pass
+                loss.backward()
+                
+                # Update weights
+                optimizer.step()
+                
+                # Accumulate loss
+                total_loss += loss.item()
+            
+            # Print loss for every epoch
+            if (epoch+1)%20 == 0:
+                print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(dataloader):.4f}")
+        
+    def __call__(self, X):
+        
+        X = (X - self.input_lows)/(self.input_highs - self.input_lows)
+        with torch.no_grad():
+            rew = self.model(torch.Tensor(X).reshape(1, -1))
+        
+        return rew.detach().numpy().reshape(-1, ) * (self.output_highs - self.output_lows) + self.output_lows
+
+        
+
 class EnvModel:
     """
     A full environment model including a symbolic model and a neural model.
@@ -93,7 +170,7 @@ class EnvModel:
     def __init__(
             self,
             mars: MarsE2cModel,
-            symb_reward: MARSModel,
+            symb_reward: Union[MARSModel, RewardModel],
             net: ResidualEnvModel,
             reward: ResidualEnvModel,
             use_neural_model: bool,
@@ -141,7 +218,8 @@ class EnvModel:
             rew = self.reward(torch.tensor(inp, dtype=torch.float32)).item()
         else:
             neur = np.zeros_like(symb)
-            rew = self.symb_reward(inp)[0]
+            # rew = 0
+            rew = self.symb_reward(np.hstack([inp, symb.reshape(-1, )]))[0]
             
         return np.clip(symb + neur, self.observation_space_low, self.observation_space_high), rew
 
@@ -167,8 +245,6 @@ class EnvModel:
 
 
 
-
-
 def get_environment_model(     # noqa: C901
         input_states: np.ndarray,
         actions: np.ndarray,
@@ -182,7 +258,7 @@ def get_environment_model(     # noqa: C901
         cost_model: torch.nn.Module = None,
         policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         data_stddev: float = 0.01,
-        model_pieces: int = 10,
+        model_pieces: int = 20,
         latent_dim: int = 4,
         horizon: int = 5,
         e2c_predictor = None) -> EnvModel:
@@ -211,24 +287,21 @@ def get_environment_model(     # noqa: C901
 
     domain = get_constraints(e2c_predictor.encoder.net, domain)
     lows, highs = domain.calculate_bounds()
+    lows = lows.detach().numpy()
+    highs = highs.detach().numpy()
     
     input_states = e2c_predictor.transform(input_states)
     output_states = e2c_predictor.transform(output_states)
 
     
-    
-    states_mean = np.concatenate((input_states, output_states),
-                                 axis=0).mean(axis=0)
-    states_std = np.maximum(np.concatenate((input_states, output_states),
-                                           axis=0).std(axis=0), 1e-5)
-    actions_mean = actions.mean(axis=0)
-    actions_std = np.maximum(actions.std(axis=0), 1e-5)
-    rewards_mean = rewards.mean()
-    rewards_std = np.maximum(rewards.std(), 1e-5)
+    actions_min = actions.min(axis=0)
+    actions_max = actions.max(axis=0)
+    rewards_min = rewards.min()
+    rewards_max = rewards.max()
 
-    print("State stats:", states_mean, states_std)
-    print("Action stats:", actions_mean, actions_std)
-    print("Reward stats:", rewards_mean, rewards_std)
+    print("State stats:", lows, highs)
+    print("Action stats:", actions_min, actions_max)
+    print("Reward stats:", rewards_min, rewards_max)
     
     
     parsed_mars = MarsE2cModel(e2c_predictor, latent_dim)
@@ -239,18 +312,18 @@ def get_environment_model(     # noqa: C901
     print("Model estimation error:", np.mean((Yh - output_states)**2))
 
     
-    input_states = (input_states - states_mean) / states_std
-    output_states = (output_states - states_mean) / states_std
-    actions = (actions - actions_mean) / actions_std
-    rewards = (rewards - rewards_mean) / rewards_std
+    input_states = (input_states - lows) / (highs - lows)
+    output_states = (output_states - lows) / (highs - lows)
+    actions = (actions - actions_min) / (actions_max - actions_min)
+    rewards = (rewards - rewards_min) / (rewards_max - rewards_min)
 
     if policy is not None:
-        policy_actions = (actions - actions_mean) / actions_std
-        next_policy_actions = (actions - actions_mean) / actions_std
+        policy_actions = (actions - actions_min) / (actions_max - actions_min)
+        next_policy_actions = (actions - actions_min) / (actions_max - actions_min)
 
     terms = 20
     # Lower penalties allow more model complexity
-    X = np.concatenate((input_states, actions), axis=1)
+    X = np.concatenate((input_states, actions, output_states), axis=1)
 
 
     
@@ -274,9 +347,9 @@ def get_environment_model(     # noqa: C901
         arch.append(latent_dim)
         model = ResidualEnvModel(
             arch,
-            np.concatenate((states_mean, actions_mean)),
-            np.concatenate((states_std, actions_std)),
-            states_mean, states_std)
+            np.concatenate((lows, highs)),
+            np.concatenate((actions_min, actions_max)),
+            lows, highs)
         model.train()
 
         # Set up a training environment
@@ -307,39 +380,45 @@ def get_environment_model(     # noqa: C901
         model.eval()
 
         # Get a symbolic reward model
-    reward_symb = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0,
-                        endspan=terms, minspan=terms)
-    reward_symb.fit(X, rewards)
-
-    rew_coeffs = reward_symb.coef_
-    rew_basis = []
-    for fn in reward_symb.basis_:
-        if fn.is_pruned():
-            continue
-        if isinstance(fn, ConstantBasisFunction):
-            rew_basis.append(MARSComponent())
-        elif isinstance(fn, LinearBasisFunction):
-            rew_basis.append(MARSComponent(fn.get_variable()))
-        elif isinstance(fn, HingeBasisFunction):
-            rew_basis.append(MARSComponent(term=fn.get_variable(),
-                                           knot=fn.get_knot(),
-                                           negate=fn.get_reverse()))
-        else:
-            raise Exception("Unrecognized basis function: " + type(fn))
-    parsed_rew = MARSModel(
-        rew_basis, rew_coeffs, 0.01,
-        np.concatenate((states_mean, actions_mean)),
-        np.concatenate((states_std, actions_std)),
-        rewards_mean[None], rewards_std[None])
+    # reward_symb = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0,
+    #                     endspan=terms, minspan=terms)
+    # reward_symb.fit(X, rewards)
+    
+    # rew_coeffs = reward_symb.coef_
+    # rew_basis = []
+    # for fn in reward_symb.basis_:
+    #     if fn.is_pruned():
+    #         continue
+    #     if isinstance(fn, ConstantBasisFunction):
+    #         rew_basis.append(MARSComponent())
+    #     elif isinstance(fn, LinearBasisFunction):
+    #         rew_basis.append(MARSComponent(fn.get_variable()))
+    #     elif isinstance(fn, HingeBasisFunction):
+    #         rew_basis.append(MARSComponent(term=fn.get_variable(),
+    #                                        knot=fn.get_knot(),
+    #                                        negate=fn.get_reverse()))
+    #     else:
+    #         raise Exception("Unrecognized basis function: " + type(fn))
+    # parsed_rew = MARSModel(
+    #     rew_basis, rew_coeffs, 0.01,
+    #     np.concatenate((states_mean, actions_mean, states_mean)),
+    #     np.concatenate((states_std, actions_std, states_std)),
+    #     rewards_mean[None], rewards_std[None])
+    
+    parsed_rew = RewardModel(X.shape[1], np.concatenate((lows, actions_min, lows)),
+        np.concatenate((highs, actions_max, highs)),
+        rewards_min[None], rewards_max[None])
+    
+    parsed_rew.train(X, rewards)
 
     if use_neural_model:
         # Set up a neural network for the rewards
         arch[-1] = 1
         rew_model = ResidualEnvModel(
             arch,
-            np.concatenate((states_mean, actions_mean)),
-            np.concatenate((states_std, actions_std)),
-            rewards_mean[None], rewards_std[None])
+            np.concatenate((lows, actions_min)),
+            np.concatenate((highs, actions_max)),
+            rewards_min[None], rewards_max[None])
 
         optim = torch.optim.Adam(rew_model.parameters(), lr=1e-5)
         loss = torch.nn.SmoothL1Loss()
@@ -375,8 +454,8 @@ def get_environment_model(     # noqa: C901
         if cost_model is None:
             cost_model = ResidualEnvModel(
                 arch,
-                np.concatenate((states_mean, actions_mean)),
-                np.concatenate((states_std, actions_std)),
+                np.concatenate((lows, actions_min)),
+                np.concatenate((highs, actions_max)),
                 0.0, 1.0)
 
         optim = torch.optim.Adam(cost_model.parameters(), lr=1e-4)
@@ -424,7 +503,7 @@ def get_environment_model(     # noqa: C901
     # print(symb.summary())
     print(parsed_mars)
     print("Model MSE:", np.mean(np.sum((Yh - output_states)**2, axis=1)))
-    print(reward_symb.summary())
+    # print(reward_symb.summary())
 
     return EnvModel(parsed_mars, parsed_rew, model, rew_model,
                     use_neural_model, lows[:input_states.shape[1]], highs[:input_states.shape[1]]), cost_model

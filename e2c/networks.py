@@ -11,7 +11,7 @@ def weights_init(m):
 class Encoder(nn.Module):
     def __init__(self, n_features, reduced_dim):
         super(Encoder, self).__init__()
-        self.net = NeuralNetwork([LinearLayer(n_features, 12), TanhLayer(), LinearLayer(12, reduced_dim)])
+        self.net = NeuralNetwork([LinearLayer(n_features, 12), ReLULayer(), LinearLayer(12, reduced_dim)])
         # self.net.apply(weights_init)
         self.obs_dim = n_features
         self.z_dim = reduced_dim
@@ -26,7 +26,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, reduced_dim, n_features):
         super(Decoder, self).__init__()
-        self.net = NeuralNetwork([LinearLayer(reduced_dim, 12), TanhLayer(), LinearLayer(12, n_features)])
+        self.net = NeuralNetwork([LinearLayer(reduced_dim, 12), ReLULayer(), LinearLayer(12, n_features)])
         # self.net.apply(weights_init)
         self.z_dim = reduced_dim
         self.obs_dim = n_features

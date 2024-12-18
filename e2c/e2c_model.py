@@ -209,7 +209,7 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
     e2c_predictor.encoder.requires_grad = True
     e2c_predictor.decoder.requires_grad = True
     e2c_predictor.transition.requires_grad = False
-    trainer = pl.Trainer(max_epochs=20, accelerator="gpu", devices = 1)
+    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)
@@ -219,7 +219,7 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
     e2c_predictor.decoder.requires_grad = False
     e2c_predictor.transition.requires_grad = True
     # Initialize the trainer
-    trainer = pl.Trainer(max_epochs=20, accelerator="gpu", devices = 1)
+    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)

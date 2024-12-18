@@ -6,8 +6,10 @@ import sys
 
 class LunarLanderEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("LunarLander-v2", continuous=True)
+        self.env = gym.make("LunarLander-v3", continuous=True)
         self.action_space = self.env.action_space
+        self.original_observation_space = self.env.observation_space
+        self.continuous = True
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
@@ -33,21 +35,21 @@ class LunarLanderEnv(gym.Env):
         upper_bounds = np.copy(obs_space_upper)
 
         # Horizontal position constraint (x) - relaxed
-        lower_bounds[0] = -1.5  # Increased from 0.75 to 1.0
-        upper_bounds[0] = 1.5
+        lower_bounds[0] = -1  # Increased from 0.75 to 1.0
+        upper_bounds[0] = 1
 
         # Vertical position constraint (y) - relaxed
         
-        lower_bounds[1] = 0.0
-        upper_bounds[1] = 2.5
+        lower_bounds[1] = -0.01
+        upper_bounds[1] = 2
 
         # Horizontal velocity constraint (vx) - relaxed
-        lower_bounds[2] = -2 # Increased from 0.5 to 0.75
-        upper_bounds[2] = 2
+        lower_bounds[2] = -1 # Increased from 0.5 to 0.75
+        upper_bounds[2] = 1
 
         # Vertical velocity constraint (vy) - relaxed
-        lower_bounds[3] = -2  # Increased from 0.5 to 0.75
-        upper_bounds[3] = 2
+        lower_bounds[3] = -1.5  # Increased from 0.5 to 0.75
+        upper_bounds[3] = 0.5
 
         input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
     
@@ -84,6 +86,7 @@ class LunarLanderEnv(gym.Env):
         # else:
             # state = self.reduce_state(state)
         self.step_counter+=1
+        
         
         return state, reward, self.done, truncation, {"state_original": original_state}
 

@@ -11,8 +11,8 @@ class BipedalWalkerEnv(gym.Env):
         self.action_space = self.env.action_space
         
         self.original_obs_space = self.env.observation_space
-        # self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
-        self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(self.env.observation_space.shape[0],)) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        # self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(self.env.observation_space.shape[0],)) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         
         self.state_processor = state_processor
         self.safety = safety
@@ -23,8 +23,6 @@ class BipedalWalkerEnv(gym.Env):
         self.done = False  
         self.safe_polys = []
         self.polys = []
-        self.MAX = np.array(self.original_obs_space.high)
-        self.MIN = np.array(self.original_obs_space.low)
         self.safety_constraints()
         self.unsafe_constraints()
         
@@ -42,32 +40,54 @@ class BipedalWalkerEnv(gym.Env):
 
         # Modify the specific components based on the constraints
         # Angular Speed
-        hull_ang_gen = 0.7
-        vang_gen = 0.9
-        vhor_gen = 0.8
-        vver_gen = 0.8
-        hipjoinang_gen = 1.1
-
         # Set the new bounds for each relevant component
-        lower_bounds[0] = center[0] - hull_ang_gen
-        upper_bounds[0] = center[0] + hull_ang_gen
+        lower_bounds[0] = -0.25
+        upper_bounds[0] = 0.25
 
-        lower_bounds[1] = 0.25 - vang_gen
-        upper_bounds[1] = 0.25 + vang_gen
+        lower_bounds[1] = -0.1
+        upper_bounds[1] = 0.1
 
-        lower_bounds[2] = center[2] - vhor_gen
-        upper_bounds[2] = center[2] + vhor_gen
+        lower_bounds[2] = -0.05
+        upper_bounds[2] = 0.6
 
-        lower_bounds[3] = center[3] - vver_gen
-        upper_bounds[3] = center[3] + vver_gen
+        lower_bounds[3] = -0.15
+        upper_bounds[3] = 0.1
 
-        lower_bounds[4] = 0.15 - hipjoinang_gen
-        upper_bounds[4] = 0.15 + hipjoinang_gen
+        lower_bounds[4] = -0.7
+        upper_bounds[4] = 1.5
+        
+        lower_bounds[5] = -2
+        upper_bounds[5] = 2
+        
+        lower_bounds[6] = -1
+        upper_bounds[6] = 1
+        
+        lower_bounds[7] = -1.01
+        upper_bounds[7] = 1.01
+        
+        lower_bounds[8] = 0
+        upper_bounds[8] = 1.1
+        
+        lower_bounds[9] = -1
+        upper_bounds[9] = 1.3
+        
+        lower_bounds[10] = -1.7
+        upper_bounds[10] = 1.05
+        
+        lower_bounds[11] = -1
+        upper_bounds[11] = 1
+        
+        lower_bounds[12] = -1.01
+        upper_bounds[12] = 1.01
+        
+        lower_bounds[13] = -0.01
+        upper_bounds[13] = 1.01
+
 
         # Construct the polyhedra constraints (polys)
+        
+        print(lower_bounds, upper_bounds)
            
-        lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX)
-        upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX)
         input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
         polys = input_deeppoly_domain.to_hyperplanes()
 
@@ -76,29 +96,7 @@ class BipedalWalkerEnv(gym.Env):
         self.original_safety = input_deeppoly_domain
         self.safe_polys = [np.array(polys)]
         self.original_safe_polys = [np.array(polys)]
-            
-        
-    # def unsafe_constraints(self):
-        
-    #     obs_space_lower = self.original_obs_space.low
-    #     obs_space_upper = self.original_obs_space.high
-    #     unsafe_regions = []
-    #     for polys in self.safe_polys:
-    #         for i, poly in enumerate(polys):
-    #             A = poly[:-1]
-    #             b = -poly[-1]
-    #             unsafe_regions.append(np.append(-A, b))
-        
-    #     for i in range(self.observation_space.shape[0]):
-    #         A1 = np.zeros(self.observation_space.shape[0])
-    #         A2 = np.zeros(self.observation_space.shape[0])
-    #         A1[i] = 1
-    #         A2[i] = -1
-    #         unsafe_regions.append(np.append(A1, -obs_space_upper[i]))
-    #         unsafe_regions.append(np.append(A2, obs_space_lower[i]))
-        
-    #     self.polys = [np.array(unsafe_regions)]
-
+      
     def unsafe_constraints(self):
         
         unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
@@ -116,7 +114,6 @@ class BipedalWalkerEnv(gym.Env):
 
         original_state = np.copy(state)
         
-        original_state = normalize_constraints(original_state, self.MIN, self.MAX)
         if self.state_processor is not None:
             # state = self.reduce_state(state)
             # state = torch.Tensor(state, dtype = torch.float64)
@@ -125,11 +122,9 @@ class BipedalWalkerEnv(gym.Env):
                 state = self.state_processor(original_state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-        else:
-            state = normalize_constraints(state, self.MIN, self.MAX)
             
         self.step_counter+=1
-        
+
         return state, reward, self.done, truncation, {"state_original": original_state}
 
     def reset(self, **kwargs):
@@ -145,9 +140,7 @@ class BipedalWalkerEnv(gym.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-            original_state = normalize_constraints(original_state, self.MIN, self.MAX)
-        else:
-            state = normalize_constraints(state, self.MIN, self.MAX)
+            # original_state = normalize_constraints(original_state, self.MIN, self.MAX)
         return state, {"state_original": original_state}
 
     def render(self, mode='human'):
