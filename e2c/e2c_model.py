@@ -55,7 +55,7 @@ class E2CPredictor(pl.LightningModule):
         z_t, z_t_next, ae_loss = self._forward_ae_step(x, x_next)
         transition_loss = 0
         if not self.train_ae:
-            z_t, z_t_next, ae_loss = z_t.detach(), z_t_next.detach(), ae_loss.detach()
+            z_t, z_t_next, ae_loss = z_t, z_t_next, ae_loss.detach()
             transition_loss = self._forward_transition_step(z_t, u, z_t_next, x_next)
         # Compute loss
         lamda = 0.25  # You can parameterize this value
@@ -206,20 +206,29 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
 
     # Initialize the trainer
     e2c_predictor.train_ae = True
-    e2c_predictor.encoder.requires_grad = True
-    e2c_predictor.decoder.requires_grad = True
-    e2c_predictor.transition.requires_grad = False
+    
+    for param in e2c_predictor.encoder.parameters():
+        param.requires_grad = True
+    for param in e2c_predictor.decoder.parameters():
+        param.requires_grad = True
+    for param in e2c_predictor.transition.parameters():
+        param.requires_grad = False
+    
     trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)
     
     e2c_predictor.train_ae = False
-    e2c_predictor.encoder.requires_grad = False
-    e2c_predictor.decoder.requires_grad = False
-    e2c_predictor.transition.requires_grad = True
+    for param in e2c_predictor.encoder.parameters():
+        param.requires_grad = False
+    for param in e2c_predictor.decoder.parameters():
+        param.requires_grad = False
+    for param in e2c_predictor.transition.parameters():
+        param.requires_grad = True
+    
     # Initialize the trainer
-    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
+    trainer = pl.Trainer(max_epochs=30, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)

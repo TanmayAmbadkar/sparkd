@@ -32,7 +32,7 @@ parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor for reward (default: 0.99)')
 parser.add_argument('--tau', type=float, default=0.005, metavar='G',
                     help='target smoothing coefficient (tau) (default: 0.005)')
-parser.add_argument('--lr', type=float, default=0.00001, metavar='G',
+parser.add_argument('--lr', type=float, default=0.0003, metavar='G',
                     help='learning rate (default: 0.0003)')
 parser.add_argument('--alpha', type=float, default=0.2, metavar='G',
                     help='Temperature parameter alpha determines the relative importance of the entropy\
@@ -86,7 +86,7 @@ np.random.seed(args.seed)
 # safe_agent = None
 
 # Tensorboard
-writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
+writer = SummaryWriter('runs/temp/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
@@ -157,6 +157,7 @@ while total_numsteps < args.start_steps:
         if env.unsafe(next_state, False):
             real_unsafe_episodes += 1
             episode_reward -= 10
+            reward+=-10
             print("UNSAFE (outside testing)", np.round(next_state, 2))
             done = True
             cost = 1
@@ -315,6 +316,7 @@ while True:
             if env.unsafe(info['state_original'], False):
                 real_unsafe_episodes += 1
                 episode_reward -= 10
+                reward+=-10
                 print("UNSAFE (outside testing)", next_state)
                 done = True
                 cost = 1

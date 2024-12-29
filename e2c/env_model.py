@@ -20,7 +20,7 @@ class MarsE2cModel:
     A model that uses the E2CPredictor to obtain A, B, and c matrices
     and provides a similar interface to MARSModel.
     """
-    def __init__(self, e2c_predictor, s_dim=None):
+    def __init__(self, e2c_predictor: E2CPredictor, s_dim=None):
         self.e2c_predictor = e2c_predictor
         self.s_dim = s_dim
 
@@ -96,8 +96,6 @@ class RewardModel:
         self.model = nn.Sequential(
             nn.Linear(input_size, 8),
             nn.ReLU(),
-            nn.Linear(8, 8),
-            nn.ReLU(),
             nn.Linear(8, 1)
         )
         
@@ -145,8 +143,7 @@ class RewardModel:
                 total_loss += loss.item()
             
             # Print loss for every epoch
-            if (epoch+1)%20 == 0:
-                print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(dataloader):.4f}")
+            print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(dataloader):.4f}")
         
     def __call__(self, X):
         
@@ -219,7 +216,7 @@ class EnvModel:
         else:
             neur = np.zeros_like(symb)
             # rew = 0
-            rew = self.symb_reward(np.hstack([inp, symb.reshape(-1, )]))[0]
+            rew = self.symb_reward(state)[0]
             
         return np.clip(symb + neur, self.observation_space_low, self.observation_space_high), rew
 
@@ -310,6 +307,18 @@ def get_environment_model(     # noqa: C901
     Yh = np.array([parsed_mars(state, normalized=True) for state in X]).reshape(input_states.shape[0], -1)
     
     print("Model estimation error:", np.mean((Yh - output_states)**2))
+    
+    
+    # Get the maximum distance between a predction and a datapoint
+    diff = np.amax(np.abs(Yh - output_states))
+
+    # Get a confidence interval based on the quantile of the chi-squared
+    # distribution
+    conf = data_stddev * np.sqrt(scipy.stats.chi2.ppf(
+        0.9, output_states.shape[1]))
+    err = diff + conf
+    print("Computed error:", err, "(", diff, conf, ")")
+    parsed_mars.error = err
 
     
     input_states = (input_states - lows) / (highs - lows)
@@ -323,20 +332,11 @@ def get_environment_model(     # noqa: C901
 
     terms = 20
     # Lower penalties allow more model complexity
-    X = np.concatenate((input_states, actions, output_states), axis=1)
-
-
+    # X = np.concatenate((input_states, actions, output_states), axis=1)
     
-    # Get the maximum distance between a predction and a datapoint
-    diff = np.amax(np.abs(Yh - output_states))
+    X = output_states
 
-    # Get a confidence interval based on the quantile of the chi-squared
-    # distribution
-    conf = data_stddev * np.sqrt(scipy.stats.chi2.ppf(
-        0.9, output_states.shape[1]))
-    err = diff + conf
-    print("Computed error:", err, "(", diff, conf, ")")
-    parsed_mars.error = err
+
 
     if use_neural_model:
         # Set up a neural network for the residuals.
@@ -405,9 +405,9 @@ def get_environment_model(     # noqa: C901
     #     np.concatenate((states_std, actions_std, states_std)),
     #     rewards_mean[None], rewards_std[None])
     
-    parsed_rew = RewardModel(X.shape[1], np.concatenate((lows, actions_min, lows)),
-        np.concatenate((highs, actions_max, highs)),
-        rewards_min[None], rewards_max[None])
+    parsed_rew = RewardModel(X.shape[1], lows, highs, rewards_min, rewards_max)
+        # np.concatenate((highs, actions_max, highs)),
+        # rewards_min[None], rewards_max[None])
     
     parsed_rew.train(X, rewards)
 
