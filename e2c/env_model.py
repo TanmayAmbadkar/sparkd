@@ -6,7 +6,8 @@ import numpy as np
 import scipy.stats
 from src.env_model import MARSModel, MARSComponent, ResidualEnvModel, get_environment_model
 from e2c.e2c_model import E2CPredictor, fit_e2c
-from abstract_interpretation.verification import get_constraints 
+from abstract_interpretation.verification import get_constraints, get_ae_bounds, get_variational_bounds
+from abstract_interpretation import domains
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -51,37 +52,52 @@ class MarsE2cModel:
         where x is the input state-action vector.
 
         Parameters:
-        - x: The current state.
-        - u: The action.
-        - s_dim: The dimension of the state.
-        - steps: Number of steps to unroll for error estimation.
-        - normalized: Whether the input is already normalized.
+        - point: The concatenated (state, action) input vector of length s_dim + u_dim.
+        - s_dim: The dimension of the state (and latent dimension, if they match).
+        - steps: Number of steps to unroll for error estimation (not used here).
+        - normalized: Whether 'point' is already normalized (not used here).
 
         Returns:
-        - M: The linear approximation matrix.
-        - eps: The error bound (uncertainty) associated with this approximation.
+        - M: The linear approximation matrix of shape [s_dim, (s_dim + u_dim + 1)].
+        - eps: A vector of length s_dim, taken from diag(A_t @ A_t^T).
         """
+
+        # 1. If needed, unnormalize:
         # if not normalized:
-            # point = (point - self.inp_means) / self.inp_stds
+        #     point = (point - self.inp_means) / self.inp_stds
+
+        # 2. Split into state (x_norm) and action (u_norm)
         x_norm = point[:s_dim]
         u_norm = point[s_dim:]
 
-        # Convert to tensors
-        x_tensor = torch.tensor(x_norm).unsqueeze(0).double()
-        u_tensor = torch.tensor(u_norm).unsqueeze(0).double()
+        # 3. Convert to torch tensors
+        x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
+        u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
 
-        # Use E2CPredictor to obtain z_t, A_t, B_t, c_t, z_var
-        _, A_t, B_t, c_t = self.e2c_predictor.transition(x_tensor, u_tensor)
+        # 4. Run the E2C transition:
+        #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)
+        z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t = self.e2c_predictor.transition(
+            x_tensor, x_tensor, u_tensor
+        )
 
-        # Convert tensors to numpy arrays
-        A_t = A_t.detach().numpy().squeeze(0)
-        B_t = B_t.detach().numpy().squeeze(0)
-        c_t = c_t.detach().numpy().squeeze(0)
+        # 5. Convert PyTorch tensors to NumPy, remove batch dimension
+        A_t = A_t.detach().cpu().numpy().squeeze(0)    # shape [s_dim, s_dim]
+        B_t = B_t.detach().cpu().numpy().squeeze(0)    # shape [s_dim, u_dim]
+        c_t = c_t.detach().cpu().numpy().squeeze(0)    # shape [s_dim]
 
-        # Combine into a single matrix M
+        # 6. Construct M by stacking [A | B | c], giving shape [s_dim, s_dim + u_dim + 1]
+        #    Note: c_t[:, None] is the bias column
         M = np.hstack((A_t, B_t, c_t[:, None]))
-        eps = np.zeros(s_dim)
+
+        # 7. Compute eps as the diagonal of A_t @ A_t^T.
+        #    That yields a 1D array of length s_dim.
+        A_tA_tT = A_t @ A_t.T  # shape [s_dim, s_dim]
+        # eps = np.diag(A_tA_tT) # shape [s_dim]
+        eps = np.zeros_like(c_t)
+
         return M, eps
+
+
 
     def __str__(self):
         return "MarsE2cModel using E2CPredictor"
@@ -89,20 +105,21 @@ class MarsE2cModel:
 class RewardModel:
     
     def __init__(self, input_size, 
-            input_lows: np.ndarray,
-            input_highs: np.ndarray,
-            output_lows: np.ndarray,
-            output_highs: np.ndarray):
+            input_mean: np.ndarray,
+            input_std: np.ndarray,
+            rew_mean: np.ndarray,
+            rew_std: np.ndarray):
         self.model = nn.Sequential(
             nn.Linear(input_size, 8),
             nn.ReLU(),
-            nn.Linear(8, 1)
+            nn.Linear(8, 1),
+            nn.Sigmoid()
         )
         
-        self.input_lows = input_lows
-        self.input_highs = input_highs
-        self.output_lows = output_lows
-        self.output_highs = output_highs
+        self.input_mean = input_mean
+        self.input_std = input_std
+        self.rew_mean = rew_mean
+        self.rew_std = rew_std
         
     def train(self, X, y):
             
@@ -112,14 +129,14 @@ class RewardModel:
         
         # Define the loss function and optimizer
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001)
         
         # Create DataLoader for batching
         dataset = TensorDataset(X, rewards)
         dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
         
         # Training loop
-        epochs = 100
+        epochs = 70
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0.0
@@ -147,11 +164,11 @@ class RewardModel:
         
     def __call__(self, X):
         
-        X = (X - self.input_lows)/(self.input_highs - self.input_lows)
+        X = (X - self.input_mean)/(self.input_std)
         with torch.no_grad():
             rew = self.model(torch.Tensor(X).reshape(1, -1))
         
-        return rew.detach().numpy().reshape(-1, ) * (self.output_highs - self.output_lows) + self.output_lows
+        return rew.detach().numpy().reshape(-1, ) * (self.rew_std) + self.rew_mean
 
         
 
@@ -258,7 +275,8 @@ def get_environment_model(     # noqa: C901
         model_pieces: int = 20,
         latent_dim: int = 4,
         horizon: int = 5,
-        e2c_predictor = None) -> EnvModel:
+        e2c_predictor = None,
+        epochs: int = 50) -> EnvModel:
     """
     Get a neurosymbolic model of the environment.
 
@@ -278,25 +296,46 @@ def get_environment_model(     # noqa: C901
     arch: A neural architecture for the residual and reward models.
     """
 
+    
+    means = np.mean(input_states, axis=0)
+    stds = np.std(input_states, axis=0)
+    stds[np.equal(np.round(stds, 2), np.zeros(*stds.shape))] = 1
+    
+    if e2c_predictor is not None:
+        means = e2c_predictor.mean
+        stds = e2c_predictor.std
+    
+    input_states = (input_states - means) / stds
+    output_states = (output_states - means) / stds
+    
+    
+    print("Input states:", input_states)
+    
     if e2c_predictor is None:
-        e2c_predictor = E2CPredictor(input_states.shape[1], latent_dim, actions.shape[1], horizon = horizon)
-    fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon)
+        e2c_predictor = E2CPredictor(input_states.shape[-1], latent_dim, actions.shape[-1], horizon = horizon)
+    fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon, epochs=epochs)
 
-    domain = get_constraints(e2c_predictor.encoder.net, domain)
-    lows, highs = domain.calculate_bounds()
+    lows, highs = get_variational_bounds(e2c_predictor, domain)
+    
     lows = lows.detach().numpy()
     highs = highs.detach().numpy()
     
+    input_states= input_states.reshape(-1, input_states.shape[-1])
+    actions = actions.reshape(-1, actions.shape[-1])
+    output_states = output_states.reshape(-1, output_states.shape[-1])
+    rewards = rewards.reshape(-1, 1)
     input_states = e2c_predictor.transform(input_states)
     output_states = e2c_predictor.transform(output_states)
-
     
+    e2c_predictor.mean = means
+    e2c_predictor.std = stds
+
     actions_min = actions.min(axis=0)
     actions_max = actions.max(axis=0)
     rewards_min = rewards.min()
     rewards_max = rewards.max()
 
-    print("State stats:", lows, highs)
+    print("State stats:", input_states.min(axis = 0), input_states.max(axis = 0))
     print("Action stats:", actions_min, actions_max)
     print("Reward stats:", rewards_min, rewards_max)
     
@@ -320,11 +359,13 @@ def get_environment_model(     # noqa: C901
     print("Computed error:", err, "(", diff, conf, ")")
     parsed_mars.error = err
 
+    input_mean, input_std = np.mean(input_states, axis=0), np.std(input_states, axis=0)
+    rew_mean, rew_std = np.mean(rewards), np.std(rewards)
     
-    input_states = (input_states - lows) / (highs - lows)
-    output_states = (output_states - lows) / (highs - lows)
+    input_states = (input_states - input_mean) / (input_std)
+    output_states = (output_states - input_mean) / (input_std)
     actions = (actions - actions_min) / (actions_max - actions_min)
-    rewards = (rewards - rewards_min) / (rewards_max - rewards_min)
+    rewards = (rewards - rew_mean) / (rew_std)
 
     if policy is not None:
         policy_actions = (actions - actions_min) / (actions_max - actions_min)
@@ -379,33 +420,8 @@ def get_environment_model(     # noqa: C901
 
         model.eval()
 
-        # Get a symbolic reward model
-    # reward_symb = Earth(max_degree=1, max_terms=model_pieces, penalty=1.0,
-    #                     endspan=terms, minspan=terms)
-    # reward_symb.fit(X, rewards)
     
-    # rew_coeffs = reward_symb.coef_
-    # rew_basis = []
-    # for fn in reward_symb.basis_:
-    #     if fn.is_pruned():
-    #         continue
-    #     if isinstance(fn, ConstantBasisFunction):
-    #         rew_basis.append(MARSComponent())
-    #     elif isinstance(fn, LinearBasisFunction):
-    #         rew_basis.append(MARSComponent(fn.get_variable()))
-    #     elif isinstance(fn, HingeBasisFunction):
-    #         rew_basis.append(MARSComponent(term=fn.get_variable(),
-    #                                        knot=fn.get_knot(),
-    #                                        negate=fn.get_reverse()))
-    #     else:
-    #         raise Exception("Unrecognized basis function: " + type(fn))
-    # parsed_rew = MARSModel(
-    #     rew_basis, rew_coeffs, 0.01,
-    #     np.concatenate((states_mean, actions_mean, states_mean)),
-    #     np.concatenate((states_std, actions_std, states_std)),
-    #     rewards_mean[None], rewards_std[None])
-    
-    parsed_rew = RewardModel(X.shape[1], lows, highs, rewards_min, rewards_max)
+    parsed_rew = RewardModel(X.shape[1], input_mean, input_std, rew_mean, rew_std)
         # np.concatenate((highs, actions_max, highs)),
         # rewards_min[None], rewards_max[None])
     

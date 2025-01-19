@@ -1,13 +1,14 @@
 import numpy as np
 
 class ReplayMemory:
-    def __init__(self, capacity, observation_space, action_dim, seed):
+    def __init__(self, capacity, observation_space, action_dim, seed, horizon = 1):
         np.random.seed(seed)
         self.capacity = capacity
         self.position = 0
         self.size = 0
         self.state_dim = observation_space.shape
         self.action_dim = action_dim
+        self.horizon = horizon  # Only used
         
         self.states = np.zeros((capacity, *self.state_dim), dtype=np.float32)
         self.next_states = np.zeros((capacity, *self.state_dim), dtype=np.float32)
@@ -15,8 +16,10 @@ class ReplayMemory:
         self.rewards = np.zeros(capacity, dtype=np.float32)
         self.dones = np.zeros(capacity, dtype=np.float32)
         self.costs = np.zeros(capacity, dtype=np.float32)
+            
 
     def push(self, state, action, reward, next_state, done, cost):
+        
         self.states[self.position] = state
         self.actions[self.position] = action
         self.rewards[self.position] = reward
@@ -28,6 +31,7 @@ class ReplayMemory:
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size, get_cost=False, remove_samples=False):
+        
         idx = np.random.choice(self.size, batch_size, replace=False)
 
         batch_states = self.states[idx]
@@ -44,6 +48,7 @@ class ReplayMemory:
 
         if get_cost:
             return batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones, batch_costs
+        
         return batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones
 
     def _remove_indices(self, indices):

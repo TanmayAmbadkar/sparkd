@@ -19,6 +19,7 @@ import gymnasium as gym
 from sklearn.metrics import classification_report
 import itertools
 import matplotlib.pyplot as plt
+import traceback
 
 
 parser = argparse.ArgumentParser(description='SPICE Args')
@@ -41,7 +42,7 @@ parser.add_argument('--automatic_entropy_tuning', default=False, action='store_t
                     help='Automaically adjust alpha (default: False)')
 parser.add_argument('--seed', type=int, default=123456, metavar='N',
                     help='random seed (default: 123456)')
-parser.add_argument('--batch_size', type=int, default=1024, metavar='N',
+parser.add_argument('--batch_size', type=int, default=4096, metavar='N',
                     help='batch size (default: 1024)')
 parser.add_argument('--num_steps', type=int, default=10000000, metavar='N',
                     help='maximum number of steps (default: 10000000)')
@@ -53,7 +54,7 @@ parser.add_argument('--start_steps', type=int, default=10000, metavar='N',
                     help='Steps sampling random actions (default: 10000)')
 parser.add_argument('--target_update_interval', type=int, default=1, metavar='N',
                     help='Value target update per no. of updates per step (default: 1)')
-parser.add_argument('--replay_size', type=int, default=1000000, metavar='N',
+parser.add_argument('--replay_size', type=int, default=10000, metavar='N',
                     help='size of replay buffer (default: 10000000)')
 parser.add_argument('--cuda', action="store_true",
                     help='run on CUDA (default: False)')
@@ -86,7 +87,7 @@ np.random.seed(args.seed)
 # safe_agent = None
 
 # Tensorboard
-writer = SummaryWriter('runs/temp/{}_SAC_{}_{}_{}'.format(
+writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
@@ -106,7 +107,7 @@ real_unsafe_episodes = 0
 total_real_episodes = 0
 total_numsteps = 0
 
-update_steps = 10
+update_steps = 30
 
 
 iterator_loop = itertools.count(1)
@@ -156,8 +157,8 @@ while total_numsteps < args.start_steps:
         cost = 0
         if env.unsafe(next_state, False):
             real_unsafe_episodes += 1
-            episode_reward -= 10
-            reward+=-10
+            episode_reward -= 100
+            reward+=-100
             print("UNSAFE (outside testing)", np.round(next_state, 2))
             done = True
             cost = 1
@@ -191,14 +192,20 @@ while total_numsteps < args.start_steps:
 if not args.no_safety:     
     states, actions, rewards, next_states, dones, costs = \
         real_data.sample(args.start_steps, get_cost=True, remove_samples = True)
-
-    for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-        e2c_data.push(state, action, rewards, next_state, mask, cost)
+    
+    for idx in range(states.shape[0]):
+        state = states[idx]
+        action = actions[idx]
+        reward = rewards[idx]
+        next_state = next_states[idx]
+        mask = dones[idx]
+        cost = costs[idx]
+        e2c_data.push(state, action, reward, next_state, mask, cost)
 
     # print("E2C DATA", len(e2c_data))
 
     states, actions, rewards, next_states, dones, costs = \
-        e2c_data.sample(args.start_steps, get_cost=True)
+        e2c_data.sample(args.start_steps, get_cost=True, remove_samples = False)
 
 
     if args.neural_safety:
@@ -213,23 +220,23 @@ if not args.no_safety:
                 states, actions, next_states, rewards, costs,
                 domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                 model_pieces=20, seed=args.seed, policy=None,
-                use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon)
+                use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon, epochs= 50)
 
-        
-    new_obs_space = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)).calculate_bounds())
+    
+    
+    
+    new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
     env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
     agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
     
-    env.safety = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety).calculate_bounds())
+    env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, env.original_safety))
     
     
-    unsafe_domains_list = [verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_dom) for unsafe_dom in env.unsafe_domains]
-    unsafe_domains_list = [domains.DeepPoly(*unsafe_dom.calculate_bounds()) for unsafe_dom in unsafe_domains_list]
+    unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
+    unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
+    
+    unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
         
-    
-    print(unsafe_domains_list)
-    print(env.safety)
-    print(env.observation_space)
     
     polys = [np.array(env.safety.to_hyperplanes())]
 
@@ -249,8 +256,8 @@ if not args.no_safety:
     # Push collected training data to agent
 
 
-    for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-        agent.add(env_model.mars.e2c_predictor.transform(state), action, rewards, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
+    for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+        agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
 
 else:
     safe_agent=None
@@ -315,8 +322,8 @@ while True:
             cost = 0
             if env.unsafe(info['state_original'], False):
                 real_unsafe_episodes += 1
-                episode_reward -= 10
-                reward+=-10
+                episode_reward -= 100
+                reward+=-100
                 print("UNSAFE (outside testing)", next_state)
                 done = True
                 cost = 1
@@ -349,7 +356,7 @@ while True:
             else:
                 agent.add(state, action, reward, next_state, mask, 0)
 
-        for (state, action, rewards, next_state, mask, cost) in real_buffer:
+        for (state, action, reward, next_state, mask, cost) in real_buffer:
             if cost > 0:
                 real_data.push(state, action, reward, next_state, mask, 1)
             else:
@@ -406,7 +413,8 @@ while True:
             if env.unsafe(next_state, True):
                 print(next_state)
                 unsafe_sim_episodes += 1
-                episode_reward -= 10
+                reward+=-100
+                episode_reward -= 100
                 done = True
                 cost = 1
 
@@ -422,28 +430,41 @@ while True:
         
         total_sim_episodes += 1 
 
-    if (i_episode - 9) % 100 == 0 and not args.no_safety:
+    if ((i_episode-1) // 10) % 8 == 0 and ((i_episode) // 10) % 8 != 0 and not args.no_safety:
+    # if False:
         try:
             
-            
+            print("E2C DATA", len(e2c_data))
             states, actions, rewards, next_states, dones, costs = \
-                real_data.sample(min(len(real_data), 70000), get_cost=True, removes_samples = True)
+                real_data.sample(min(len(real_data), 70000), get_cost=True, remove_samples = True)
                 
             states_e2c, actions_e2c, rewards_e2c, next_states_e2c, dones_e2c, costs_e2c = \
-                e2c_data.sample(min(len(real_data), 30000), get_cost=True, removes_samples = False)
+                e2c_data.sample(min(len(e2c_data), 30000), get_cost=True, remove_samples = False)
                 
+            print(rewards_e2c)
+            print(rewards)
+                    
+            for idx in range(states.shape[0]):
+                state = states[idx]
+                action = actions[idx]
+                reward = rewards[idx]
+                next_state = next_states[idx]
+                mask = dones[idx]
+                cost = costs[idx]
+                e2c_data.push(state, action, reward, next_state, mask, cost)
+
             
-            for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-                e2c_data.push(state, action, rewards, next_state, mask, cost)
-                
             states = np.vstack([states, states_e2c])
             actions = np.vstack([actions, actions_e2c])
-            rewards = np.vstack([rewards, rewards_e2c])
+            rewards = np.concatenate([rewards, rewards_e2c])
             next_states = np.vstack([next_states, next_states_e2c])
-            dones = np.vstack([dones, dones_e2c])
-            costs = np.vstack([costs, costs_e2c])
+            dones = np.concatenate([dones, dones_e2c])
+            costs = np.concatenate([costs, costs_e2c])
             
-        except:
+        except Exception as e:
+            
+            print(traceback.format_exc())
+            print("Error in sampling")
             continue
         
         env_model.mars.e2c_predictor.lr = 0.00001
@@ -459,18 +480,19 @@ while True:
                     states, actions, next_states, rewards, costs,
                     domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
                     model_pieces=20, seed=args.seed, policy=None,
-                    use_neural_model=False, cost_model=None, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon)
+                    use_neural_model=False, cost_model=None, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= 20)
         
-        
-        new_obs_space = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high)).calculate_bounds())
+            
+            
+        new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high)))
         env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
         agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
         
-        env.safety = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety).calculate_bounds())
+        env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, env.original_safety))
         
         
-        unsafe_domains_list = [verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_dom) for unsafe_dom in env.unsafe_domains]
-        unsafe_domains_list = [domains.DeepPoly(*unsafe_dom.calculate_bounds()) for unsafe_dom in unsafe_domains_list]
+        unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
+        unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
             
         
         polys = [np.array(env.safety.to_hyperplanes())]
@@ -488,16 +510,17 @@ while True:
                 env_model.get_symbolic_model(), env.observation_space,
                 env.action_space, args.horizon, env.polys, env.safe_polys)
             safe_agent = Shield(shield, agent)
+        
+        for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+            agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
 
-        # Push collected training data to agent
-        if args.neural_safety:
-            safe_agent = CSCShield(agent, cost_model,
-                                    threshold=args.neural_threshold)
-        else:
-            shield = ProjectionPolicy(
-                env_model.get_symbolic_model(), env.observation_space,
-                env.action_space, args.horizon, env.polys, env.safe_polys)
-            safe_agent = Shield(shield, agent)
+        states, actions, rewards, next_states, dones, costs = \
+                real_data.sample(len(real_data), get_cost=True)
+
+        for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+            agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
+
+        
             
         
 
@@ -537,7 +560,7 @@ while True:
                     done = True
                 if env.unsafe(info['state_original'], False):
                     print("UNSAFE")
-                    episode_reward += -10
+                    episode_reward += -100
                     print(state, "\n",  action, "\n", next_state)
                     unsafe_episodes += 1
                     done = True

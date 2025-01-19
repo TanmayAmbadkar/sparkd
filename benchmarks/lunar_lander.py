@@ -35,13 +35,13 @@ class LunarLanderEnv(gym.Env):
         upper_bounds = np.copy(obs_space_upper)
 
         # Horizontal position constraint (x) - relaxed
-        lower_bounds[0] = -1  # Increased from 0.75 to 1.0
-        upper_bounds[0] = 1
+        lower_bounds[0] = -1.5  # Increased from 0.75 to 1.0
+        upper_bounds[0] = 1.5
 
         # Vertical position constraint (y) - relaxed
         
         lower_bounds[1] = -0.01
-        upper_bounds[1] = 2
+        upper_bounds[1] = 2.5
 
         # Horizontal velocity constraint (vx) - relaxed
         lower_bounds[2] = -1 # Increased from 0.5 to 0.75
@@ -86,6 +86,10 @@ class LunarLanderEnv(gym.Env):
         # else:
             # state = self.reduce_state(state)
         self.step_counter+=1
+        
+        # if self.unsafe(state, simulated = False):
+        #     self.done = True
+        #     reward = -100
         
         
         return state, reward, self.done, truncation, {"state_original": original_state}

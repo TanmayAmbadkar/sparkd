@@ -16,7 +16,7 @@ from e2c.env_model import get_environment_model
 from src.policy import Shield, SACPolicy, ProjectionPolicy, CSCShield
 from abstract_interpretation import domains, verification
 import gymnasium as gym
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, r2_score
 import itertools
 import matplotlib.pyplot as plt
 
@@ -94,7 +94,7 @@ print(hyperparams)
 if not os.path.exists("logs"):
     os.makedirs("logs")
 
-file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
+file = open('logs/temp/{}_SAC_{}_{}_{}.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""), "w+")
 
@@ -168,12 +168,13 @@ while total_numsteps < args.start_steps:
 
         state = next_state
 
+    
     for (state, action, reward, next_state, mask, cost) in real_buffer:
         if cost > 0:
             real_data.push(state, action, reward, next_state, mask, 1)
         else:
             real_data.push(state, action, reward, next_state, mask, 0)
-    
+            
     for (state, action, reward, next_state, mask, cost) in real_buffer:
         if cost > 0:
             agent.add(state, action, reward, next_state, mask, 1)
@@ -190,15 +191,10 @@ while total_numsteps < args.start_steps:
 
 if not args.no_safety:     
     states, actions, rewards, next_states, dones, costs = \
-        real_data.sample(args.start_steps, get_cost=True, remove_samples = True)
+        real_data.sample(len(real_data), get_cost=True, remove_samples = True)
 
-    for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-        e2c_data.push(state, action, rewards, next_state, mask, cost)
-
-    # print("E2C DATA", len(e2c_data))
-
-    states, actions, rewards, next_states, dones, costs = \
-        e2c_data.sample(args.start_steps, get_cost=True)
+    for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+        e2c_data.push(state, action, reward, next_state, mask, cost)
 
 
     if args.neural_safety:
@@ -216,20 +212,27 @@ if not args.no_safety:
                 use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon)
 
         
-    new_obs_space = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)).calculate_bounds())
+    new_obs_space = domains.DeepPoly(*verification.get_variational_bounds(env_model.mars.e2c_predictor, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
     env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
     agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
     
-    env.safety = domains.DeepPoly(*verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, env.original_safety).calculate_bounds())
+    env.safety = domains.DeepPoly(*verification.get_variational_bounds(env_model.mars.e2c_predictor, env.original_safety))
     
     
-    unsafe_domains_list = [verification.get_constraints(env_model.mars.e2c_predictor.encoder.net, unsafe_dom) for unsafe_dom in env.unsafe_domains]
-    unsafe_domains_list = [domains.DeepPoly(*unsafe_dom.calculate_bounds()) for unsafe_dom in unsafe_domains_list]
+    unsafe_domains_list = [verification.get_variational_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
+    unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
         
     
+    domain = verification.get_constraints(env_model.mars.e2c_predictor.encoder.shared_net, domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high))
+    mu_domain = verification.get_constraints(env_model.mars.e2c_predictor.encoder.fc_mu, domain)
+    recovered_dom = verification.get_constraints(env_model.mars.e2c_predictor.decoder.net, mu_domain)
+    print("Recovered domain", recovered_dom.calculate_bounds())
+    print("Original domain",env.original_observation_space)
+    
+    
     print(unsafe_domains_list)
-    print(env.safety)
-    print(env.observation_space)
+    print("SAFETY: ", env.safety)
+    print("OBS SPACE: ", env.observation_space)
     
     polys = [np.array(env.safety.to_hyperplanes())]
 
@@ -249,53 +252,90 @@ if not args.no_safety:
     # Push collected training data to agent
 
 
-    for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-        agent.add(env_model.mars.e2c_predictor.transform(state), action, rewards, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
+    # for (state, action, rewards, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
+    #     agent.add(env_model.mars.e2c_predictor.transform(state[0]), action[0], rewards[0], env_model.mars.e2c_predictor.transform(next_state[0]), mask[0], cost[0])
 
 else:
     safe_agent=None
     
     
-# Test env loop
-
-state, info = env.reset()
-done = False
-trunc = False
-
 next_states = []
 predictions = []
 
 rewards_true = []
 rewards_pred = []
 
-while not done and not trunc:
-    
-    action = env.action_space.sample()
-    
-    next_state, reward_true, done, trunc, info = env.step(action)
-    
-    next_state_pred, reward_pred= env_model(state, action, use_neural_model=False)
-    
-    print("Next state", next_state)
-    print("Next state pred", next_state_pred)
-    print("Reward true", reward_true)
-    print("Reward pred", reward_pred)
-    
-    state = next_state_pred
-    
-    predictions.append(next_state_pred)
-    next_states.append(next_state)
-    
-    print("TRUE UNSAFE", env.unsafe(info['state_original'], False))
-    print("Predicted UNSAFE", env.unsafe(next_state_pred, True))
-    
-    rewards_pred.append(reward_pred)
-    rewards_true.append(reward_true)
+# Test env loop
+for i in range(10):
+    state, info = env.reset()
+    done = False
+    trunc = False
+
+    while not done and not trunc:
+        
+        action = env.action_space.sample()
+        
+        next_state, reward_true, done, trunc, info = env.step(action)
+        
+        
+        next_state_pred, reward_pred= env_model(state, action, use_neural_model=False)
+        
+        if i == 1:
+            print("Next state", next_state)
+            print("Next state pred", next_state_pred)
+            # print("Reward true", reward_true)
+            # print("Reward pred", reward_pred)
+            # print(f"True state {np.round(info['state_original'], 3)}")
+            # print(f"Predicted state {np.round(env_model.mars.e2c_predictor.inverse_transform(next_state), 3)}")
+        
+        state = next_state_pred
+        
+        predictions.append(next_state_pred)
+        next_states.append(next_state)
+        
+        # if i == 1:
+            # print("TRUE UNSAFE", env.unsafe(info['state_original'], False))
+            # print("Predicted UNSAFE", env.unsafe(next_state_pred, True))
+        
+        if env.unsafe(info['state_original'], False):
+            print("UNSAFE")
+            break
+        
+        rewards_pred.append(reward_pred)
+        rewards_true.append(reward_true)
 
 predictions = np.array(predictions)
 next_states = np.array(next_states)
 rewards_pred = np.array(rewards_pred)
 rewards_true = np.array(rewards_true)
+
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+tsne = TSNE(n_components=2, random_state=0)
+X_2d = tsne.fit_transform(np.vstack([next_states, predictions.reshape(-1, args.red_dim)]))
+# X_2d = X_2d[:len(next_states)]
+plt.scatter(X_2d[:len(next_states), 0], X_2d[:len(next_states), 1], c='r', label='True')
+plt.savefig("scatter_e2c.png")
+
+
+tsne = TSNE(n_components=2, random_state=0)
+# X_2d = tsne.fit_transform(predictions.reshape(-1, args.red_dim))
+# X_2d = tsne.transform(predictions.reshape(-1, args.red_dim))
+plt.scatter(X_2d[len(next_states):, 0], X_2d[len(next_states):, 1], c='g', label='Pred')
+plt.savefig("scatter_e2c_pred.png")
+
 print("MSE, MAE for states", np.mean((predictions - next_states)**2), np.mean(np.abs(predictions - next_states)))
 print("MSE, MAE for rewards", np.mean((rewards_pred - rewards_true)**2), np.mean(np.abs(rewards_pred - rewards_true)))
-    
+
+print("r2 score", r2_score(predictions.reshape(predictions.shape[0], -1), next_states.reshape(next_states.shape[0], -1)))
+        
+
+fig = plt.figure()
+ax = fig.add_subplot(projection='3d')
+print(next_states.shape)
+print(predictions.shape)
+predictions = predictions.reshape(-1, 3)
+ax.scatter(next_states[:, 0], next_states[:, 1], next_states[:, 2], c='g', label="True")
+ax.scatter(predictions[:, 0], next_states[:, 1], predictions[:, 2], c='r', label="Pred")
+plt.savefig("scatter_e2c_3d.png")

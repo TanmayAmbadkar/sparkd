@@ -1,19 +1,22 @@
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader, Dataset
-from e2c.networks import Encoder, Transition, Decoder
+from e2c.networks import Encoder, Decoder, Transition
+from e2c.distribution import NormalDistribution
+import copy
+
 
 class E2CPredictor(pl.LightningModule):
-    def __init__(self, n_features, z_dim, u_dim, lr=1e-3, weight_decay=1e-4, horizon = 1, train_ae = True):
+    def __init__(self, n_features, z_dim, u_dim, lr=0.0003, weight_decay=1e-4, horizon=1, train_ae=True, last_predictor = None):
         super(E2CPredictor, self).__init__()
         self.encoder = Encoder(n_features, z_dim)
         transition_net = nn.Sequential(
-            nn.Linear(z_dim, 32),
-            nn.Tanh(),
-            nn.Linear(32, 12),
-            nn.Tanh(),
+            nn.Linear(z_dim, 12),
+            nn.ReLU(),
+            nn.Linear(12, 12),
         )
         self.transition = Transition(transition_net, z_dim, u_dim)
         self.decoder = Decoder(z_dim, n_features)
@@ -23,24 +26,15 @@ class E2CPredictor(pl.LightningModule):
         self.weight_decay = weight_decay
         self.horizon = horizon
         self.train_ae = train_ae
+        self.mean = np.zeros(n_features)
+        self.std = np.ones(n_features)
+        self.last_predictor = last_predictor
 
     def forward(self, x_t, u_t=None):
-        """
-        :param x_t: the input observation at time t (e.g., image or state)
-        :param u_t: the action taken at time t (can be set to zero if not used)
-        :return: z_t, A_t, B_t, o_t (the latent state, state transition matrix, control matrix, and offset)
-        """
-        # Step 1: Encode x_t to get z_t
-        z_t = self.encoder(x_t)
-
-        # Step 2: Set u_t to a zero vector if not provided
+        z_t, _, _ = self.encoder(x_t)
         if u_t is None:
-            u_t = torch.zeros((x_t.size(0), self.u_dim)).to(x_t.device)  # assuming batch size first
-
-        # Step 3: Predict A_t, B_t, o_t using the transition model
+            u_t = torch.zeros((x_t.size(0), self.u_dim)).to(x_t.device)
         z_t_next, A_t, B_t, o_t = self.transition(z_t, u_t)
-
-        # Return latent state z_t, and the matrices A_t, B_t, and offset o_t
         return z_t_next, A_t, B_t, o_t
 
     def training_step(self, batch, batch_idx):
@@ -49,74 +43,70 @@ class E2CPredictor(pl.LightningModule):
         u = u.double()
         x_next = x_next.double()
 
-        # Forward pass
-        # x_recon, x_next_pred, z_t_next, z_t_pred = self._forward_step(x, u, x_next)
-        
-        z_t, z_t_next, ae_loss = self._forward_ae_step(x, x_next)
-        transition_loss = 0
-        if not self.train_ae:
-            z_t, z_t_next, ae_loss = z_t, z_t_next, ae_loss.detach()
-            transition_loss = self._forward_transition_step(z_t, u, z_t_next, x_next)
-        # Compute loss
-        lamda = 0.25  # You can parameterize this value
-        # loss = self.compute_loss(x, x_next, x_recon, x_next_pred, z_t_next, z_t_pred, lamda)
+        # Encode states
+        z_t, mu, logsig = self.encoder(x)
+        z_t_next, mu_next, logsig_next = self.encoder(x_next)
 
-        # Log training loss
-        loss = ae_loss + transition_loss
-        if self.train_ae:
-        # self.log('train_loss', loss, prog_bar=True, logger=True, on_epoch=True)
-            self.log('ae_loss', ae_loss, prog_bar=True, logger=True, on_epoch=True)
-        else:
-            self.log('tran_loss', transition_loss, prog_bar=True, logger=True, on_epoch=True)
-        return loss
+        # Reconstruct states
+        x_recon = self.decoder(z_t)
 
-    def _forward_ae_step(self, x, x_next):
+        # Predict transitions
+        z_t_next_pred, z_t_next_mean, _, _, _, v_t, r_t = self.transition(z_t, mu, u)
         
-        z_t = []
-        z_t_next = []
-        x_recon = []
-        x_next_recon = []
-        for idx in range(x.shape[0]):
-            z_t.append(self.encoder(x[idx]))
-            z_t_next.append(self.encoder(x_next[idx]))
-            x_recon.append(self.decoder(z_t[idx]))
-            x_next_recon.append(self.decoder(z_t[idx]))
-            
-        z_t = torch.stack(z_t)
-        z_t_next = torch.stack(z_t_next)
-        x_recon = torch.stack(x_recon)
-        x_next_recon = torch.stack(x_next_recon)
+        #Reconstruct next states
+        x_next_pred = self.decoder(z_t_next_pred)
         
-        return z_t, z_t_next, F.mse_loss(x, x_recon) + F.mse_loss(x_next, x_next_recon)
         
-    
-    def _forward_transition_step(self, z_t, u, z_t_next, x_next):
+        encoder_distribution = NormalDistribution(mu, logsig)
+        transition_distribution = NormalDistribution(z_t_next_mean, logsig, v_t.squeeze(), r_t.squeeze())
+        next_distribution = NormalDistribution(mu_next, logsig_next)
         
-        transition_loss = 0
-        consistency_loss = 0
-        for hor in range(self.horizon):
-            z_t_curr = z_t[:, hor]
-            _, A_t, B_t, o_t = self.transition(z_t_curr, u[:, hor])
-            for idx in range(hor, self.horizon):
+        total_loss = 0
+        
+        # if self.train_ae:        
+        recon_term = F.mse_loss(x_recon, x)
+        kl_term = - 0.5 * torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
+        total_loss += recon_term + 1*kl_term
+        
+    # else:
+        pred_loss = F.mse_loss(x_next_pred, x_next)
+        
+
+        # consistency loss
+        consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
+        total_loss += consis_term + pred_loss
+        
+        # if self.last_predictor is not None: 
+        #     with torch.no_grad():
+        #         z_t_old, mu_old, logvar_old = self.last_predictor.encoder(x)
+        #         z_t_next_old, mu_next_old, logvar_next_old = self.last_predictor.encoder(x_next)
+        #         # Predict transitions
+        #         z_t_next_pred_old, _, _, _, v_t, r_t = self.last_predictor.transition(mu_old, u)
                 
-                z_t_next_pred = A_t.bmm(z_t_curr.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u[:, idx].unsqueeze(-1)).squeeze(-1) + o_t
-                
-                transition_loss += F.mse_loss(z_t_next_pred, z_t_next[:, idx])
-                # consistency_loss += F.mse_loss(x_next[:, idx], self.decoder(z_t_next_pred))
-                z_t_curr = z_t_next_pred
+        #         #Reconstruct next states
+        #         x_next_pred_old = self.decoder(z_t_next_pred_old)
+        #     total_loss += 0.001 * F.mse_loss(x_next_pred, x_next_pred_old) + 0.001 * F.mse_loss(z_t_next_pred, z_t_next_pred_old) + 0.001 * F.mse_loss(z_t, z_t_old) + total_loss
                 
                 
-        return transition_loss + consistency_loss
-                               
+
+        # Logging
+        self.log("total_loss", total_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        
+        return total_loss
+
+    def kl_divergence(self, mu, logvar):
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         return optimizer
     
     def transform(self, x):
+        x = (x - self.mean) / self.std
         x = torch.tensor(x).double()
+        # print(x)
         with torch.no_grad():
-            z_t = self.encoder(x)
+            z_t = self.encoder.encode(x)
         
         return z_t.numpy()
     
@@ -125,19 +115,19 @@ class E2CPredictor(pl.LightningModule):
         with torch.no_grad():
             z_t = self.decoder(x)
         
+        z_t = z_t * self.std + self.mean
+        
         return z_t.numpy()
     
     def get_next_state(self, x, u):
         x = torch.tensor(x).double()
         u = torch.tensor(u).double()
         with torch.no_grad():
-            z_t_next, A_t, B_t, o_t = self.transition(x, u)
+            z_t_next, _, _, _, _, _, _ = self.transition(x, x, u)
 
             # z_t_next = A_t.bmm(z_t.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u.unsqueeze(-1)).squeeze(-1) + o_t
             
         return z_t_next.numpy()
-    
-    
 
 class E2CDataset(Dataset):
     """
@@ -154,45 +144,20 @@ class E2CDataset(Dataset):
         self.horizon = horizon
 
     def __len__(self):
-        return len(self.states) - self.horizon
+        return len(self.states)
 
     def __getitem__(self, idx):
         """
         Returns a triplet (anchor, positive, negative).
         """
-        state = torch.tensor(self.states[idx:idx + self.horizon], dtype=torch.float32)
-        action = torch.tensor(self.actions[idx:idx + self.horizon], dtype=torch.float32)
-        next_state = torch.tensor(self.next_states[idx:idx + self.horizon], dtype=torch.float32)
+        state = torch.tensor(self.states[idx], dtype=torch.float32)
+        action = torch.tensor(self.actions[idx], dtype=torch.float32)
+        next_state = torch.tensor(self.next_states[idx], dtype=torch.float32)
         
         return (state, action, next_state)
     
-def verify_e2c(e2c_predictor, states, actions, next_states):
-    
-    recon_error = 0
-    states = torch.tensor(states).double()
-    actions = torch.tensor(actions).double()
-    next_states = torch.tensor(next_states).double()
-    with torch.no_grad():
-        recon = e2c_predictor.decoder(e2c_predictor.encoder(states))
-        print(recon.shape)
-        print(states.shape)
-        recon_error = F.mse_loss(states, recon).item()
-        print("RECONSTRUCTION ERROR:", recon_error)
-        
-    with torch.no_grad():
-        
-        enc_state = e2c_predictor.encoder(states)
-        trans_enc_next_state, _, _, _ = e2c_predictor.transition(enc_state, actions)
-        enc_next_state = e2c_predictor.encoder(next_states)
-        # print("Transition error:", F.mse_loss(trans_enc_next_state, enc_next_state))
-        dec_next_state = e2c_predictor.decoder(trans_enc_next_state)
-        print("Reconstructed transition states error:", F.mse_loss(next_states, dec_next_state))
-        
-        
-
-
 # Fit the Autoencoder with Triplet Loss
-def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
+def fit_e2c(states, actions, next_states, e2c_predictor, horizon, epochs = 100):
     """
     Fit the autoencoder with triplet margin loss to the observations and costs.
     
@@ -202,38 +167,46 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon):
     autoencoder (TripletAutoencoder): The autoencoder model to be trained.
     """
     dataset = E2CDataset(states, actions, next_states, horizon)
-    train_loader = DataLoader(dataset, batch_size=128, shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=1)
 
     # Initialize the trainer
     e2c_predictor.train_ae = True
+    # print(next(e2c_predictor.transition.parameters()))
     
-    for param in e2c_predictor.encoder.parameters():
-        param.requires_grad = True
-    for param in e2c_predictor.decoder.parameters():
-        param.requires_grad = True
-    for param in e2c_predictor.transition.parameters():
-        param.requires_grad = False
     
-    trainer = pl.Trainer(max_epochs=10, accelerator="gpu", devices = 1)
+    # for param in e2c_predictor.encoder.parameters():
+    #     param.requires_grad = True
+    # for param in e2c_predictor.decoder.parameters():
+    #     param.requires_grad = True
+    # for param in e2c_predictor.transition.parameters():
+    #     param.requires_grad = False
+    
+    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
     trainer.fit(e2c_predictor, train_loader)
+    # print(next(e2c_predictor.transition.parameters()))
     
-    e2c_predictor.train_ae = False
-    for param in e2c_predictor.encoder.parameters():
-        param.requires_grad = False
-    for param in e2c_predictor.decoder.parameters():
-        param.requires_grad = False
-    for param in e2c_predictor.transition.parameters():
-        param.requires_grad = True
+    del trainer
+    # del dataset
     
-    # Initialize the trainer
-    trainer = pl.Trainer(max_epochs=30, accelerator="gpu", devices = 1)
+    # e2c_predictor.train_ae = False
+    # for param in e2c_predictor.encoder.parameters():
+    #     param.requires_grad = False
+    # for param in e2c_predictor.decoder.parameters():
+    #     param.requires_grad = False
+    # for param in e2c_predictor.transition.parameters():
+    #     param.requires_grad = True
+    
+    # # Initialize the trainer
+    # trainer = pl.Trainer(max_epochs=50, accelerator="gpu", devices = 1)
 
-    # Train the autoencoder
-    trainer.fit(e2c_predictor, train_loader)
+    # # Train the autoencoder
+    # trainer.fit(e2c_predictor, train_loader)
+    # del trainer
     
-    verify_e2c(e2c_predictor, states, actions, next_states)
+    e2c_predictor.last_predictor = copy.deepcopy(e2c_predictor)
+    
     del train_loader
     
     

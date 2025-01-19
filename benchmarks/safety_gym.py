@@ -66,8 +66,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
             lower_bounds[i] = 0
             upper_bounds[i] = 0.8
             
-        lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
-        upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
+        # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
+        # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         
         input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
         polys = input_deeppoly_domain.to_hyperplanes()
@@ -104,9 +104,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-            original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
-        else:
-            state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
+            # original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
             
         self.step_counter+=1
         
@@ -125,9 +123,15 @@ class SafetyPointGoalEnv(gymnasium.Env):
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
-            original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
-        else:
-            state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
+            # original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
+        # else:
+        #     state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
+        
+        
+        if self.unsafe(state, simulated = False):
+            self.done = True
+            reward = -100
+            
         return state, {"state_original": original_state}
 
     def render(self, mode='human'):

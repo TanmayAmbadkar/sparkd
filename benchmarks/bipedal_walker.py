@@ -10,7 +10,7 @@ class BipedalWalkerEnv(gym.Env):
         self.env = gym.make("BipedalWalker-v3")
         self.action_space = self.env.action_space
         
-        self.original_obs_space = self.env.observation_space
+        self.original_observation_space = self.env.observation_space
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         # self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(self.env.observation_space.shape[0],)) if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         
@@ -28,8 +28,8 @@ class BipedalWalkerEnv(gym.Env):
         
     def safety_constraints(self):
         # Define the observation space bounds
-        obs_space_lower = self.original_obs_space.low
-        obs_space_upper = self.original_obs_space.high
+        obs_space_lower = self.original_observation_space.low
+        obs_space_upper = self.original_observation_space.high
 
         # Calculate the center of the observation space
         center = (obs_space_lower + obs_space_upper) / 2
@@ -41,44 +41,44 @@ class BipedalWalkerEnv(gym.Env):
         # Modify the specific components based on the constraints
         # Angular Speed
         # Set the new bounds for each relevant component
-        lower_bounds[0] = -0.25
-        upper_bounds[0] = 0.25
+        lower_bounds[0] = -1
+        upper_bounds[0] = 1
 
-        lower_bounds[1] = -0.1
-        upper_bounds[1] = 0.1
+        lower_bounds[1] = -1
+        upper_bounds[1] = 1
 
-        lower_bounds[2] = -0.05
-        upper_bounds[2] = 0.6
+        lower_bounds[2] = -1
+        upper_bounds[2] = 1
 
-        lower_bounds[3] = -0.15
-        upper_bounds[3] = 0.1
+        lower_bounds[3] = -1
+        upper_bounds[3] = 1
 
-        lower_bounds[4] = -0.7
+        lower_bounds[4] = -1.5
         upper_bounds[4] = 1.5
         
         lower_bounds[5] = -2
         upper_bounds[5] = 2
         
-        lower_bounds[6] = -1
-        upper_bounds[6] = 1
+        lower_bounds[6] = -2
+        upper_bounds[6] = 2
         
-        lower_bounds[7] = -1.01
-        upper_bounds[7] = 1.01
+        lower_bounds[7] = -3
+        upper_bounds[7] = 3
         
         lower_bounds[8] = 0
-        upper_bounds[8] = 1.1
+        upper_bounds[8] = 2
         
-        lower_bounds[9] = -1
-        upper_bounds[9] = 1.3
+        lower_bounds[9] = -2
+        upper_bounds[9] = 2
         
-        lower_bounds[10] = -1.7
-        upper_bounds[10] = 1.05
+        lower_bounds[10] = -2
+        upper_bounds[10] = 2
         
         lower_bounds[11] = -1
         upper_bounds[11] = 1
         
-        lower_bounds[12] = -1.01
-        upper_bounds[12] = 1.01
+        lower_bounds[12] = -2
+        upper_bounds[12] = 2
         
         lower_bounds[13] = -0.01
         upper_bounds[13] = 1.01
@@ -122,6 +122,9 @@ class BipedalWalkerEnv(gym.Env):
                 state = self.state_processor(original_state.reshape(1, -1))
             # state = state.numpy()
             state = state.reshape(-1,)
+        
+        
+
             
         self.step_counter+=1
 
