@@ -7,7 +7,7 @@ from benchmarks.utils import *
 
 class BipedalWalkerEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("BipedalWalker-v3")
+        self.env = gym.make("BipedalWalker-v3", render_mode = "rgb_array")
         self.action_space = self.env.action_space
         
         self.original_observation_space = self.env.observation_space
@@ -25,6 +25,7 @@ class BipedalWalkerEnv(gym.Env):
         self.polys = []
         self.safety_constraints()
         self.unsafe_constraints()
+        self.render_mode = "rgb_array"
         
     def safety_constraints(self):
         # Define the observation space bounds
@@ -41,47 +42,65 @@ class BipedalWalkerEnv(gym.Env):
         # Modify the specific components based on the constraints
         # Angular Speed
         # Set the new bounds for each relevant component
-        lower_bounds[0] = -1
-        upper_bounds[0] = 1
+        # hull angle speed, angular velocity, horizontal speed, vertical speed, position of joints and joints angular speed, legs contact with ground, and 10 lidar rangefinder measurements. 
+        
+#         [-0.5260418  -0.162413   -0.07771564  0.02850035  1.1349214   0.
+#   1.0774546   2.5153055   0.          0.7931532   0.5590972   0.6383554
+#   0.82584924  0.          0.46091083  0.46614516  0.48245916  0.5118689
+#   0.55845267  0.62992734  0.74147916  0.9263216   1.          1.        ]
+        #Hull angle speed
+        lower_bounds[0] = -2
+        upper_bounds[0] = 2
 
+        #Angular velocity
         lower_bounds[1] = -1
         upper_bounds[1] = 1
 
+        #Horizontal speed
         lower_bounds[2] = -1
         upper_bounds[2] = 1
 
+        #Vertical speed
         lower_bounds[3] = -1
         upper_bounds[3] = 1
 
-        lower_bounds[4] = -1.5
-        upper_bounds[4] = 1.5
+        #Joint Position
+        lower_bounds[4] = -3
+        upper_bounds[4] = 3
         
         lower_bounds[5] = -2
         upper_bounds[5] = 2
         
-        lower_bounds[6] = -2
-        upper_bounds[6] = 2
         
+        #Joint Position
+        lower_bounds[6] = -3
+        upper_bounds[6] = 3
+
         lower_bounds[7] = -3
         upper_bounds[7] = 3
         
-        lower_bounds[8] = 0
-        upper_bounds[8] = 2
         
-        lower_bounds[9] = -2
-        upper_bounds[9] = 2
+        # lower_bounds[8] = 0
+        # upper_bounds[8] = 5
         
-        lower_bounds[10] = -2
-        upper_bounds[10] = 2
+        #Joint Position
+        lower_bounds[9] = -3
+        upper_bounds[9] = 3
+
+        lower_bounds[10] = -3
+        upper_bounds[10] = 3
         
-        lower_bounds[11] = -1
-        upper_bounds[11] = 1
         
-        lower_bounds[12] = -2
-        upper_bounds[12] = 2
+        #Joint Position
+        lower_bounds[11] = -3
+        upper_bounds[11] = 3
         
-        lower_bounds[13] = -0.01
-        upper_bounds[13] = 1.01
+        lower_bounds[12] = -3
+        upper_bounds[12] = 3
+        
+        #legs contact with ground
+        # lower_bounds[13] = -0.01
+        # upper_bounds[13] = 1.01
 
 
         # Construct the polyhedra constraints (polys)
@@ -146,8 +165,8 @@ class BipedalWalkerEnv(gym.Env):
             # original_state = normalize_constraints(original_state, self.MIN, self.MAX)
         return state, {"state_original": original_state}
 
-    def render(self, mode='human'):
-        return self.env.render(mode=mode)
+    def render(self):
+        return self.env.render()
 
     def close(self):
         return self.env.close()

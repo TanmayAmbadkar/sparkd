@@ -131,3 +131,13 @@ dmypy.json
 logs/
 runs/
 lightning_logs/
+logs_spice/
+runs_spice/
+saved_sac
+
+domain_test.py
+main_e2c_test*
+omnisafe_test.py
+*.png
+test*.py
+*ipynb

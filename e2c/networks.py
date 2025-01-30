@@ -11,7 +11,7 @@ def weights_init(m):
 class Encoder(nn.Module):
     def __init__(self, n_features, reduced_dim):
         super(Encoder, self).__init__()
-        self.shared_net = NeuralNetwork([LinearLayer(n_features, 16), ReLULayer(), LinearLayer(16, 16), ReLULayer()])  # Shared layers
+        self.shared_net = NeuralNetwork([LinearLayer(n_features, 32), ReLULayer(), LinearLayer(32, 16), ReLULayer()])  # Shared layers
         self.fc_mu = NeuralNetwork([LinearLayer(16, reduced_dim)])  # Output mean
         self.fc_logsig = NeuralNetwork([LinearLayer(16, reduced_dim)])  # Output log variance
         self.obs_dim = n_features
@@ -43,7 +43,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, reduced_dim, n_features):
         super(Decoder, self).__init__()
-        self.net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 16), ReLULayer(), LinearLayer(16, n_features)])
+        self.net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 32), ReLULayer(), LinearLayer(32, n_features)])
         # self.net.apply(weights_init),
         self.z_dim = reduced_dim
         self.obs_dim = n_features
@@ -66,7 +66,7 @@ class Transition(nn.Module):
 
         self.fc_A = nn.Sequential(
         nn.Linear(self.h_dim, self.z_dim * 2),  # v_t and r_t
-            nn.Sigmoid()
+            nn.ReLU()
         )
         
         self.fc_A.apply(weights_init)

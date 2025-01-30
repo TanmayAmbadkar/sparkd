@@ -65,8 +65,8 @@ class E2CPredictor(pl.LightningModule):
         
         # if self.train_ae:        
         recon_term = F.mse_loss(x_recon, x)
-        kl_term = - 0.5 * torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
-        total_loss += recon_term + 1*kl_term
+        kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
+        total_loss += 5*recon_term + kl_term
         
     # else:
         pred_loss = F.mse_loss(x_next_pred, x_next)
@@ -74,7 +74,7 @@ class E2CPredictor(pl.LightningModule):
 
         # consistency loss
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-        total_loss += consis_term + pred_loss
+        total_loss += 10*consis_term + pred_loss
         
         # if self.last_predictor is not None: 
         #     with torch.no_grad():
@@ -90,12 +90,11 @@ class E2CPredictor(pl.LightningModule):
                 
 
         # Logging
+        self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        self.log("consis_term", consis_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         self.log("total_loss", total_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         
         return total_loss
-
-    def kl_divergence(self, mu, logvar):
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

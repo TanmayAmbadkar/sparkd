@@ -6,7 +6,7 @@ import sys
 
 class LunarLanderEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("LunarLander-v3", continuous=True)
+        self.env = gym.make("LunarLander-v3", continuous=True, render_mode = "rgb_array")
         self.action_space = self.env.action_space
         self.original_observation_space = self.env.observation_space
         self.continuous = True
@@ -21,6 +21,7 @@ class LunarLanderEnv(gym.Env):
         self.done = False  
         self.safe_polys = []
         self.polys = []
+        self.render_mode = "rgb_array"
         
         self.safety_constraints()
         self.unsafe_constraints()
@@ -35,21 +36,21 @@ class LunarLanderEnv(gym.Env):
         upper_bounds = np.copy(obs_space_upper)
 
         # Horizontal position constraint (x) - relaxed
-        lower_bounds[0] = -1.5  # Increased from 0.75 to 1.0
-        upper_bounds[0] = 1.5
+        lower_bounds[0] = -1  # Increased from 0.75 to 1.0
+        upper_bounds[0] = 1
 
         # Vertical position constraint (y) - relaxed
         
-        lower_bounds[1] = -0.01
-        upper_bounds[1] = 2.5
+        lower_bounds[1] = -0.1
+        upper_bounds[1] = 2
 
         # Horizontal velocity constraint (vx) - relaxed
-        lower_bounds[2] = -1 # Increased from 0.5 to 0.75
-        upper_bounds[2] = 1
+        lower_bounds[2] = -1.5 # Increased from 0.5 to 0.75
+        upper_bounds[2] = 1.5
 
         # Vertical velocity constraint (vy) - relaxed
         lower_bounds[3] = -1.5  # Increased from 0.5 to 0.75
-        upper_bounds[3] = 0.5
+        upper_bounds[3] = 1.5
 
         input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
     
@@ -111,8 +112,8 @@ class LunarLanderEnv(gym.Env):
             # state = self.reduce_state(state)
         return state, {"state_original": original_state}
 
-    def render(self, mode='human'):
-        return self.env.render(mode=mode)
+    def render(self):
+        return self.env.render()
 
     def close(self):
         return self.env.close()

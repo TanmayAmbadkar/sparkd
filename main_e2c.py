@@ -20,6 +20,8 @@ from sklearn.metrics import classification_report
 import itertools
 import matplotlib.pyplot as plt
 import traceback
+import imageio
+
 
 
 parser = argparse.ArgumentParser(description='SPICE Args')
@@ -87,9 +89,9 @@ np.random.seed(args.seed)
 # safe_agent = None
 
 # Tensorboard
-writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
+writer = SummaryWriter('runs/{}_SAC_{}_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-    args.policy, "autotune" if args.automatic_entropy_tuning else ""))
+    args.policy, args.horizon, args.red_dim))
 
 print(hyperparams)
 if not os.path.exists("logs"):
@@ -220,29 +222,36 @@ if not args.no_safety:
                 states, actions, next_states, rewards, costs,
                 domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                 model_pieces=20, seed=args.seed, policy=None,
-                use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon, epochs= 50)
+                use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon, epochs= 70)
 
     
     
-    
-    new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
+    e2c_mean = env_model.mars.e2c_predictor.mean
+    e2c_std = env_model.mars.e2c_predictor.std
+    new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.observation_space.low - e2c_mean)/e2c_std, (env.observation_space.high - e2c_mean)/e2c_std)))
     env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
     agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
     
-    env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, env.original_safety))
+    safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
+    
+    env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
     
     
-    unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
-    unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
+    # unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
+    # unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
     
     unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
         
+    
     
     polys = [np.array(env.safety.to_hyperplanes())]
 
     env.safe_polys = polys
     env.state_processor = env_model.mars.e2c_predictor.transform
     env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
+    
+    print(env.safety)
+    print(env.observation_space)
     
     if args.neural_safety:
         safe_agent = CSCShield(agent, cost_model,
@@ -261,19 +270,7 @@ if not args.no_safety:
 
 else:
     safe_agent=None
-# Start main training
-# VERIFICATION
-# truth = []
-# predicted = []
-# for state in next_states:
-#     truth.append(env.unsafe(state, False))
-#     predicted.append(env.unsafe(env_model.mars.e2c_predictor.transform(state), simulated = True))
-# print(classification_report(truth, predicted))
-
-# sys.exit()
-
-
-# print(sum(truth))
+    
 
 unsafe_test_episodes = 0
 total_test_episodes = 0
@@ -285,9 +282,12 @@ while True:
     episode_steps = 0
     done = False
     trunc = False
-    state, info = env.reset()
-
-    if (i_episode // 10) % 8 == 0 or args.no_safety:
+    while True:
+        state, info = env.reset()
+        if not env.unsafe(info['state_original'], False):
+            break
+        
+    if (i_episode // 10) % 10 == 0 or args.no_safety:
         print(i_episode, ": Real data")
         tmp_buffer = []
         real_buffer = []
@@ -430,7 +430,7 @@ while True:
         
         total_sim_episodes += 1 
 
-    if ((i_episode-1) // 10) % 8 == 0 and ((i_episode) // 10) % 8 != 0 and not args.no_safety:
+    if ((i_episode-1) // 10) % 10 == 0 and ((i_episode) // 10) % 10 != 0 and not args.no_safety:
     # if False:
         try:
             
@@ -443,6 +443,7 @@ while True:
                 
             print(rewards_e2c)
             print(rewards)
+            print(states)
                     
             for idx in range(states.shape[0]):
                 state = states[idx]
@@ -467,7 +468,7 @@ while True:
             print("Error in sampling")
             continue
         
-        env_model.mars.e2c_predictor.lr = 0.00001
+        env_model.mars.e2c_predictor.lr = 0.000001
         if args.neural_safety:
             env_model, cost_model = get_environment_model(
                     states, actions, next_states, rewards, costs,
@@ -484,15 +485,21 @@ while True:
         
             
             
-        new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high)))
+        e2c_mean = env_model.mars.e2c_predictor.mean
+        e2c_std = env_model.mars.e2c_predictor.std
+        new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
         env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
         agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
         
-        env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, env.original_safety))
+        safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
+        
+        env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
+        
         
         
         unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
         unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
+        unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
             
         
         polys = [np.array(env.safety.to_hyperplanes())]
@@ -524,7 +531,7 @@ while True:
             
         
 
-    writer.add_scalar(f'reward/train', episode_reward, i_episode)
+    writer.add_scalar(f'reward/train', episode_reward, total_numsteps)
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
@@ -540,48 +547,69 @@ while True:
         shield_count = 0
         backup_count = 0
         neural_count = 0
-        for _ in range(episodes):
-            state, info = env.reset()
-            episode_reward = 0
-            done = False
-            trunc = False
-            episode_steps = 0
-            trajectory = [state]
-            while not done and not trunc:
-                if safe_agent is not None:
-                    action = safe_agent(state)
-                else:
-                    action = agent(state)
-                next_state, reward, done, trunc, info = env.step(action)
-                episode_reward += reward
-                episode_steps += 1
+        t = 0
 
-                if episode_steps >= env._max_episode_steps:
-                    done = True
-                if env.unsafe(info['state_original'], False):
-                    print("UNSAFE")
-                    episode_reward += -100
-                    print(state, "\n",  action, "\n", next_state)
-                    unsafe_episodes += 1
-                    done = True
-                if done and safe_agent is not None:
-                    try:
-                        s, a, b, t = safe_agent.report()
-                        print("Finished test episode:", s, "shield and", b, "backup and", a,
-                              "neural")
-                        shield_count+=s
-                        backup_count+=b
-                        neural_count+=a
-                       
-                        print("Average time:", t / (s + a + b))
-                        safe_agent.reset_count()
-                    except Exception as e:
-                        print(e)
-                        pass
-                state = next_state
-                trajectory.append(state)
-            avg_reward += episode_reward
-            avg_length += episode_steps
+    for episode_num in range(episodes):
+        # record_video = episode_num % 2 == 0  # Record every alternate episode (example condition)
+        custom_filename = f"videos/episode_{i_episode}.mp4"
+        
+        # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
+        
+        while True:
+            state, info = env.reset()
+            if not env.unsafe(info['state_original'], False):
+                break
+        original_state = info['state_original']
+        episode_reward = 0
+        done = False
+        trunc = False
+        episode_steps = 0
+        trajectory = [state]
+        # frames  = [env.render()]
+
+        while not done and not trunc:
+            # Decide action
+            if safe_agent is not None:
+                action = safe_agent(state)
+            else:
+                action = agent(state)
+
+            next_state, reward, done, trunc, info = env.step(action)
+            episode_reward += reward
+            episode_steps += 1
+
+            if episode_steps >= env._max_episode_steps:
+                done = True
+            if env.unsafe(info['state_original'], False):
+                print("UNSAFE")
+                episode_reward += -100
+                print(np.round(original_state, 2), "\n", action, "\n", np.round(info['state_original'], 2))
+                unsafe_episodes += 1
+                done = True
+
+            if done and safe_agent is not None:
+                try:
+                    s, a, b, t = safe_agent.report()
+                    print("Finished test episode:", s, "shield and", b, "backup and", a, "neural")
+                    shield_count += s
+                    backup_count += b
+                    neural_count += a
+
+                    print("Average time:", t / (s + a + b))
+                    safe_agent.reset_count()
+                except Exception as e:
+                    print(e)
+                    pass
+
+            state = next_state
+            trajectory.append(state)
+            original_state = info['state_original']
+            # frames.append(env.render())
+
+        # imageio.mimsave(custom_filename, frames, fps=30)
+        avg_reward += episode_reward
+        avg_length += episode_steps
+
         avg_reward /= episodes
         avg_length /= episodes
         shield_count /= episodes
@@ -589,15 +617,15 @@ while True:
         backup_count /= episodes
         unsafe_test_episodes+=unsafe_episodes
         total_test_episodes+=episodes
-        writer.add_scalar(f'agent/shield', shield_count, i_episode)
-        writer.add_scalar(f'agent/neural', neural_count, i_episode)
-        writer.add_scalar(f'agent/backup', backup_count, i_episode)
-        writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_real_episodes)
-        writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_real_episodes)
-        writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_sim_episodes)
-        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_sim_episodes)
-        writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_test_episodes)
-        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_test_episodes)
+        writer.add_scalar(f'agent/shield', shield_count, total_numsteps)
+        writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
+        writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
+        writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
+        writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
+        writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_numsteps)
+        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_numsteps)
+        writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_numsteps)
+        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_numsteps)
         writer.add_scalar(f'reward/test', avg_reward, i_episode)
 
         print("----------------------------------------")

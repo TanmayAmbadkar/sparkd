@@ -230,7 +230,7 @@ if not args.no_safety:
     print("Original domain",env.original_observation_space)
     
     
-    print(unsafe_domains_list)
+    # print(unsafe_domains_list)
     print("SAFETY: ", env.safety)
     print("OBS SPACE: ", env.observation_space)
     
@@ -259,83 +259,85 @@ else:
     safe_agent=None
     
     
-next_states = []
-predictions = []
+    
 
-rewards_true = []
-rewards_pred = []
+# next_states = []
+# predictions = []
 
-# Test env loop
-for i in range(10):
-    state, info = env.reset()
-    done = False
-    trunc = False
+# rewards_true = []
+# rewards_pred = []
 
-    while not done and not trunc:
-        
-        action = env.action_space.sample()
-        
-        next_state, reward_true, done, trunc, info = env.step(action)
-        
-        
-        next_state_pred, reward_pred= env_model(state, action, use_neural_model=False)
-        
-        if i == 1:
-            print("Next state", next_state)
-            print("Next state pred", next_state_pred)
-            # print("Reward true", reward_true)
-            # print("Reward pred", reward_pred)
-            # print(f"True state {np.round(info['state_original'], 3)}")
-            # print(f"Predicted state {np.round(env_model.mars.e2c_predictor.inverse_transform(next_state), 3)}")
-        
-        state = next_state_pred
-        
-        predictions.append(next_state_pred)
-        next_states.append(next_state)
-        
-        # if i == 1:
-            # print("TRUE UNSAFE", env.unsafe(info['state_original'], False))
-            # print("Predicted UNSAFE", env.unsafe(next_state_pred, True))
-        
-        if env.unsafe(info['state_original'], False):
-            print("UNSAFE")
-            break
-        
-        rewards_pred.append(reward_pred)
-        rewards_true.append(reward_true)
+# # Test env loop
+# for i in range(10):
+#     state, info = env.reset()
+#     done = False
+#     trunc = False
 
-predictions = np.array(predictions)
-next_states = np.array(next_states)
-rewards_pred = np.array(rewards_pred)
-rewards_true = np.array(rewards_true)
+#     while not done and not trunc:
+        
+#         action = env.action_space.sample()
+        
+#         next_state, reward_true, done, trunc, info = env.step(action)
+        
+        
+#         next_state_pred, reward_pred= env_model(state, action, use_neural_model=False)
+        
+#         if i == 1:
+#             print("Next state", next_state)
+#             print("Next state pred", next_state_pred)
+#             # print("Reward true", reward_true)
+#             # print("Reward pred", reward_pred)
+#             # print(f"True state {np.round(info['state_original'], 3)}")
+#             # print(f"Predicted state {np.round(env_model.mars.e2c_predictor.inverse_transform(next_state), 3)}")
+        
+#         state = next_state_pred
+        
+#         predictions.append(next_state_pred)
+#         next_states.append(next_state)
+        
+#         # if i == 1:
+#             # print("TRUE UNSAFE", env.unsafe(info['state_original'], False))
+#             # print("Predicted UNSAFE", env.unsafe(next_state_pred, True))
+        
+#         if env.unsafe(info['state_original'], False):
+#             print("UNSAFE")
+#             break
+        
+#         rewards_pred.append(reward_pred)
+#         rewards_true.append(reward_true)
 
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
+# predictions = np.array(predictions)
+# next_states = np.array(next_states)
+# rewards_pred = np.array(rewards_pred)
+# rewards_true = np.array(rewards_true)
 
-tsne = TSNE(n_components=2, random_state=0)
-X_2d = tsne.fit_transform(np.vstack([next_states, predictions.reshape(-1, args.red_dim)]))
-# X_2d = X_2d[:len(next_states)]
-plt.scatter(X_2d[:len(next_states), 0], X_2d[:len(next_states), 1], c='r', label='True')
-plt.savefig("scatter_e2c.png")
+# from sklearn.manifold import TSNE
+# import matplotlib.pyplot as plt
+
+# tsne = TSNE(n_components=2, random_state=0)
+# X_2d = tsne.fit_transform(np.vstack([next_states, predictions.reshape(-1, args.red_dim)]))
+# # X_2d = X_2d[:len(next_states)]
+# plt.scatter(X_2d[:len(next_states), 0], X_2d[:len(next_states), 1], c='r', label='True')
+# plt.savefig("scatter_e2c.png")
 
 
-tsne = TSNE(n_components=2, random_state=0)
-# X_2d = tsne.fit_transform(predictions.reshape(-1, args.red_dim))
-# X_2d = tsne.transform(predictions.reshape(-1, args.red_dim))
-plt.scatter(X_2d[len(next_states):, 0], X_2d[len(next_states):, 1], c='g', label='Pred')
-plt.savefig("scatter_e2c_pred.png")
+# tsne = TSNE(n_components=2, random_state=0)
+# # X_2d = tsne.fit_transform(predictions.reshape(-1, args.red_dim))
+# # X_2d = tsne.transform(predictions.reshape(-1, args.red_dim))
+# plt.scatter(X_2d[len(next_states):, 0], X_2d[len(next_states):, 1], c='g', label='Pred')
+# plt.savefig("scatter_e2c_pred.png")
 
-print("MSE, MAE for states", np.mean((predictions - next_states)**2), np.mean(np.abs(predictions - next_states)))
-print("MSE, MAE for rewards", np.mean((rewards_pred - rewards_true)**2), np.mean(np.abs(rewards_pred - rewards_true)))
+# print("MSE, MAE for states", np.mean((predictions - next_states)**2), np.mean(np.abs(predictions - next_states)))
+# print("MSE, MAE for rewards", np.mean((rewards_pred - rewards_true)**2), np.mean(np.abs(rewards_pred - rewards_true)))
 
-print("r2 score", r2_score(predictions.reshape(predictions.shape[0], -1), next_states.reshape(next_states.shape[0], -1)))
+# print("r2 score", r2_score(predictions.reshape(predictions.shape[0], -1), next_states.reshape(next_states.shape[0], -1)))
         
 
-fig = plt.figure()
-ax = fig.add_subplot(projection='3d')
-print(next_states.shape)
-print(predictions.shape)
-predictions = predictions.reshape(-1, 3)
-ax.scatter(next_states[:, 0], next_states[:, 1], next_states[:, 2], c='g', label="True")
-ax.scatter(predictions[:, 0], next_states[:, 1], predictions[:, 2], c='r', label="Pred")
-plt.savefig("scatter_e2c_3d.png")
+# fig = plt.figure()
+# ax = fig.add_subplot(projection='3d')
+# print(next_states.shape)
+# print(predictions.shape)
+# predictions = predictions.reshape(-1, 3)
+# ax.scatter(next_states[:, 0], next_states[:, 1], next_states[:, 2], c='g', label="True")
+# ax.scatter(predictions[:, 0], next_states[:, 1], predictions[:, 2], c='r', label="Pred")
+# plt.savefig("scatter_e2c_3d.png")

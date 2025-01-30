@@ -11,8 +11,8 @@ def get_constraints(model, input_domain):
 
 def get_ae_bounds(model, input_domain):
     
-    input_domain.lower = (input_domain.lower - model.mean)/(model.std)
-    input_domain.upper = (input_domain.lower - model.mean)/(model.std)
+    # input_domain.lower = (input_domain.lower - model.mean)/(model.std)
+    # input_domain.upper = (input_domain.lower - model.mean)/(model.std)
     
     domain = get_constraints(model.encoder.shared_net, input_domain)
     mu_domain = get_constraints(model.encoder.fc_mu, domain)

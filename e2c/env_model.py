@@ -95,7 +95,7 @@ class MarsE2cModel:
         # eps = np.diag(A_tA_tT) # shape [s_dim]
         eps = np.zeros_like(c_t)
 
-        return M, eps
+        return M, np.sqrt(eps)
 
 
 
@@ -136,7 +136,7 @@ class RewardModel:
         dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
         
         # Training loop
-        epochs = 70
+        epochs = 1
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0.0
@@ -308,13 +308,15 @@ def get_environment_model(     # noqa: C901
     input_states = (input_states - means) / stds
     output_states = (output_states - means) / stds
     
-    
+    domain.lower = (domain.lower - means) / stds
+    domain.upper = (domain.upper - means) / stds
     print("Input states:", input_states)
     
     if e2c_predictor is None:
         e2c_predictor = E2CPredictor(input_states.shape[-1], latent_dim, actions.shape[-1], horizon = horizon)
     fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon, epochs=epochs)
 
+    
     lows, highs = get_variational_bounds(e2c_predictor, domain)
     
     lows = lows.detach().numpy()

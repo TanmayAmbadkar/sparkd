@@ -82,19 +82,22 @@ agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
 safe_agent = None
 
 # Tesnorboard
-writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
+if not os.path.exists("runs_spice"):
+    os.makedirs("runs_spice")
+    
+writer = SummaryWriter('runs_spice/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
-if not os.path.exists("logs"):
-    os.makedirs("logs")
+if not os.path.exists("logs_spice"):
+    os.makedirs("logs_spice")
 
-file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
+file = open('logs_spice/{}_SAC_{}_{}_{}.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""), "w+")
 
 # Memory
-real_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
+real_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
 
 # Training Loop
 total_numsteps = 0
@@ -144,7 +147,7 @@ while True:
 
             cost = 0
             if env.unsafe(info['state_original'], False):
-                total_unsafe_episodes += 1
+                # total_unsafe_episodes += 1
                 episode_reward -= 1000
                 print("UNSAFE (outside testing)", next_state)
                 done = True
@@ -234,7 +237,7 @@ while True:
             cost = 0
             if env.unsafe(next_state, True):
                 print(next_state)
-                total_unsafe_episodes += 1
+                # total_unsafe_episodes += 1
                 episode_reward -= 1000
                 done = True
                 cost = 1
@@ -281,66 +284,6 @@ while True:
                 env.action_space, args.horizon, env.polys, env.safe_polys)
             safe_agent = Shield(shield, agent)
 
-    if total_numsteps > args.autoencoder and env.state_processor is None:
-        # Write code to include autoencoder, and switch agent and environments. 
-        states, _, _, _, _, costs = \
-            real_data.sample(min(len(real_data), args.autoencoder), get_cost=True)
-
-        encoder = Autoencoder(env.observation_space.shape[0], args.red_dim)
-        fit_encoder(states, costs, encoder)
-        
-        env.state_processor = encoder.transform
-        env.safety = verification.get_constraints(encoder.encoder, env.safety)
-        # env.unsafe_zonotope = verification.get_constraints(encoder.encoder, env.unsafe_zonotope)
-        env.observation_space = gym.spaces.Box(low=-1, high=1, shape=(args.red_dim,))
-        agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
-        
-        
-        hyperplanes = env.safety.to_hyperplanes()
-        polys = []
-        for A, b in hyperplanes:
-            # print(f"Hyperplane: {A} * x <= {b}")
-            polys.append(np.append(A, -b))
-        
-          
-        # for i in range(env.observation_space.shape[0]):
-        #     A1 = np.zeros(env.observation_space.shape[0])
-        #     A2 = np.zeros(env.observation_space.shape[0])
-        #     A1[i] = 1
-        #     A2[i] = -1
-        #     polys.append(np.append(A1, -env.observation_space.high[i]))
-        #     polys.append(np.append(A2, env.observation_space.low[i]))
-            
-        env.safe_polys = [np.array(polys)]
-        
-        polys = []
-        for A, b in hyperplanes:
-            # print(f"Hyperplane: {A} * x <= {b}")
-            polys.append(np.append(-A, b))
-        
-        
-        for i in range(env.observation_space.shape[0]):
-            A1 = np.zeros(env.observation_space.shape[0])
-            A2 = np.zeros(env.observation_space.shape[0])
-            A1[i] = 1
-            A2[i] = -1
-            polys.append(np.append(A1, -env.observation_space.high[i]))
-            polys.append(np.append(A2, env.observation_space.low[i]))
-        
-        env.polys = [np.array(polys)]
-        
-        
-        safe_agent = None
-        real_data = ReplayMemory(args.replay_size, env.observation_space, args.seed)
-        iterator_loop = itertools.count(1)
-        total_numsteps = 0
-        cost_model = None
-        env_model = None
-        print("Total unsafe without AE:", total_unsafe_episodes, "/", total_episodes, file=file)
-        total_unsafe_episodes = 0
-        total_episodes = 0
-        continue
-        
     
     if total_numsteps > args.num_steps/2:
         break

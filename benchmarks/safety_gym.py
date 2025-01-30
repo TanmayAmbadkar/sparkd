@@ -8,10 +8,17 @@ from benchmarks.utils import *
 
 class SafetyPointGoalEnv(gymnasium.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("SafetyPointGoal1-v0")
+        self.env = gym.make("SafetyPointGoal1-v0", render_mode = "rgb_array")
         self.action_space = self.env.action_space
         
-        self.observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=self.env.observation_space.shape) if state_processor is None else gymnasium.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.observation_space = gymnasium.spaces.Box(low=np.concatenate((np.array([-5, -19, -9.82, -0.8, -0.2, -0.1, -0.1, -0.1, -5., -1,
+                -0.52, -0.1, ]), np.zeros(48))), high=np.concatenate((np.array([5, 19, 9.82, 0.8, 0.2, 0.1, 0.1, 0.1, 5., 1,
+                0.52, 0.1, ]), np.ones(48))), shape=self.env.observation_space.shape) if state_processor is None else gymnasium.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+
+#[-5,   -19,  -9.82, -0.8, -0.2,  -0.1, -0.1, 0.1, -3.,  -0.5, -0.52, -0.1, ]
+#[-2.69 -2.73  9.81  -0.06 -0.04  0.    0.    0.    2.23  0.5  -0.04  0.
+
+        self.original_observation_space = self.observation_space
         self.state_processor = state_processor
         self.safety = safety
 
@@ -34,6 +41,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
 
         self.safety_constraints()
         self.unsafe_constraints()
+        self.render_mode = "rgb_array"
         
         # print(self.unsafe(np.array([ 0.41278508,  0.11044428,  0.03596416, -0.0501044,  -0.520235,   -0.7669368,
         #         0.55146146, -1.,          0.,         -0.3183163,  -1.0000002,   0.109326,
@@ -55,12 +63,12 @@ class SafetyPointGoalEnv(gymnasium.Env):
         lower_bounds = np.copy(obs_space_lower)
         upper_bounds = np.copy(obs_space_upper)
 
-        lower_bounds[:12] = [ -4.12, -18.4, 9.80, -0.63, -0.18, -0.1,     -0.1,     -0.1,    -3,    -0.5, -0.51,   -0.1,  ]
-        upper_bounds[:12] =  [ 4.01, 18.39,  9.82,  0.72,  0.15,  0.1,    0.1,    0.1,   3,    0.5,   0.51,  0.1,  ]
+        # lower_bounds[:12] = [ -4.12, -18.4, 9.80, -0.63, -0.18, -0.1,     -0.1,     -0.1,    -3,    -0.5, -0.51,   -0.1,  ]
+        # upper_bounds[:12] =  [ 4.01, 18.39,  9.82,  0.72,  0.15,  0.1,    0.1,    0.1,   3,    0.5,   0.51,  0.1,  ]
         
-        for i in range(12, 28):
-            lower_bounds[i] = 0
-            upper_bounds[i] = 1
+        # for i in range(12, 28):
+        #     lower_bounds[i] = 0
+        #     upper_bounds[i] = 1
             
         for i in range(28, 60):
             lower_bounds[i] = 0
@@ -127,15 +135,11 @@ class SafetyPointGoalEnv(gymnasium.Env):
         # else:
         #     state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
         
-        
-        if self.unsafe(state, simulated = False):
-            self.done = True
-            reward = -100
             
         return state, {"state_original": original_state}
 
     def render(self, mode='human'):
-        return self.env.render(mode=mode)
+        return self.env.render()
 
     def close(self):
         return self.env.close()
@@ -158,6 +162,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
                 
                 A = polys[:,:-1]
                 b = -polys[:,-1]
+                
                 truth.append(not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1)))
             return all(truth)
         else:
@@ -167,7 +172,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
                 A = polys[:,:-1]
                 b = -polys[:,-1]
                 # print(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
-                truth.append(not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1)))
+                temp_indices = list(range(12,60)) + (list(range(72,120)))
+                truth.append(not np.all((A @ state.reshape(-1, 1) <= b.reshape(-1, 1))[temp_indices]))
             
             return all(truth)
     
