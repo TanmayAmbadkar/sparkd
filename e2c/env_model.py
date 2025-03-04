@@ -1,10 +1,6 @@
-from pyearth import Earth
-from pyearth._basis import ConstantBasisFunction, LinearBasisFunction, \
-    HingeBasisFunction
 from typing import Optional, List, Callable
 import numpy as np
 import scipy.stats
-from src.env_model import MARSModel, MARSComponent, ResidualEnvModel, get_environment_model
 from e2c.e2c_model import E2CPredictor, fit_e2c
 from abstract_interpretation.verification import get_constraints, get_ae_bounds, get_variational_bounds
 from abstract_interpretation import domains
@@ -184,10 +180,7 @@ class EnvModel:
     def __init__(
             self,
             mars: MarsE2cModel,
-            symb_reward: Union[MARSModel, RewardModel],
-            net: ResidualEnvModel,
-            reward: ResidualEnvModel,
-            use_neural_model: bool,
+            symb_reward: RewardModel,
             observation_space_low,
             observation_space_high):
         """
@@ -200,9 +193,6 @@ class EnvModel:
         """
         self.mars = mars
         self.symb_reward = symb_reward
-        self.net = net
-        self.reward = reward
-        self.use_neural_model = use_neural_model
         self
         self.observation_space_low = np.array(observation_space_low)
         self.observation_space_high = np.array(observation_space_high)
@@ -226,28 +216,15 @@ class EnvModel:
         action = action.reshape(-1, )
         inp = np.concatenate((state, action), axis=0)
         symb = self.mars(inp)
-        if self.use_neural_model:
-            neur = self.net(torch.tensor(inp, dtype=torch.float32)). \
-                detach().numpy()
-            rew = self.reward(torch.tensor(inp, dtype=torch.float32)).item()
-        else:
-            neur = np.zeros_like(symb)
-            # rew = 0
-            rew = self.symb_reward(state)[0]
+        rew = self.symb_reward(state)[0]
             
-        return np.clip(symb + neur, self.observation_space_low, self.observation_space_high), rew
+        return np.clip(symb, self.observation_space_low, self.observation_space_high), rew
 
-    def get_symbolic_model(self) -> MARSModel:
+    def get_symbolic_model(self) -> MarsE2cModel:
         """
         Get the symbolic component of this model.
         """
         return self.mars
-
-    def get_residual_model(self) -> ResidualEnvModel:
-        """
-        Get the residual neural component of this model.
-        """
-        return self.net
 
     def get_confidence(self) -> float:
         return self.confidence
@@ -267,12 +244,7 @@ def get_environment_model(     # noqa: C901
         costs: np.ndarray,
         domain,
         seed: int = 0,
-        use_neural_model: bool = True,
-        arch: Optional[List[int]] = None,
-        cost_model: torch.nn.Module = None,
-        policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         data_stddev: float = 0.01,
-        model_pieces: int = 20,
         latent_dim: int = 4,
         horizon: int = 5,
         e2c_predictor = None,
@@ -369,58 +341,12 @@ def get_environment_model(     # noqa: C901
     actions = (actions - actions_min) / (actions_max - actions_min)
     rewards = (rewards - rew_mean) / (rew_std)
 
-    if policy is not None:
-        policy_actions = (actions - actions_min) / (actions_max - actions_min)
-        next_policy_actions = (actions - actions_min) / (actions_max - actions_min)
 
     terms = 20
     # Lower penalties allow more model complexity
     # X = np.concatenate((input_states, actions, output_states), axis=1)
     
     X = output_states
-
-
-
-    if use_neural_model:
-        # Set up a neural network for the residuals.
-        state_action = np.concatenate((input_states, actions), axis=1)
-        if arch is None:
-            arch = [280, 240, 200]
-        arch.insert(0, state_action.shape[1])
-        arch.append(latent_dim)
-        model = ResidualEnvModel(
-            arch,
-            np.concatenate((lows, highs)),
-            np.concatenate((actions_min, actions_max)),
-            lows, highs)
-        model.train()
-
-        # Set up a training environment
-        optim = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
-        loss = torch.nn.MSELoss()
-
-        data = torch.utils.data.DataLoader(
-                torch.utils.data.TensorDataset(
-                    torch.tensor(state_action, dtype=torch.float32),
-                    torch.tensor(output_states - Yh, dtype=torch.float32)),
-                batch_size=128,
-                shuffle=True)
-
-        # Train the neural network.
-        for epoch in range(100):
-            losses = []
-            for batch_data, batch_outp in data:
-                pred = model(batch_data, normalized=True)
-                # Normalize predictions and labels to the range [-1, 1]
-                loss_val = loss(pred, batch_outp)
-                losses.append(loss_val.item())
-                optim.zero_grad()
-                loss_val.backward()
-                optim.step()
-            print("Epoch:", epoch,
-                torch.tensor(losses, dtype=torch.float32).mean())
-
-        model.eval()
 
     
     parsed_rew = RewardModel(X.shape[1], input_mean, input_std, rew_mean, rew_std)
@@ -429,99 +355,9 @@ def get_environment_model(     # noqa: C901
     
     parsed_rew.train(X, rewards)
 
-    if use_neural_model:
-        # Set up a neural network for the rewards
-        arch[-1] = 1
-        rew_model = ResidualEnvModel(
-            arch,
-            np.concatenate((lows, actions_min)),
-            np.concatenate((highs, actions_max)),
-            rewards_min[None], rewards_max[None])
-
-        optim = torch.optim.Adam(rew_model.parameters(), lr=1e-5)
-        loss = torch.nn.SmoothL1Loss()
-
-        # Set up training data for the rewards
-        reward_data = torch.utils.data.DataLoader(
-                torch.utils.data.TensorDataset(
-                    torch.tensor(state_action, dtype=torch.float32),
-                    torch.tensor(rewards[:, None], dtype=torch.float32)),
-                batch_size=128,
-                shuffle=True)
-
-        rew_model.train()
-
-        # Train the network.
-        for epoch in range(100):
-            losses = []
-            for batch_data, batch_outp in reward_data:
-                pred = rew_model(batch_data, normalized=True)
-                loss_val = loss(pred, batch_outp)
-                losses.append(loss_val.item())
-                optim.zero_grad()
-                loss_val.backward()
-                optim.step()
-            print("Epoch:", epoch,
-                torch.tensor(losses, dtype=torch.float32).mean())
-
-        rew_model.eval()
-    else:
-        rew_model, model = None, None
-
-    if policy is not None:
-        if cost_model is None:
-            cost_model = ResidualEnvModel(
-                arch,
-                np.concatenate((lows, actions_min)),
-                np.concatenate((highs, actions_max)),
-                0.0, 1.0)
-
-        optim = torch.optim.Adam(cost_model.parameters(), lr=1e-4)
-        loss = torch.nn.SmoothL1Loss()
-
-        # Set up training data for the cost_model
-        cost_data = torch.utils.data.DataLoader(
-                torch.utils.data.TensorDataset(
-                    torch.tensor(input_states, dtype=torch.float32),
-                    torch.tensor(actions, dtype=torch.float32),
-                    torch.tensor(policy_actions, dtype=torch.float32),
-                    torch.tensor(next_policy_actions, dtype=torch.float32),
-                    torch.tensor(costs[:, None], dtype=torch.float32)),
-                batch_size=128,
-                shuffle=True)
-
-        cost_model.train()
-
-        # Negative weight overestimates the safety critic rather than
-        # underestimating
-        q_weight = -1.0
-        for epoch in range(1):
-            losses = []
-            for batch_states, batch_acts, batch_pacts, \
-                    batch_npacts, batch_costs in cost_data:
-                pred = cost_model(torch.cat((batch_states, batch_acts), dim=1))
-                main_loss = loss(pred, batch_costs)
-                q_cur = cost_model(torch.cat((batch_states, batch_pacts),
-                                             dim=1))
-                q_next = cost_model(torch.cat((batch_states, batch_npacts),
-                                              dim=1))
-                q_cat = torch.cat([q_cur, q_next], dim=1)
-                q_loss = torch.logsumexp(q_cat, dim=1).mean() * q_weight
-                q_loss = q_loss - pred.mean() * q_weight
-                loss_val = main_loss + q_loss
-                losses.append(loss_val.item())
-                optim.zero_grad()
-                loss_val.backward()
-                optim.step()
-            print("Epoch:", epoch,
-                  torch.tensor(losses, dtype=torch.float32).mean())
-
-        cost_model.eval()
-
     # print(symb.summary())
     print(parsed_mars)
     print("Model MSE:", np.mean(np.sum((Yh - output_states)**2, axis=1)))
     # print(reward_symb.summary())
 
-    return EnvModel(parsed_mars, parsed_rew, model, rew_model,
-                    use_neural_model, lows[:input_states.shape[1]], highs[:input_states.shape[1]]), cost_model
+    return EnvModel(parsed_mars, parsed_rew, lows[:input_states.shape[1]], highs[:input_states.shape[1]])

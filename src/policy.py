@@ -6,11 +6,10 @@ import scipy
 import torch
 import time
 
-from .env_model import MARSModel
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from scipy.optimize import linprog
-
+from e2c.env_model import MarsE2cModel
 
 
 cvxopt.solvers.options['show_progress'] = False
@@ -56,7 +55,7 @@ class ProjectionPolicy:
     """
 
     def __init__(self,
-                 env: MARSModel,
+                 env: MarsE2cModel,
                  state_space: gym.Space,
                  action_space: gym.Space,
                  horizon: int,
@@ -301,7 +300,7 @@ class Shield:
     def __init__(
             self,
             shield_policy: ProjectionPolicy,
-            unsafe_policy: SACPolicy):
+            unsafe_policy: SACPolicy = None):
         self.shield = shield_policy
         self.agent = unsafe_policy
         self.shield_times = 0
@@ -309,9 +308,13 @@ class Shield:
         self.agent_times = 0
         self.total_time = 0.
 
-    def __call__(self, state: np.ndarray, **kwargs) -> np.ndarray:
+    def __call__(self, state: np.ndarray, action: np.ndarray = None, **kwargs) -> np.ndarray:
         start = time.time()
-        proposed_action = self.agent(state, **kwargs)
+        if action is not None:
+            proposed_action = action
+        else:
+            proposed_action = self.agent(state, **kwargs)
+
         if self.shield.unsafe(state, proposed_action):
             act, shielded  = self.shield(state)
             self.shield_times += 1 if shielded else 0
@@ -332,38 +335,3 @@ class Shield:
         self.backup_times = 0
         self.total_time = 0
 
-
-class CSCShield:
-    """
-    Construct a shield from a neural policy and a conservative safety critic.
-    """
-
-    def __init__(self, policy: SACPolicy, cost_model: torch.nn.Module,
-                 threshold: float = 0.2):
-        self.policy = policy
-        self.cost_model = cost_model
-        self.threshold = threshold
-
-    def __call__(self, state: np.ndarray, **kwargs) -> np.ndarray:
-        state = torch.tensor(state, dtype=torch.float32)
-        action = torch.tensor(self.policy(state, **kwargs),
-                              dtype=torch.float32)
-        iters = 0
-        best_action = action
-        score = self.cost_model(torch.cat((state, action)))
-        best_score = score
-        while score > self.threshold and iters < 100:
-            action = torch.tensor(self.policy(state, **kwargs),
-                                  dtype=torch.float32)
-            score = self.cost_model(torch.cat((state, action)))
-            if score < best_score:
-                best_score = score
-                best_action = action
-            iters += 1
-        return best_action.detach().numpy()
-
-    def report(self) -> Tuple[int, int]:
-        return 0, 0
-
-    def reset_count(self):
-        pass

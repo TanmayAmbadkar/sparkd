@@ -65,38 +65,38 @@ class BipedalWalkerEnv(gym.Env):
         upper_bounds[3] = 1
 
         #Joint Position
-        lower_bounds[4] = -3
-        upper_bounds[4] = 3
+        lower_bounds[4] = -2
+        upper_bounds[4] = 2
         
         lower_bounds[5] = -2
         upper_bounds[5] = 2
         
         
         #Joint Position
-        lower_bounds[6] = -3
-        upper_bounds[6] = 3
+        lower_bounds[6] = -2
+        upper_bounds[6] = 2
 
-        lower_bounds[7] = -3
-        upper_bounds[7] = 3
+        lower_bounds[7] = -2
+        upper_bounds[7] = 2
         
         
         # lower_bounds[8] = 0
         # upper_bounds[8] = 5
         
         #Joint Position
-        lower_bounds[9] = -3
-        upper_bounds[9] = 3
+        lower_bounds[9] = -2
+        upper_bounds[9] = 2
 
-        lower_bounds[10] = -3
-        upper_bounds[10] = 3
+        lower_bounds[10] = -2
+        upper_bounds[10] = 2
         
         
         #Joint Position
-        lower_bounds[11] = -3
-        upper_bounds[11] = 3
+        lower_bounds[11] = -2
+        upper_bounds[11] = 2
         
-        lower_bounds[12] = -3
-        upper_bounds[12] = 3
+        lower_bounds[12] = -2
+        upper_bounds[12] = 2
         
         #legs contact with ground
         # lower_bounds[13] = -0.01

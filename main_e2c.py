@@ -12,8 +12,8 @@ from torch.utils.tensorboard import SummaryWriter
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 
 from benchmarks import envs
+from src.policy import Shield, SACPolicy, ProjectionPolicy
 from e2c.env_model import get_environment_model
-from src.policy import Shield, SACPolicy, ProjectionPolicy, CSCShield
 from abstract_interpretation import domains, verification
 import gymnasium as gym
 from sklearn.metrics import classification_report
@@ -209,20 +209,9 @@ if not args.no_safety:
     states, actions, rewards, next_states, dones, costs = \
         e2c_data.sample(args.start_steps, get_cost=True, remove_samples = False)
 
-
-    if args.neural_safety:
-        env_model, cost_model = get_environment_model(
-                states, actions, next_states, rewards, costs,
-                torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
-                torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
-                model_pieces=20, seed=args.seed, policy=agent,
-                use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim)
-    else:
-        env_model, cost_model = get_environment_model(
-                states, actions, next_states, rewards, costs,
-                domains.DeepPoly(env.observation_space.low, env.observation_space.high),
-                model_pieces=20, seed=args.seed, policy=None,
-                use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon, epochs= 70)
+    env_model = get_environment_model(
+            states, actions, next_states, rewards, costs,
+            domains.DeepPoly(env.observation_space.low, env.observation_space.high), seed=args.seed, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon, epochs= 70)
 
     
     
@@ -253,14 +242,10 @@ if not args.no_safety:
     print(env.safety)
     print(env.observation_space)
     
-    if args.neural_safety:
-        safe_agent = CSCShield(agent, cost_model,
-                                threshold=args.neural_threshold)
-    else:
-        shield = ProjectionPolicy(
-            env_model.get_symbolic_model(), env.observation_space,
-            env.action_space, args.horizon, env.polys, env.safe_polys)
-        safe_agent = Shield(shield, agent)
+    shield = ProjectionPolicy(
+        env_model.get_symbolic_model(), env.observation_space,
+        env.action_space, args.horizon, env.polys, env.safe_polys)
+    safe_agent = Shield(shield, agent)
 
     # Push collected training data to agent
 
@@ -469,19 +454,10 @@ while True:
             continue
         
         env_model.mars.e2c_predictor.lr = 0.000001
-        if args.neural_safety:
-            env_model, cost_model = get_environment_model(
-                    states, actions, next_states, rewards, costs,
-                    torch.tensor(np.concatenate([env.observation_space.low, env.action_space.low])),
-                    torch.tensor(np.concatenate([env.observation_space.high, env.action_space.high])),
-                    model_pieces=20, seed=args.seed, policy=agent,
-                    use_neural_model=False, cost_model=None, e2c_predictor = None, latent_dim=args.red_dim)
-        else:
-            env_model, cost_model = get_environment_model(
-                    states, actions, next_states, rewards, costs,
-                    domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
-                    model_pieces=20, seed=args.seed, policy=None,
-                    use_neural_model=False, cost_model=None, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= 20)
+        env_model = get_environment_model(
+                states, actions, next_states, rewards, costs,
+                domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
+                seed=args.seed, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= 20)
         
             
             
@@ -509,14 +485,11 @@ while True:
         env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
 
 
-        if args.neural_safety:
-            safe_agent = CSCShield(agent, cost_model,
-                                    threshold=args.neural_threshold)
-        else:
-            shield = ProjectionPolicy(
-                env_model.get_symbolic_model(), env.observation_space,
-                env.action_space, args.horizon, env.polys, env.safe_polys)
-            safe_agent = Shield(shield, agent)
+
+        shield = ProjectionPolicy(
+            env_model.get_symbolic_model(), env.observation_space,
+            env.action_space, args.horizon, env.polys, env.safe_polys)
+        safe_agent = Shield(shield, agent)
         
         for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
             agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
