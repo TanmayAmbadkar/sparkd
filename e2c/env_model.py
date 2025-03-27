@@ -29,8 +29,8 @@ class MarsE2cModel:
         x_norm = point[:self.s_dim]
         u_norm = point[self.s_dim:]
         # Convert to tensors
-        x_tensor = torch.tensor(x_norm, dtype=torch.float32).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, dtype=torch.float32).unsqueeze(0)
+        x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
+        u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
 
         # Use E2CPredictor to predict next state
         z_t_next = self.e2c_predictor.get_next_state(x_tensor, u_tensor)
@@ -132,7 +132,7 @@ class RewardModel:
         dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
         
         # Training loop
-        epochs = 1
+        epochs = 100
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0.0
@@ -241,7 +241,6 @@ def get_environment_model(     # noqa: C901
         actions: np.ndarray,
         output_states: np.ndarray,
         rewards: np.ndarray,
-        costs: np.ndarray,
         domain,
         seed: int = 0,
         data_stddev: float = 0.01,
@@ -249,29 +248,14 @@ def get_environment_model(     # noqa: C901
         horizon: int = 5,
         e2c_predictor = None,
         epochs: int = 50) -> EnvModel:
-    """
-    Get a neurosymbolic model of the environment.
-
-    This function takes a dataset consisting of M sample input states and
-    actions together with the observed output states and rewards. It then
-    trains a neurosymbolic model to imitate that data.
-
-    An architecture may also be supplied for the neural parts of the model.
-    The architecture format is a list of hidden layer sizes. The networks are
-    always fully-connected. The default architecture is [280, 240, 200].
-
-    Parameters:
-    input_states (M x S array) - An array of input states.
-    actions (M x A array) - An array of actions taken from the input states.
-    output_states (M x S array) - The measured output states.
-    rewards (M array) - The measured rewards.
-    arch: A neural architecture for the residual and reward models.
-    """
 
     
     means = np.mean(input_states, axis=0)
     stds = np.std(input_states, axis=0)
     stds[np.equal(np.round(stds, 2), np.zeros(*stds.shape))] = 1
+    
+    means = np.zeros_like(means)
+    stds = np.ones_like(stds)
     
     if e2c_predictor is not None:
         means = e2c_predictor.mean
@@ -341,10 +325,6 @@ def get_environment_model(     # noqa: C901
     actions = (actions - actions_min) / (actions_max - actions_min)
     rewards = (rewards - rew_mean) / (rew_std)
 
-
-    terms = 20
-    # Lower penalties allow more model complexity
-    # X = np.concatenate((input_states, actions, output_states), axis=1)
     
     X = output_states
 

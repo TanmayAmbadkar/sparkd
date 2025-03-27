@@ -66,7 +66,7 @@ class Transition(nn.Module):
 
         self.fc_A = nn.Sequential(
         nn.Linear(self.h_dim, self.z_dim * 2),  # v_t and r_t
-            nn.ReLU()
+        nn.Sigmoid()
         )
         
         self.fc_A.apply(weights_init)
@@ -104,4 +104,4 @@ class Transition(nn.Module):
         z_t_next_mean = A_t.bmm(mu.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u_t.unsqueeze(-1)).squeeze(-1) + o_t
 
         # Return the predicted next state, A_t, B_t, o_t, and z_t
-        return z_t_next, z_t_next_mean, A_t, B_t, o_t, v_t, r_t
+        return z_t_next_mean, z_t_next_mean, A_t, B_t, o_t, v_t, r_t

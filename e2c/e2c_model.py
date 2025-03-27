@@ -17,6 +17,7 @@ class E2CPredictor(pl.LightningModule):
             nn.Linear(z_dim, 12),
             nn.ReLU(),
             nn.Linear(12, 12),
+            nn.ReLU(),
         )
         self.transition = Transition(transition_net, z_dim, u_dim)
         self.decoder = Decoder(z_dim, n_features)
@@ -34,7 +35,7 @@ class E2CPredictor(pl.LightningModule):
         z_t, _, _ = self.encoder(x_t)
         if u_t is None:
             u_t = torch.zeros((x_t.size(0), self.u_dim)).to(x_t.device)
-        z_t_next, A_t, B_t, o_t = self.transition(z_t, u_t)
+        z_t_next, A_t, B_t, o_t = self.transition(z_t, z_t, u_t)
         return z_t_next, A_t, B_t, o_t
 
     def training_step(self, batch, batch_idx):
@@ -51,7 +52,7 @@ class E2CPredictor(pl.LightningModule):
         x_recon = self.decoder(z_t)
 
         # Predict transitions
-        z_t_next_pred, z_t_next_mean, _, _, _, v_t, r_t = self.transition(z_t, mu, u)
+        z_t_next_pred, z_t_next_mean, A_t, _, _, v_t, r_t = self.transition(z_t, mu, u)
         
         #Reconstruct next states
         x_next_pred = self.decoder(z_t_next_pred)
@@ -62,32 +63,18 @@ class E2CPredictor(pl.LightningModule):
         next_distribution = NormalDistribution(mu_next, logsig_next)
         
         total_loss = 0
-        
-        # if self.train_ae:        
+          
         recon_term = F.mse_loss(x_recon, x)
         kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
         total_loss += 5*recon_term + kl_term
         
-    # else:
         pred_loss = F.mse_loss(x_next_pred, x_next)
         
 
         # consistency loss
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-        total_loss += 10*consis_term + pred_loss
+        total_loss += 10*consis_term + 5*pred_loss
         
-        # if self.last_predictor is not None: 
-        #     with torch.no_grad():
-        #         z_t_old, mu_old, logvar_old = self.last_predictor.encoder(x)
-        #         z_t_next_old, mu_next_old, logvar_next_old = self.last_predictor.encoder(x_next)
-        #         # Predict transitions
-        #         z_t_next_pred_old, _, _, _, v_t, r_t = self.last_predictor.transition(mu_old, u)
-                
-        #         #Reconstruct next states
-        #         x_next_pred_old = self.decoder(z_t_next_pred_old)
-        #     total_loss += 0.001 * F.mse_loss(x_next_pred, x_next_pred_old) + 0.001 * F.mse_loss(z_t_next_pred, z_t_next_pred_old) + 0.001 * F.mse_loss(z_t, z_t_old) + total_loss
-                
-                
 
         # Logging
         self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
@@ -170,16 +157,6 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon, epochs = 100):
 
     # Initialize the trainer
     e2c_predictor.train_ae = True
-    # print(next(e2c_predictor.transition.parameters()))
-    
-    
-    # for param in e2c_predictor.encoder.parameters():
-    #     param.requires_grad = True
-    # for param in e2c_predictor.decoder.parameters():
-    #     param.requires_grad = True
-    # for param in e2c_predictor.transition.parameters():
-    #     param.requires_grad = False
-    
     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices = 1)
 
     # Train the autoencoder
@@ -187,23 +164,6 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon, epochs = 100):
     # print(next(e2c_predictor.transition.parameters()))
     
     del trainer
-    # del dataset
-    
-    # e2c_predictor.train_ae = False
-    # for param in e2c_predictor.encoder.parameters():
-    #     param.requires_grad = False
-    # for param in e2c_predictor.decoder.parameters():
-    #     param.requires_grad = False
-    # for param in e2c_predictor.transition.parameters():
-    #     param.requires_grad = True
-    
-    # # Initialize the trainer
-    # trainer = pl.Trainer(max_epochs=50, accelerator="gpu", devices = 1)
-
-    # # Train the autoencoder
-    # trainer.fit(e2c_predictor, train_loader)
-    # del trainer
-    
     e2c_predictor.last_predictor = copy.deepcopy(e2c_predictor)
     
     del train_loader

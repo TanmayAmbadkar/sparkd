@@ -83,3 +83,8 @@ class ReplayMemory:
     def load_buffer(self, save_path):
         # Implement loading arrays if needed
         pass
+    
+    def clear_memory(self):
+        self.position = 0
+        self.size = 0
+

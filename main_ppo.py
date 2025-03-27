@@ -1,127 +1,73 @@
-import numpy as np
-np.int = np.int64
-np.float = np.float64
-
 import argparse
 import datetime
 import itertools
+import numpy as np
 import torch
-import sys
 import os
 from torch.utils.tensorboard import SummaryWriter
-from pytorch_soft_actor_critic.replay_memory import ReplayMemory
-
-from benchmarks import envs
-from src.policy import Shield, SACPolicy, ProjectionPolicy
+from ppo import PPO, ActorCritic
+from src.policy import Shield, PPOPolicy, ProjectionPolicy
 from e2c.env_model import get_environment_model
 from abstract_interpretation import domains, verification
-import gymnasium as gym
-from sklearn.metrics import classification_report
-import itertools
-import matplotlib.pyplot as plt
+from benchmarks import envs
+from pytorch_soft_actor_critic.replay_memory import ReplayMemory
+import gymnasium as gym 
+
 import traceback
-import imageio
 
-
-
-parser = argparse.ArgumentParser(description='SPICE Args')
-parser.add_argument('--env_name', default="lunar_lander_R",
-                    help='Environment (default: acc)')
-parser.add_argument('--policy', default="Gaussian",
-                    help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
-parser.add_argument('--eval', type=bool, default=True,
-                    help='Evaluates a policy a policy every few episodes (default: True)')
-parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
-                    help='discount factor for reward (default: 0.99)')
-parser.add_argument('--tau', type=float, default=0.005, metavar='G',
-                    help='target smoothing coefficient (tau) (default: 0.005)')
-parser.add_argument('--lr', type=float, default=0.0003, metavar='G',
-                    help='learning rate (default: 0.0003)')
-parser.add_argument('--alpha', type=float, default=0.2, metavar='G',
-                    help='Temperature parameter alpha determines the relative importance of the entropy\
-                            term against the reward (default: 0.2)')
-parser.add_argument('--automatic_entropy_tuning', default=False, action='store_true',
-                    help='Automaically adjust alpha (default: False)')
-parser.add_argument('--seed', type=int, default=123456, metavar='N',
-                    help='random seed (default: 123456)')
-parser.add_argument('--batch_size', type=int, default=4096, metavar='N',
-                    help='batch size (default: 1024)')
-parser.add_argument('--num_steps', type=int, default=10000000, metavar='N',
-                    help='maximum number of steps (default: 10000000)')
-parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
-                    help='hidden size (default: 256)')
-parser.add_argument('--updates_per_step', type=int, default=40, metavar='N',
-                    help='model updates per simulator step (default: 1)')
-parser.add_argument('--start_steps', type=int, default=10000, metavar='N',
-                    help='Steps sampling random actions (default: 10000)')
-parser.add_argument('--target_update_interval', type=int, default=1, metavar='N',
-                    help='Value target update per no. of updates per step (default: 1)')
-parser.add_argument('--replay_size', type=int, default=10000, metavar='N',
-                    help='size of replay buffer (default: 10000000)')
-parser.add_argument('--cuda', action="store_true",
-                    help='run on CUDA (default: False)')
-parser.add_argument('--horizon', type=int, default=5,
-                    help='The safety horizon')
-parser.add_argument('--neural_safety', default=False, action='store_true',
-                    help='Use a neural safety signal')
-parser.add_argument('--neural_threshold', type=float, default=0.1,
-                    help='Safety threshold for the neural model')
-parser.add_argument('--red_dim', type=int, default=4,
-                    help='Reduced dimension size')
-parser.add_argument('--no_safety', default=False, action='store_true',
-                    help='To use safety or no safety')
+parser = argparse.ArgumentParser(description='Safe PPO Args')
+parser.add_argument('--env_name', default="lunar_lander")
+parser.add_argument('--gamma', type=float, default=0.99)
+parser.add_argument('--lr', type=float, default=0.0003)
+parser.add_argument('--seed', type=int, default=123456)
+parser.add_argument('--batch_size', type=int, default=2048)
+parser.add_argument('--num_steps', type=int, default=200000)
+parser.add_argument('--hidden_size', type=int, default=256)
+parser.add_argument('--replay_size', type=int, default=1000000)
+parser.add_argument('--start_steps', type=int, default=10000)
+parser.add_argument('--cuda', action="store_true")
+parser.add_argument('--horizon', type=int, default=20)
+parser.add_argument('--red_dim', type=int, default = 20)
+parser.add_argument('--no_safety', default=False, action='store_true')
 args = parser.parse_args()
 
-print("Arguments:")
-print(args)
-hyperparams = vars(args)
-
-
+# Setup environment
 env = envs.get_env_from_name(args.env_name)
 env.seed(args.seed)
-
-
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
-# Agent
-# agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
-# safe_agent = None
+hyperparams = vars(args)
 
 # Tensorboard
-writer = SummaryWriter('runs/{}_SAC_{}_{}_{}_{}'.format(
+if not os.path.exists("runs_ppo"):
+    os.makedirs("runs_ppo")
+writer = SummaryWriter('runs_ppo/{}_PPO_{}_H{}_D{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-    args.policy, args.horizon, args.red_dim))
+    args.horizon, args.red_dim))
 
 print(hyperparams)
-if not os.path.exists("logs"):
-    os.makedirs("logs")
+if not os.path.exists("logs_ppo"):
+    os.makedirs("logs_ppo")
 
-file = open('logs/{}_SAC_{}_{}_{}.txt'.format(
+file = open('logs_ppo/{}_PPO_{}_H{}_D{}.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-    args.policy, "autotune" if args.automatic_entropy_tuning else ""), "w+")
+    args.horizon, args.red_dim), "w+")
 
-# Memory
+# PPO agent setup
+
+# Replay memories
 real_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
 e2c_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
+
+
+iterator_loop = itertools.count(1)
 
 real_unsafe_episodes = 0
 total_real_episodes = 0
 total_numsteps = 0
 
-update_steps = 30
-
-
-iterator_loop = itertools.count(1)
-
-agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
-
-
-# PRETRAINING 
-original_obs_space = env.observation_space
-updates = 0
 while total_numsteps < args.start_steps:
-    
     i_episode = next(iterator_loop)
     state, _ = env.reset()
     episode_steps = 0
@@ -130,68 +76,41 @@ while total_numsteps < args.start_steps:
     real_buffer = []
     done = False
     trunc = False
-    while not done and not trunc :
-        
-        if not args.no_safety:
-            action = env.action_space.sample()
-        else:
-            action = agent(state)
-        # if len(agent.memory) > args.batch_size and args.no_safety:
-        if total_numsteps % update_steps == 0  and len(agent.memory) > args.batch_size and args.no_safety:
-            # Number of updates per step in environment
-            for i in range(args.updates_per_step):
-                # Update parameters of all the networks
-                critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
-                    agent.train()
+    
+    while not done and not trunc:
 
-                writer.add_scalar(f'loss/critic_1', critic_1_loss, updates)
-                writer.add_scalar(f'loss/critic_2', critic_2_loss, updates)
-                writer.add_scalar(f'loss/policy', policy_loss, updates)
-                writer.add_scalar(f'loss/entropy_loss', ent_l, updates)
-                writer.add_scalar(f'loss/alpha', alph, updates)
-                updates += 1
-
-        next_state, reward, done, trunc, info = env.step(action)
-        episode_steps += 1
+        action = env.action_space.sample()
+        next_state, reward, done, trunc, _ = env.step(action)
+        cost = int(env.unsafe(next_state, False))
+        state = next_state
         total_numsteps += 1
-        episode_reward += reward
 
-        cost = 0
         if env.unsafe(next_state, False):
             real_unsafe_episodes += 1
-            episode_reward -= 100
-            reward+=-100
+            episode_reward -= 10
+            reward+=-10
             print("UNSAFE (outside testing)", np.round(next_state, 2))
             done = True
             cost = 1
 
-        real_buffer.append((state, action, reward, next_state, done,
-            cost))
 
+        episode_steps += 1
+        episode_reward += reward
+        
+        real_data.push(state, action, reward, next_state, done, cost)
 
-        state = next_state
-
-    for (state, action, reward, next_state, mask, cost) in real_buffer:
-        if cost > 0:
-            real_data.push(state, action, reward, next_state, mask, 1)
-        else:
-            real_data.push(state, action, reward, next_state, mask, 0)
     
-    for (state, action, reward, next_state, mask, cost) in real_buffer:
-        if cost > 0:
-            agent.add(state, action, reward, next_state, mask, 1)
-        else:
-            agent.add(state, action, reward, next_state, mask, 0)
-
-    # total_episodes += 1 
     
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
     
+    
     total_real_episodes += 1
 
-if not args.no_safety:     
+
+# Creation of environment model
+if not args.no_safety:
     states, actions, rewards, next_states, dones, costs = \
         real_data.sample(args.start_steps, get_cost=True, remove_samples = True)
     
@@ -219,15 +138,11 @@ if not args.no_safety:
     e2c_std = env_model.mars.e2c_predictor.std
     new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.observation_space.low - e2c_mean)/e2c_std, (env.observation_space.high - e2c_mean)/e2c_std)))
     env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
-    agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
     
     safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
     
     env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
     
-    
-    # unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
-    # unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
     
     unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
         
@@ -242,6 +157,7 @@ if not args.no_safety:
     print(env.safety)
     print(env.observation_space)
     
+    agent = PPOPolicy(env, args.batch_size, args.seed, args.batch_size, args)
     shield = ProjectionPolicy(
         env_model.get_symbolic_model(), env.observation_space,
         env.action_space, args.horizon, env.polys, env.safe_polys)
@@ -250,12 +166,8 @@ if not args.no_safety:
     # Push collected training data to agent
 
 
-    for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-        agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
 
-else:
-    safe_agent=None
-    
+# Training loop
 
 unsafe_test_episodes = 0
 total_test_episodes = 0
@@ -271,8 +183,9 @@ while True:
         state, info = env.reset()
         if not env.unsafe(info['state_original'], False):
             break
-        
-    if (i_episode // 10) % 10 == 0 or args.no_safety:
+
+    if (i_episode // 10) % 10 == 0:
+
         print(i_episode, ": Real data")
         tmp_buffer = []
         real_buffer = []
@@ -284,21 +197,6 @@ while True:
             else:
                 action = agent(state)
 
-            # if len(agent.memory) > args.batch_size:
-            if total_numsteps % update_steps == 0 and len(agent.memory) > args.batch_size:
-                # Number of updates per step in environment
-                for i in range(args.updates_per_step):
-                    # Update parameters of all the networks
-                    critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
-                        agent.train()
-
-                    writer.add_scalar(f'loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar(f'loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar(f'loss/policy', policy_loss, updates)
-                    writer.add_scalar(f'loss/entropy_loss', ent_l, updates)
-                    writer.add_scalar(f'loss/alpha', alph, updates)
-                    updates += 1
-
             next_state, reward, done, trunc, info = env.step(action)
             episode_steps += 1
             total_numsteps += 1
@@ -307,8 +205,8 @@ while True:
             cost = 0
             if env.unsafe(info['state_original'], False):
                 real_unsafe_episodes += 1
-                episode_reward -= 100
-                reward+=-100
+                episode_reward -= 10
+                reward+=-10
                 print("UNSAFE (outside testing)", next_state)
                 done = True
                 cost = 1
@@ -316,36 +214,32 @@ while True:
             # Ignore the "done" signal if it comes from hitting the time
             # horizon.
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
-            mask = 1 if episode_steps == env._max_episode_steps \
-                else float(not done)
 
-            tmp_buffer.append((state, action, reward, next_state, mask, cost))
-
-
-
-
-            # Don't add states to the training data if they hit the edge of
-            # the state space, this seems to cause problems for the regression.
+            if cost > 0:
+                agent.add(state, action, reward, next_state, done, 1)
+                real_data.push(last_state, action, reward, info['state_original'], done, 1)
+            else:
+                agent.add(state, action, reward, next_state, done, 0)
+                real_data.push(last_state, action, reward, info['state_original'], done, 0)
             
-            real_buffer.append((last_state, action, reward, info['state_original'], mask,
-                            cost))
+            
+            if len(agent.memory) >= args.batch_size:
+                losses = agent.train()
+
+                writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
+                writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
+                writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
+                writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
+                writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
+                writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
+                writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
 
 
             state = next_state
             last_state = info['state_original']
 
-
-        for (state, action, reward, next_state, mask, cost) in tmp_buffer:
-            if cost > 0:
-                agent.add(state, action, reward, next_state, mask, 1)
-            else:
-                agent.add(state, action, reward, next_state, mask, 0)
-
-        for (state, action, reward, next_state, mask, cost) in real_buffer:
-            if cost > 0:
-                real_data.push(state, action, reward, next_state, mask, 1)
-            else:
-                real_data.push(state, action, reward, next_state, mask, 0)
+            
+        
         if safe_agent is not None:
             try:
                 s, a, b, t = safe_agent.report()
@@ -357,30 +251,15 @@ while True:
         
         total_real_episodes += 1 
 
-    elif not args.no_safety:
+    else:
+        
         print(i_episode, ": Simulated data")
+
         while not done:
             if episode_steps % 100 == 0:
                 print(i_episode, episode_steps, total_numsteps)
-            if args.start_steps > total_numsteps:
-                action = env.action_space.sample()  # Sample random action
-            else:
-                action = agent(state)  # Sample action from policy
-            # if len(agent.memory) > args.batch_size:
-            if total_numsteps % update_steps == 0  and len(agent.memory) > args.batch_size:
-                # Number of updates per step in environment
-                for i in range(args.updates_per_step):
-                    # Update parameters of all the networks
-                    critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
-                        agent.train()
-
-                    writer.add_scalar(f'loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar(f'loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar(f'loss/policy', policy_loss, updates)
-                    writer.add_scalar(f'loss/entropy_loss', ent_l, updates)
-                    writer.add_scalar(f'entropy_temprature/alpha', alph,
-                                      updates)
-                    updates += 1
+            
+            action = agent(state)  # Sample action from policy
 
             next_state, reward = env_model(state, action,
                                            use_neural_model=False)
@@ -398,22 +277,36 @@ while True:
             if env.unsafe(next_state, True):
                 print(next_state)
                 unsafe_sim_episodes += 1
-                reward+=-100
-                episode_reward -= 100
+                reward+=-10
+                episode_reward -= 10
                 done = True
                 cost = 1
 
             # Ignore the "done" signal if it comes from hitting the time
             # horizon.
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
-            mask = 1 if episode_steps == env._max_episode_steps \
-                else float(not done)
 
-            agent.add(state.reshape(-1, ), action.reshape(-1, ), reward, next_state.reshape(-1, ), mask, cost)
+            agent.add(state.reshape(-1, ), action.reshape(-1, ), reward, next_state.reshape(-1, ), done, cost)
+                    
+                        
+            if len(agent.memory) >= args.batch_size:
+                losses = agent.train()
+
+                writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
+                writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
+                writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
+                writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
+                writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
+                writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
+                writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
+
+
 
             state = next_state
         
         total_sim_episodes += 1 
+
+
 
     if ((i_episode-1) // 10) % 10 == 0 and ((i_episode) // 10) % 10 != 0 and not args.no_safety:
     # if False:
@@ -455,7 +348,7 @@ while True:
         
         env_model.mars.e2c_predictor.lr = 0.0001
         env_model = get_environment_model(
-                states, actions, next_states, rewards, costs,
+                states, actions, next_states, rewards,
                 domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
                 seed=args.seed, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= 20)
         
@@ -499,10 +392,9 @@ while True:
         for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
             agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
 
-        
-            
-        
 
+    # Test the agent periodically
+    
     writer.add_scalar(f'reward/train', episode_reward, total_numsteps)
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
@@ -510,7 +402,7 @@ while True:
     if safe_agent is not None:
         safe_agent.reset_count()
 
-    if (i_episode - 99) % 1 == 0 and args.eval is True:
+    if (i_episode - 99) % 1 == 0:
         print("starting testing...")
         avg_reward = 0.
         episodes = 1
@@ -554,7 +446,7 @@ while True:
                 done = True
             if env.unsafe(info['state_original'], False):
                 print("UNSAFE")
-                episode_reward += -100
+                episode_reward += -10
                 print(np.round(original_state, 2), "\n", action, "\n", np.round(info['state_original'], 2))
                 unsafe_episodes += 1
                 done = True
@@ -598,7 +490,7 @@ while True:
         writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_numsteps)
         writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_numsteps)
         writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_numsteps)
-        writer.add_scalar(f'reward/test', avg_reward, i_episode)
+        writer.add_scalar(f'reward/test', avg_reward, total_numsteps)
 
         print("----------------------------------------")
         print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"
@@ -614,8 +506,6 @@ while True:
     if total_numsteps > args.num_steps:
         break
     
-        
-        
 total_episodes = next(iterator_loop) - 1
 print("Total unsafe real:", real_unsafe_episodes, "/", total_real_episodes)
 print("Total unsafe real:", real_unsafe_episodes, "/", total_real_episodes, file=file)
