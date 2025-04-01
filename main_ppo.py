@@ -176,7 +176,6 @@ while True:
             episode_reward += reward
 
             cost = 0
-            print("SIM", next_state)
             if env.unsafe(next_state, False):
                 print("UNSAFE SIM", next_state)
                 unsafe_sim_episodes += 1

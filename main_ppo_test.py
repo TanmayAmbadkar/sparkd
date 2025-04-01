@@ -12,7 +12,7 @@ from abstract_interpretation import domains, verification
 from benchmarks import envs
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 import gymnasium as gym 
-from sklearn.metrics import explained_variance_score
+from sklearn.metrics import explained_variance_score, mean_absolute_percentage_error, mean_absolute_error
 
 import traceback
 
@@ -161,7 +161,7 @@ while True:
             
             done = not np.all(np.abs(next_state) < 1e5) and \
                 not np.any(np.isnan(next_state))
-            # done = done or env.pred`ict_done(next_state)
+            # done = done or env.predict_done(next_state)
             done = done or episode_steps == env._max_episode_steps or \
                 not np.all(np.abs(next_state) < 1e5)
             episode_steps += 1
@@ -193,11 +193,11 @@ while True:
         print("Original states", np.round(original_states[:10], 3))
         print("Predicted states", np.round(predicted_states[:10], 3))
 
-        print("EV Score", explained_variance_score(original_states, predicted_states))
-        print("EV Score 5", explained_variance_score(original_states[:5], predicted_states[:5]))
-        print("EV Score 10", explained_variance_score(original_states[:10], predicted_states[:10]))
-        print("EV Score 15", explained_variance_score(original_states[:15], predicted_states[:15]))
-        print("EV Score 20", explained_variance_score(original_states[:20], predicted_states[:20]))
+        print("EV Score", explained_variance_score(original_states, predicted_states), mean_absolute_percentage_error(original_states, predicted_states), mean_absolute_error(original_states, predicted_states))
+        print("EV Score 5", explained_variance_score(original_states[:5], predicted_states[:5]),  mean_absolute_percentage_error(original_states[:5], predicted_states[:5]),  mean_absolute_error(original_states[:5], predicted_states[:5]))
+        print("EV Score 10", explained_variance_score(original_states[:10], predicted_states[:10]),  mean_absolute_percentage_error(original_states[:10], predicted_states[:10]),  mean_absolute_error(original_states[:10], predicted_states[:10]))
+        print("EV Score 15", explained_variance_score(original_states[:15], predicted_states[:15]),  mean_absolute_percentage_error(original_states[:15], predicted_states[:15]),  mean_absolute_error(original_states[:15], predicted_states[:15]))
+        print("EV Score 20", explained_variance_score(original_states[:20], predicted_states[:20]),  mean_absolute_percentage_error(original_states[:20], predicted_states[:20]),  mean_absolute_error(original_states[:20], predicted_states[:20]))
 
     if ((i_episode-1) // 20) % 20 == 0 and ((i_episode) // 20) % 20 != 0 and not args.no_safety:
     # if False:
