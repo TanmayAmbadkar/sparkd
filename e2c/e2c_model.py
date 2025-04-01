@@ -10,7 +10,7 @@ import copy
 
 
 class E2CPredictor(pl.LightningModule):
-    def __init__(self, n_features, z_dim, u_dim, lr=0.0003, weight_decay=1e-4, horizon=1, train_ae=True, last_predictor = None):
+    def __init__(self, n_features, z_dim, u_dim, lr=0.0001, weight_decay=1e-4, horizon=1, train_ae=True, last_predictor = None):
         super(E2CPredictor, self).__init__()
         self.encoder = Encoder(n_features, z_dim)
         transition_net = nn.Sequential(
@@ -65,15 +65,15 @@ class E2CPredictor(pl.LightningModule):
         total_loss = 0
           
         recon_term = F.mse_loss(x_recon, x)
-        kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
-        total_loss += 5*recon_term + kl_term
+        kl_term = -0.5*torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
+        total_loss += 20*recon_term + kl_term
         
         pred_loss = F.mse_loss(x_next_pred, x_next)
         
 
         # consistency loss
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-        total_loss += 100*consis_term + 5*pred_loss
+        total_loss += 50*consis_term + 20*pred_loss
 
         # total_loss += 0.01 * F.mse_loss(z_t_next, x_next) + 0.01 * F.mse_loss(z_t, x)
         
@@ -81,6 +81,7 @@ class E2CPredictor(pl.LightningModule):
         # Logging
         self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         self.log("consis_term", consis_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        self.log("pred_term", recon_term + pred_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         self.log("total_loss", total_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         
         return total_loss
@@ -108,14 +109,16 @@ class E2CPredictor(pl.LightningModule):
         return z_t.numpy()
     
     def get_next_state(self, x, u):
-        x = torch.tensor(x).double()
-        u = torch.tensor(u).double()
+        # x = torch.tensor(x).double()
+        # u = torch.tensor(u).double()
         with torch.no_grad():
-            z_t_next, _, _, _, _, _, _ = self.transition(x, x, u)
+            mu = self.encoder.encode(x)
+            z_t_next, _, _, _, _, _, _ = self.transition(mu, mu, u)
+            dec_state = self.decoder(z_t_next)
 
             # z_t_next = A_t.bmm(z_t.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u.unsqueeze(-1)).squeeze(-1) + o_t
             
-        return z_t_next.numpy()
+        return dec_state.numpy()
 
 class E2CDataset(Dataset):
     """
@@ -167,6 +170,9 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon, epochs = 100):
     
     del trainer
     e2c_predictor.last_predictor = copy.deepcopy(e2c_predictor)
+
+    print(e2c_predictor.get_next_state( torch.tensor(states[:10], dtype=torch.float64), torch.tensor(actions[:10], dtype=torch.float64)))
+    print(next_states[:10])
     
     del train_loader
     

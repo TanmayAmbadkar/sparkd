@@ -93,7 +93,8 @@ class ProjectionPolicy:
                  action_space: gym.Space,
                  horizon: int,
                  unsafe_polys: List[np.ndarray],
-                 safe_polys: List[np.ndarray]):
+                 safe_polys: List[np.ndarray], 
+                 transform = lambda x: x):
         self.env = env
         self.horizon = horizon
         self.state_space = state_space
@@ -102,6 +103,7 @@ class ProjectionPolicy:
         self.safe_polys = safe_polys
         self.saved_state = None
         self.saved_action = None
+        self.transform = transform
 
         
         self.slack = 0.1
@@ -111,6 +113,11 @@ class ProjectionPolicy:
         Choose a backup action if the projection fails.
         """
         s_dim = self.state_space.shape[0]
+        with torch.no_grad():
+            state = self.transform(state.reshape(1, -1))
+        # state = state.numpy()
+        state = state.reshape(-1,)
+
         P = cvxopt.spmatrix(1.0, range(s_dim), range(s_dim))
         q = cvxopt.matrix(0.0, (s_dim, 1))
 
@@ -159,10 +166,14 @@ class ProjectionPolicy:
         action and state because very often we will call unsafe and then
         __call__ on the same state.
         """
-        
+        original_state = state.copy() 
         shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
+        with torch.no_grad():
+            state = self.transform(state.reshape(1, -1))
+        # state = state.numpy()
+        state = state.reshape(-1,)
         # If we don't have a proposed action, look for actions with small
         # magnitude
         if action is None:
@@ -279,7 +290,7 @@ class ProjectionPolicy:
             shielded = False
             # best_u0 = action
 
-        self.saved_state = state
+        self.saved_state = original_state
         self.saved_action = best_u0
         self.shielded = shielded
         return best_u0, shielded
@@ -292,6 +303,7 @@ class ProjectionPolicy:
         Solve the safety projection optimization problem.
         This method constructs a QP whose constraints are relaxed by a constant slack.
         """
+        original_state = state.copy()
         shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
@@ -382,7 +394,7 @@ class ProjectionPolicy:
         if best_u0 is None:
             best_u0 = self.backup(state)
             shielded = False
-        self.saved_state = state
+        self.saved_state = original_state
         self.saved_action = best_u0
         self.shielded = shielded
         return best_u0, shielded

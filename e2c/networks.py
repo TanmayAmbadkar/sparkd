@@ -65,8 +65,8 @@ class Transition(nn.Module):
         self.u_dim = u_dim
 
         self.fc_A = nn.Sequential(
-        nn.Linear(self.h_dim, self.z_dim * 2),  # v_t and r_t
-        nn.Sigmoid()
+            nn.Linear(self.h_dim, self.z_dim * 2),  # v_t and r_t
+            nn.ReLU()
         )
         
         self.fc_A.apply(weights_init)

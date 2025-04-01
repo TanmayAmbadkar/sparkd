@@ -17,17 +17,18 @@ class MarsE2cModel:
     A model that uses the E2CPredictor to obtain A, B, and c matrices
     and provides a similar interface to MARSModel.
     """
-    def __init__(self, e2c_predictor: E2CPredictor, s_dim=None):
+    def __init__(self, e2c_predictor: E2CPredictor, s_dim=None, original_s_dim = None):
         self.e2c_predictor = e2c_predictor
         self.s_dim = s_dim
+        self.original_s_dim = original_s_dim
 
     def __call__(self, point,  normalized: bool = False) -> np.ndarray:
         """
         Predict the next state given the current state x and action u.
         """
         
-        x_norm = point[:self.s_dim]
-        u_norm = point[self.s_dim:]
+        x_norm = point[:self.original_s_dim ]
+        u_norm = point[self.original_s_dim:]
         # Convert to tensors
         x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
         u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
@@ -100,11 +101,15 @@ class MarsE2cModel:
 
 class RewardModel:
     
-    def __init__(self, input_size, 
+    def __init__(
+            self, 
+            input_size:int, 
             input_mean: np.ndarray,
             input_std: np.ndarray,
             rew_mean: np.ndarray,
-            rew_std: np.ndarray):
+            rew_std: np.ndarray\
+        ):
+        
         self.model = nn.Sequential(
             nn.Linear(input_size, 32),
             nn.ReLU(),
@@ -131,7 +136,7 @@ class RewardModel:
         dataloader = DataLoader(dataset, batch_size=1024, shuffle=True)
         
         # Training loop
-        epochs = 1
+        epochs = 100
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0.0
@@ -233,7 +238,7 @@ class EnvModel:
         
         rew = self.symb_reward(np.concatenate((inp, symb[0]), axis = 0))[0]
             
-        return np.clip(symb, self.observation_space_low, self.observation_space_high), rew
+        return np.clip(symb[0], self.observation_space_low, self.observation_space_high), rew
 
     def get_symbolic_model(self) -> MarsE2cModel:
         """
@@ -279,26 +284,26 @@ def get_environment_model(     # noqa: C901
     input_states = (input_states - means) / stds
     output_states = (output_states - means) / stds
     
-    domain.lower = (domain.lower - means) / stds
-    domain.upper = (domain.upper - means) / stds
-    print("Input states:", input_states)
+    # domain.lower = (domain.lower - means) / stds
+    # domain.upper = (domain.upper - means) / stds
+    # print("Input states:", input_states)
     
     if e2c_predictor is None:
         e2c_predictor = E2CPredictor(input_states.shape[-1], latent_dim, actions.shape[-1], horizon = horizon)
     fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon, epochs=epochs)
 
     
-    lows, highs = get_variational_bounds(e2c_predictor, domain)
+    # lows, highs = get_ae_bounds(e2c_predictor, domain)
     
-    lows = lows.detach().numpy()
-    highs = highs.detach().numpy()
+    # lows = lows.detach().numpy()
+    # highs = highs.detach().numpy()
     
     input_states= input_states.reshape(-1, input_states.shape[-1])
     actions = actions.reshape(-1, actions.shape[-1])
     output_states = output_states.reshape(-1, output_states.shape[-1])
     rewards = rewards.reshape(-1, 1)
-    input_states = e2c_predictor.transform(input_states)
-    output_states = e2c_predictor.transform(output_states)
+    # input_states = e2c_predictor.transform(input_states)
+    # output_states = e2c_predictor.transform(output_states)
     
     e2c_predictor.mean = means
     e2c_predictor.std = stds
@@ -313,7 +318,7 @@ def get_environment_model(     # noqa: C901
     print("Reward stats:", rewards_min, rewards_max)
     
     
-    parsed_mars = MarsE2cModel(e2c_predictor, latent_dim)
+    parsed_mars = MarsE2cModel(e2c_predictor, latent_dim, input_states.shape[-1])
     
     X = np.concatenate((input_states, actions), axis=1)
     Yh = np.array([parsed_mars(state, normalized=True) for state in X]).reshape(input_states.shape[0], -1)
@@ -334,6 +339,10 @@ def get_environment_model(     # noqa: C901
 
     input_mean, input_std = np.mean(input_states, axis=0), np.std(input_states, axis=0)
     rew_mean, rew_std = np.mean(rewards), np.std(rewards)
+    input_std[np.equal(np.round(input_std, 2), np.zeros(*input_std.shape))] = 1
+
+    print("Input mean:", input_mean)
+    print("Input std:", input_std)
     
     input_states = (input_states - input_mean) / (input_std)
     output_states = (output_states - input_mean) / (input_std)
@@ -354,4 +363,4 @@ def get_environment_model(     # noqa: C901
     print("Model MSE:", np.mean(np.sum((Yh - output_states)**2, axis=1)))
     # print(reward_symb.summary())
 
-    return EnvModel(parsed_mars, parsed_rew, lows[:input_states.shape[1]], highs[:input_states.shape[1]])
+    return EnvModel(parsed_mars, parsed_rew, domain.lower.detach().numpy(), domain.upper.detach().numpy())

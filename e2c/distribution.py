@@ -39,10 +39,10 @@ class NormalDistribution:
 
         sum = lambda x: torch.sum(x, dim=-1)
 
-        KL = 0.5 * torch.mean(sum((sigma_0**2 + 2*sigma_0**2*v*r) / sigma_1**2)
+        KL = 0.5 * torch.mean(sum(sigma_0**2*(1 + 2*v*r) / sigma_1**2)
                               + sum(r.pow(2) * sigma_0**2) * sum(v.pow(2) / sigma_1**2)
                               + sum(torch.pow(mu_1-mu_0, 2) / sigma_1**2) - k
-                              + 2 * (sum(2* q_z_next.logsig - 2*q_z_next_pred.logsig) - torch.log(1 + sum(v*r)))
+                              + 2 * (sum(q_z_next.logsig - q_z_next_pred.logsig) - torch.log(1 + sum(v*r)))
                               )
         
         # print(torch.mean(0.5 * torch.mean(sum((sigma_0**2 + 2*sigma_0**2*v*r) / sigma_1**2))))

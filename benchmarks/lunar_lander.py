@@ -21,6 +21,8 @@ class LunarLanderEnv(gym.Env):
         self.done = False  
         self.safe_polys = []
         self.polys = []
+        self.transformed_polys = []
+        self.transformed_safe_polys = []
         self.render_mode = "rgb_array"
         
         self.safety_constraints()
@@ -45,12 +47,12 @@ class LunarLanderEnv(gym.Env):
         upper_bounds[1] = 2
 
         # Horizontal velocity constraint (vx) - relaxed
-        lower_bounds[2] = -4 # Increased from 0.5 to 0.75
-        upper_bounds[2] = 4
+        lower_bounds[2] = -2 # Increased from 0.5 to 0.75
+        upper_bounds[2] = 2
 
         # Vertical velocity constraint (vy) - relaxed
-        lower_bounds[3] = -4  # Increased from 0.5 to 0.75
-        upper_bounds[3] = 4
+        lower_bounds[3] = -2 # Increased from 0.5 to 0.75
+        upper_bounds[3] = 2
 
         input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
     

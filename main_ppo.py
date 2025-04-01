@@ -66,109 +66,12 @@ iterator_loop = itertools.count(1)
 real_unsafe_episodes = 0
 total_real_episodes = 0
 total_numsteps = 0
-
-while total_numsteps < args.start_steps:
-    i_episode = next(iterator_loop)
-    state, _ = env.reset()
-    episode_steps = 0
-    episode_reward = 0
-    print(i_episode, ": Real data")
-    real_buffer = []
-    done = False
-    trunc = False
-    
-    while not done and not trunc:
-
-        action = env.action_space.sample()
-        next_state, reward, done, trunc, _ = env.step(action)
-        cost = int(env.unsafe(next_state, False))
-        state = next_state
-        total_numsteps += 1
-
-        if env.unsafe(next_state, False):
-            real_unsafe_episodes += 1
-            episode_reward -= 10
-            reward = -10
-            print("UNSAFE (outside testing)", np.round(next_state, 2))
-            # done = True
-            cost = 1
-
-
-        episode_steps += 1
-        episode_reward += reward
-        
-        real_data.push(state, action, reward, next_state, done, cost)
-
-    
-    
-    print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
-          .format(i_episode, total_numsteps,
-                  episode_steps, round(episode_reward, 2)))
-    
-    
-    total_real_episodes += 1
-
-
-# Creation of environment model
-if not args.no_safety:
-    states, actions, rewards, next_states, dones, costs = \
-        real_data.sample(args.start_steps, get_cost=True, remove_samples = True)
-    
-    for idx in range(states.shape[0]):
-        state = states[idx]
-        action = actions[idx]
-        reward = rewards[idx]
-        next_state = next_states[idx]
-        mask = dones[idx]
-        cost = costs[idx]
-        e2c_data.push(state, action, reward, next_state, mask, cost)
-
-    # print("E2C DATA", len(e2c_data))
-
-    states, actions, rewards, next_states, dones, costs = \
-        e2c_data.sample(args.start_steps, get_cost=True, remove_samples = False)
-
-    env_model = get_environment_model(
-            states, actions, next_states, rewards,
-            domains.DeepPoly(env.observation_space.low, env.observation_space.high), seed=args.seed, e2c_predictor = None, latent_dim=args.red_dim, horizon = args.horizon, epochs= 70)
-
-    
-    
-    e2c_mean = env_model.mars.e2c_predictor.mean
-    e2c_std = env_model.mars.e2c_predictor.std
-    new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.observation_space.low - e2c_mean)/e2c_std, (env.observation_space.high - e2c_mean)/e2c_std)))
-    env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
-    
-    safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
-    
-    env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
-    
-    
-    unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
-        
-    
-    
-    polys = [np.array(env.safety.to_hyperplanes())]
-
-    env.safe_polys = polys
-    env.state_processor = env_model.mars.e2c_predictor.transform
-    env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
-    
-    print(env.safety)
-    print(env.observation_space)
-    
-    agent = PPOPolicy(env, args.batch_size, args.seed, args.batch_size, args)
-    shield = ProjectionPolicy(
-        env_model.get_symbolic_model(), env.observation_space,
-        env.action_space, args.horizon, env.polys, env.safe_polys)
-    safe_agent = Shield(shield, agent)
-
-    # Push collected training data to agent
-
-
+agent = PPOPolicy(env, args.batch_size, args.seed, args.batch_size, args)
+safe_agent = None
 
 # Training loop
 
+env_model = None
 unsafe_test_episodes = 0
 total_test_episodes = 0
 unsafe_sim_episodes = 0
@@ -181,7 +84,7 @@ while True:
     trunc = False
     while True:
         state, info = env.reset()
-        if not env.unsafe(info['state_original'], False):
+        if not env.unsafe(state, False):
             break
 
     if (i_episode // 10) % 10 == 0:
@@ -190,7 +93,6 @@ while True:
         tmp_buffer = []
         real_buffer = []
         
-        last_state = info['state_original']
         while not done and not trunc:
             if safe_agent is not None:
                 action = safe_agent(state)
@@ -203,12 +105,12 @@ while True:
             episode_reward += reward
 
             cost = 0
-            if env.unsafe(info['state_original'], False):
+            if env.unsafe(next_state, False):
                 real_unsafe_episodes += 1
                 episode_reward -= 10
                 reward = -10
-                print("UNSAFE (outside testing)", env.safety)
-                print(f"{np.round(last_state, 2)} {np.round(state, 2)}", "\n", action, "\n", f"{np.round(info['state_original'], 2)} {np.round(next_state, 2)}")
+                print("UNSAFE (outside testing)")
+                print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = True
                 cost = 1
 
@@ -218,10 +120,10 @@ while True:
 
             if cost > 0:
                 agent.add(state, action, reward, next_state, done, 1)
-                real_data.push(last_state, action, reward, info['state_original'], done, 1)
+                real_data.push(state, action, reward, next_state, done, 1)
             else:
                 agent.add(state, action, reward, next_state, done, 0)
-                real_data.push(last_state, action, reward, info['state_original'], done, 0)
+                real_data.push(state, action, reward, next_state, done, 0)
             
             
             if len(agent.memory) >= args.batch_size:
@@ -237,7 +139,6 @@ while True:
 
 
             state = next_state
-            last_state = info['state_original']
 
             
         
@@ -252,7 +153,7 @@ while True:
         
         total_real_episodes += 1 
 
-    else:
+    elif env_model is not None:
         
         print(i_episode, ": Simulated data")
 
@@ -275,7 +176,8 @@ while True:
             episode_reward += reward
 
             cost = 0
-            if env.unsafe(next_state, True):
+            print("SIM", next_state)
+            if env.unsafe(next_state, False):
                 print("UNSAFE SIM", next_state)
                 unsafe_sim_episodes += 1
                 reward =-10
@@ -343,39 +245,46 @@ while True:
             print("Error in sampling")
             continue
         
-        env_model.mars.e2c_predictor.lr = 0.00003
+        if env_model is not None:
+            env_model.mars.e2c_predictor.lr = 0.00003
+            e2c_predictor = env_model.mars.e2c_predictor
+            epochs = 20
+        else:
+            e2c_predictor = None
+            epochs = 150
+    
         env_model = get_environment_model(
                 states, actions, next_states, rewards,
                 domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
-                seed=args.seed, e2c_predictor = env_model.mars.e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= 20)
+                seed=args.seed, e2c_predictor = e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
         
             
             
         e2c_mean = env_model.mars.e2c_predictor.mean
         e2c_std = env_model.mars.e2c_predictor.std
-        new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
-        env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
+        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
+        new_obs_space = gym.spaces.Box(low=new_obs_space_domain.lower.detach().numpy(), high=new_obs_space_domain.upper.detach().numpy(), shape=(args.red_dim,))
         
         safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
         
-        env.safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
+        safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
         
         
         
-        unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
+        unsafe_domains_list = domains.recover_safe_region(new_obs_space_domain, [safety])
             
         
-        polys = [np.array(env.safety.to_hyperplanes())]
+        polys = [np.array(safety.to_hyperplanes())]
 
-        env.safe_polys = polys
-        env.state_processor = env_model.mars.e2c_predictor.transform
-        env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
+        env.transformed_safe_polys = polys
+        # env.state_processor = env_model.mars.e2c_predictor.transform
+        env.transformed_polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
 
 
 
         shield = ProjectionPolicy(
-            env_model.get_symbolic_model(), env.observation_space,
-            env.action_space, args.horizon, env.polys, env.safe_polys)
+            env_model.get_symbolic_model(), new_obs_space,
+            env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.e2c_predictor.transform)
         safe_agent = Shield(shield, agent)
         
         
@@ -408,9 +317,8 @@ while True:
             
             while True:
                 state, info = env.reset()
-                if not env.unsafe(info['state_original'], False):
+                if not env.unsafe(state, False):
                     break
-            original_state = info['state_original']
             episode_reward = 0
             done = False
             trunc = False
@@ -431,10 +339,10 @@ while True:
 
                 if episode_steps >= env._max_episode_steps:
                     done = True
-                if env.unsafe(info['state_original'], False):
+                if env.unsafe(next_state, False):
                     print("UNSAFE Inside testing")
                     episode_reward += -10
-                    print(f"{np.round(original_state, 2)} {np.round(state, 2)}", "\n", action, "\n", f"{np.round(info['state_original'], 2)} {np.round(next_state, 2)}")
+                    print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                     unsafe_episodes += 1
                     done = True
 
@@ -454,7 +362,6 @@ while True:
 
                 state = next_state
                 trajectory.append(state)
-                original_state = info['state_original']
                 # frames.append(env.render())
 
             # imageio.mimsave(custom_filename, frames, fps=30)

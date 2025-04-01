@@ -15,10 +15,13 @@ class PPO:
         self.device = torch.device("cuda" if args.cuda else "cpu")
         self.actor_critic = ActorCritic(obs_dim, action_space.shape[0], args.hidden_size, action_space).to(self.device)
         self.optimizer = Adam(self.actor_critic.parameters(), lr=args.lr)
+        self.action_space = action_space
 
     def select_action(self, state):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0).double()
         action, log_prob = self.actor_critic.act(state)
+
+        action = torch.clamp(action, self.action_space.low[0], self.action_space.high[0])
         return action.cpu().detach().numpy()[0], log_prob.cpu().detach().numpy()[0]
 
     @torch.no_grad()
