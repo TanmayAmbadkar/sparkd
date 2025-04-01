@@ -136,38 +136,6 @@ class ProjectionPolicy:
         # dynamics and the input
         A = mat[:, :s_dim]
         B = mat[:, s_dim:-1]
-        # c = mat[:, -1]   # c only contributes a constant and isn't needed
-        # Some analysis:
-        # x_{i+1} = A x_i + B u_i + c
-        # x_1 = A x_0 + B u_0 + c
-        # x_2 = A (A x_0 + B u_0 + c) + B u_1 + c
-        #     = A^2 x_0 + A B u_0 + A c + B u_1 + c
-        # x_3 = A (A^2 x_0 + A B u_0 + A c + B u_1 + c) + B u_2 + c
-        #     = A^3 x_0 + A^2 B u_0 + A^2 c + A B u_1 + A c + B u_2 + c
-        # x_i = A^i x_0 + A^{i-1} B u_0 + ... + A B u_{i-2} + B u_{i-1} +
-        #           A^{i-1} c + ... + A c + c
-        # x_H = A^H x_0
-        #     + \sum_{i=0}^{H-1} A^{H-i-1} B u_i
-        #     + \sum_{i=1}^{H-1} A^i c
-        # Now we maximize -best_proj^T (x_H - x_0). -best_proj^T x_0 is
-        # constant so we can igonore it and just maximize -best_proj^T x_H.
-        # (let q = -best_proj for convenience)
-        #   q^T x_H
-        # = q^T (A^H x_0 + sum A^i c + sum A^{H-i-1} B u_i)
-        # = q^T A^H x_0 + q^T sum A^i c + q^T sum A^{H-i-1} B u_i
-        # We can remove the constants q^T A^H x_0 and q^T sum A^i c
-        # maximize q^T sum A^{H-i-1} B u_i
-        #    = sum q^T A^{H-i-1} B u_i
-        #    = sum (q^T A^{H-i-1} B) u_i
-        #    = sum ((A^{H-i-1} B)^T q)^T u_i
-        # So in the end, let
-        # m = [((A^{H-1} B)^T q)^T
-        #      ((A^{H-2} B)^T q)^T
-        #      ...
-        #      ((A B)^T q)^T
-        #      (B^T q)^T]
-        # and let u = [u_0 u_1 ... u_{H-1}]. Then we need to solve
-        # maximize m^T u subject to action space constraints
         m = np.zeros(self.horizon * u_dim)
         for i in range(self.horizon):
             m[u_dim*i:u_dim*(i+1)] = \
@@ -182,7 +150,7 @@ class ProjectionPolicy:
         return res['x'][:u_dim]
 
 
-    def solve_backup(self,    # noqa: C901
+    def solve(self,    # noqa: C901
               state: np.ndarray,
               action: Optional[np.ndarray] = None,
               debug: bool = False) -> np.ndarray:
@@ -316,7 +284,7 @@ class ProjectionPolicy:
         self.shielded = shielded
         return best_u0, shielded
 
-    def solve(self,
+    def solve_slack(self,
               state: np.ndarray,
               action: Optional[np.ndarray] = None,
               debug: bool = False) -> np.ndarray:

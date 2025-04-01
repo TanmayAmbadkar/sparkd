@@ -106,10 +106,9 @@ class RewardModel:
             rew_mean: np.ndarray,
             rew_std: np.ndarray):
         self.model = nn.Sequential(
-            nn.Linear(input_size, 8),
+            nn.Linear(input_size, 32),
             nn.ReLU(),
-            nn.Linear(8, 1),
-            nn.Sigmoid()
+            nn.Linear(32, 1),
         )
         
         self.input_mean = input_mean
@@ -125,17 +124,19 @@ class RewardModel:
         
         # Define the loss function and optimizer
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.00001)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0003)
         
         # Create DataLoader for batching
         dataset = TensorDataset(X, rewards)
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=1024, shuffle=True)
         
         # Training loop
-        epochs = 100
+        epochs = 1
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0.0
+            all_preds = []
+            all_targets = []
             for batch_X, batch_rewards in dataloader:
                 # Zero the gradients
                 optimizer.zero_grad()
@@ -146,17 +147,30 @@ class RewardModel:
                 # Compute loss
                 loss = criterion(predictions.squeeze(), batch_rewards)
                 
-                # Backward pass
+                # Backward pass and update weights
                 loss.backward()
-                
-                # Update weights
                 optimizer.step()
                 
                 # Accumulate loss
                 total_loss += loss.item()
+                
+                # Save predictions and targets for EV computation
+                all_preds.append(predictions.squeeze().detach().cpu().numpy())
+                all_targets.append(batch_rewards.detach().cpu().numpy())
             
-            # Print loss for every epoch
-            print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(dataloader):.4f}")
+            # Calculate average loss over epoch
+            avg_loss = total_loss / len(dataloader)
+            
+            # Concatenate predictions and targets
+            all_preds = np.concatenate(all_preds)
+            all_targets = np.concatenate(all_targets)
+            
+            # Compute explained variance:
+            ev = 1 - np.var(all_targets - all_preds) / np.var(all_targets)
+            
+            # Print loss and explained variance
+            print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}, Explained Variance: {ev:.4f}")
+
         
     def __call__(self, X):
         
@@ -216,7 +230,8 @@ class EnvModel:
         action = action.reshape(-1, )
         inp = np.concatenate((state, action), axis=0)
         symb = self.mars(inp)
-        rew = self.symb_reward(state)[0]
+        
+        rew = self.symb_reward(np.concatenate((inp, symb[0]), axis = 0))[0]
             
         return np.clip(symb, self.observation_space_low, self.observation_space_high), rew
 
@@ -322,20 +337,19 @@ def get_environment_model(     # noqa: C901
     
     input_states = (input_states - input_mean) / (input_std)
     output_states = (output_states - input_mean) / (input_std)
-    actions = (actions - actions_min) / (actions_max - actions_min)
+    # actions = (actions - actions_min) / (actions_max - actions_min)
     rewards = (rewards - rew_mean) / (rew_std)
 
+    # Now, instead of using only output_states as input to the reward model,
+    # we create a new input X_rew by concatenating (state, action, next_state)
+    X_rew = np.concatenate((input_states, actions, output_states), axis=1)
     
-    X = output_states
+    # Create a reward model with input size equal to the new concatenated dimension.
+    input_mean = np.concatenate((input_mean, np.zeros(actions.shape[1]), input_mean))
+    input_std= np.concatenate((input_std, np.ones(actions.shape[1]), input_std))
+    parsed_rew = RewardModel(X_rew.shape[1], input_mean, input_std, rew_mean, rew_std)
+    parsed_rew.train(X_rew, rewards)
 
-    
-    parsed_rew = RewardModel(X.shape[1], input_mean, input_std, rew_mean, rew_std)
-        # np.concatenate((highs, actions_max, highs)),
-        # rewards_min[None], rewards_max[None])
-    
-    parsed_rew.train(X, rewards)
-
-    # print(symb.summary())
     print(parsed_mars)
     print("Model MSE:", np.mean(np.sum((Yh - output_states)**2, axis=1)))
     # print(reward_symb.summary())

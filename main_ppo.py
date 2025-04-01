@@ -88,9 +88,9 @@ while total_numsteps < args.start_steps:
         if env.unsafe(next_state, False):
             real_unsafe_episodes += 1
             episode_reward -= 10
-            reward+=-10
+            reward = -10
             print("UNSAFE (outside testing)", np.round(next_state, 2))
-            done = True
+            # done = True
             cost = 1
 
 
@@ -206,8 +206,9 @@ while True:
             if env.unsafe(info['state_original'], False):
                 real_unsafe_episodes += 1
                 episode_reward -= 10
-                reward+=-10
-                print("UNSAFE (outside testing)", next_state)
+                reward = -10
+                print("UNSAFE (outside testing)", env.safety)
+                print(f"{np.round(last_state, 2)} {np.round(state, 2)}", "\n", action, "\n", f"{np.round(info['state_original'], 2)} {np.round(next_state, 2)}")
                 done = True
                 cost = 1
 
@@ -275,9 +276,9 @@ while True:
 
             cost = 0
             if env.unsafe(next_state, True):
-                print(next_state)
+                print("UNSAFE SIM", next_state)
                 unsafe_sim_episodes += 1
-                reward+=-10
+                reward =-10
                 episode_reward -= 10
                 done = True
                 cost = 1
@@ -319,10 +320,6 @@ while True:
             states_e2c, actions_e2c, rewards_e2c, next_states_e2c, dones_e2c, costs_e2c = \
                 e2c_data.sample(min(len(e2c_data), 30000), get_cost=True, remove_samples = False)
                 
-            print(rewards_e2c)
-            print(rewards)
-            print(states)
-                    
             for idx in range(states.shape[0]):
                 state = states[idx]
                 action = actions[idx]
@@ -346,7 +343,7 @@ while True:
             print("Error in sampling")
             continue
         
-        env_model.mars.e2c_predictor.lr = 0.0001
+        env_model.mars.e2c_predictor.lr = 0.00003
         env_model = get_environment_model(
                 states, actions, next_states, rewards,
                 domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
@@ -365,8 +362,6 @@ while True:
         
         
         
-        unsafe_domains_list = [verification.get_ae_bounds(env_model.mars.e2c_predictor, unsafe_dom) for unsafe_dom in env.unsafe_domains]
-        unsafe_domains_list = [domains.DeepPoly(*unsafe_dom) for unsafe_dom in unsafe_domains_list]
         unsafe_domains_list = domains.recover_safe_region(new_obs_space, [env.safety])
             
         
@@ -383,15 +378,7 @@ while True:
             env.action_space, args.horizon, env.polys, env.safe_polys)
         safe_agent = Shield(shield, agent)
         
-        for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-            agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
-
-        states, actions, rewards, next_states, dones, costs = \
-                real_data.sample(len(real_data), get_cost=True)
-
-        for (state, action, reward, next_state, mask, cost) in zip(states, actions, rewards, next_states, dones, costs):
-            agent.add(env_model.mars.e2c_predictor.transform(state), action, reward, env_model.mars.e2c_predictor.transform(next_state), mask, cost)
-
+        
 
     # Test the agent periodically
     
@@ -413,96 +400,96 @@ while True:
         neural_count = 0
         t = 0
 
-    for episode_num in range(episodes):
-        # record_video = episode_num % 2 == 0  # Record every alternate episode (example condition)
-        custom_filename = f"videos/episode_{i_episode}.mp4"
-        
-        # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
-        
-        while True:
-            state, info = env.reset()
-            if not env.unsafe(info['state_original'], False):
-                break
-        original_state = info['state_original']
-        episode_reward = 0
-        done = False
-        trunc = False
-        episode_steps = 0
-        trajectory = [state]
-        # frames  = [env.render()]
-
-        while not done and not trunc:
-            # Decide action
-            if safe_agent is not None:
-                action = safe_agent(state)
-            else:
-                action = agent(state)
-
-            next_state, reward, done, trunc, info = env.step(action)
-            episode_reward += reward
-            episode_steps += 1
-
-            if episode_steps >= env._max_episode_steps:
-                done = True
-            if env.unsafe(info['state_original'], False):
-                print("UNSAFE")
-                episode_reward += -10
-                print(np.round(original_state, 2), "\n", action, "\n", np.round(info['state_original'], 2))
-                unsafe_episodes += 1
-                done = True
-
-            if done and safe_agent is not None:
-                try:
-                    s, a, b, t = safe_agent.report()
-                    print("Finished test episode:", s, "shield and", b, "backup and", a, "neural")
-                    shield_count += s
-                    backup_count += b
-                    neural_count += a
-
-                    print("Average time:", t / (s + a + b))
-                    safe_agent.reset_count()
-                except Exception as e:
-                    print(e)
-                    pass
-
-            state = next_state
-            trajectory.append(state)
+        for episode_num in range(episodes):
+            # record_video = episode_num % 2 == 0  # Record every alternate episode (example condition)
+            custom_filename = f"videos/episode_{i_episode}.mp4"
+            
+            # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
+            
+            while True:
+                state, info = env.reset()
+                if not env.unsafe(info['state_original'], False):
+                    break
             original_state = info['state_original']
-            # frames.append(env.render())
+            episode_reward = 0
+            done = False
+            trunc = False
+            episode_steps = 0
+            trajectory = [state]
+            # frames  = [env.render()]
 
-        # imageio.mimsave(custom_filename, frames, fps=30)
-        avg_reward += episode_reward
-        avg_length += episode_steps
+            while not done and not trunc:
+                # Decide action
+                if safe_agent is not None:
+                    action = safe_agent(state)
+                else:
+                    action = agent(state)
 
-        avg_reward /= episodes
-        avg_length /= episodes
-        shield_count /= episodes
-        neural_count /= episodes
-        backup_count /= episodes
-        unsafe_test_episodes+=unsafe_episodes
-        total_test_episodes+=episodes
-        writer.add_scalar(f'agent/shield', shield_count, total_numsteps)
-        writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
-        writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
-        writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
-        writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
-        writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_numsteps)
-        writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_numsteps)
-        writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_numsteps)
-        writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_numsteps)
-        writer.add_scalar(f'reward/test', avg_reward, total_numsteps)
+                next_state, reward, done, trunc, info = env.step(action)
+                episode_reward += reward
+                episode_steps += 1
 
-        print("----------------------------------------")
-        print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"
-              .format(episodes, unsafe_episodes, round(avg_length, 2),
-                      round(avg_reward, 2)))
-        print("----------------------------------------")
-        if (i_episode - 99) % 100 == 0:
-            print("Trajectory:")
-            print(trajectory)    
-        # total_episodes += 1 
-    
-    
+                if episode_steps >= env._max_episode_steps:
+                    done = True
+                if env.unsafe(info['state_original'], False):
+                    print("UNSAFE Inside testing")
+                    episode_reward += -10
+                    print(f"{np.round(original_state, 2)} {np.round(state, 2)}", "\n", action, "\n", f"{np.round(info['state_original'], 2)} {np.round(next_state, 2)}")
+                    unsafe_episodes += 1
+                    done = True
+
+                if done and safe_agent is not None:
+                    try:
+                        s, a, b, t = safe_agent.report()
+                        print("Finished test episode:", s, "shield and", b, "backup and", a, "neural")
+                        shield_count += s
+                        backup_count += b
+                        neural_count += a
+
+                        print("Average time:", t / (s + a + b))
+                        safe_agent.reset_count()
+                    except Exception as e:
+                        print(e)
+                        pass
+
+                state = next_state
+                trajectory.append(state)
+                original_state = info['state_original']
+                # frames.append(env.render())
+
+            # imageio.mimsave(custom_filename, frames, fps=30)
+            avg_reward += episode_reward
+            avg_length += episode_steps
+
+            avg_reward /= episodes
+            avg_length /= episodes
+            shield_count /= episodes
+            neural_count /= episodes
+            backup_count /= episodes
+            unsafe_test_episodes+=unsafe_episodes
+            total_test_episodes+=episodes
+            writer.add_scalar(f'agent/shield', shield_count, total_numsteps)
+            writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
+            writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
+            writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
+            writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
+            writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_numsteps)
+            writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_numsteps)
+            writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_numsteps)
+            writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_numsteps)
+            writer.add_scalar(f'reward/test', avg_reward, total_numsteps)
+
+            print("----------------------------------------")
+            print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"
+                .format(episodes, unsafe_episodes, round(avg_length, 2),
+                        round(avg_reward, 2)))
+            print("----------------------------------------")
+            if (i_episode - 99) % 100 == 0:
+                print("Trajectory:")
+                print(trajectory)    
+            # total_episodes += 1 
+        
+        
     if total_numsteps > args.num_steps:
         break
     

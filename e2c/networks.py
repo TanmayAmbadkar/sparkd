@@ -104,4 +104,4 @@ class Transition(nn.Module):
         z_t_next_mean = A_t.bmm(mu.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u_t.unsqueeze(-1)).squeeze(-1) + o_t
 
         # Return the predicted next state, A_t, B_t, o_t, and z_t
-        return z_t_next_mean, z_t_next_mean, A_t, B_t, o_t, v_t, r_t
+        return z_t_next, z_t_next_mean, A_t, B_t, o_t, v_t, r_t

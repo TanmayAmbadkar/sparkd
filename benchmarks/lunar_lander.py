@@ -45,12 +45,12 @@ class LunarLanderEnv(gym.Env):
         upper_bounds[1] = 2
 
         # Horizontal velocity constraint (vx) - relaxed
-        lower_bounds[2] = -1.5 # Increased from 0.5 to 0.75
-        upper_bounds[2] = 1.5
+        lower_bounds[2] = -4 # Increased from 0.5 to 0.75
+        upper_bounds[2] = 4
 
         # Vertical velocity constraint (vy) - relaxed
-        lower_bounds[3] = -1.5  # Increased from 0.5 to 0.75
-        upper_bounds[3] = 1.5
+        lower_bounds[3] = -4  # Increased from 0.5 to 0.75
+        upper_bounds[3] = 4
 
         input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
     

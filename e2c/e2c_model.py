@@ -73,7 +73,9 @@ class E2CPredictor(pl.LightningModule):
 
         # consistency loss
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-        total_loss += 10*consis_term + 5*pred_loss
+        total_loss += 100*consis_term + 5*pred_loss
+
+        # total_loss += 0.01 * F.mse_loss(z_t_next, x_next) + 0.01 * F.mse_loss(z_t, x)
         
 
         # Logging
