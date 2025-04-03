@@ -266,23 +266,23 @@ while True:
             
         e2c_mean = env_model.mars.e2c_predictor.mean
         e2c_std = env_model.mars.e2c_predictor.std
-        new_obs_space_domain = domains.DeepPoly(*verification.get_variational_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
-        new_obs_space = gym.spaces.Box(low=new_obs_space_domain.lower.detach().numpy(), high=new_obs_space_domain.upper.detach().numpy(), shape=(args.red_dim,))
+        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
+        new_obs_space = gym.spaces.Box(low=new_obs_space_domain.lower[0].detach().numpy(), high=new_obs_space_domain.upper[0].detach().numpy(), shape=(args.red_dim,))
         
         safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
         
-        safety = domains.DeepPoly(*verification.get_variational_bounds(env_model.mars.e2c_predictor, safety_domain))
+        safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
         
         
         
         unsafe_domains_list = domains.recover_safe_region(new_obs_space_domain, [safety])
             
         
-        polys = [np.array(safety.to_hyperplanes())]
+        polys = safety.to_hyperplanes()
 
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.e2c_predictor.transform
-        env.transformed_polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
+        env.transformed_polys = [domain.to_hyperplanes() for domain in unsafe_domains_list]
 
         print("LATENT SAFETY", safety)
         print("LATENT OBS SPACE", new_obs_space_domain)

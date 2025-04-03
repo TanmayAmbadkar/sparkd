@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from abstract_interpretation.neural_network import LinearLayer, ReLULayer, SigmoidLayer, TanhLayer, NeuralNetwork
+from abstract_interpretation.neural_network import LinearLayer, ReLULayer, SigmoidLayer, NeuralNetwork
 
 torch.set_default_dtype(torch.float64)
 
@@ -11,9 +11,9 @@ def weights_init(m):
 class Encoder(nn.Module):
     def __init__(self, n_features, reduced_dim):
         super(Encoder, self).__init__()
-        self.shared_net = NeuralNetwork([LinearLayer(n_features, 12), ReLULayer(), LinearLayer(12, 12), ReLULayer()])  # Shared layers
-        self.fc_mu = NeuralNetwork([LinearLayer(12, reduced_dim)])  # Output mean
-        self.fc_logsig = NeuralNetwork([LinearLayer(12, reduced_dim)])  # Output log variance
+        self.shared_net = NeuralNetwork([LinearLayer(n_features, 32), ReLULayer(), LinearLayer(32, 16), ReLULayer()])  # Shared layers
+        self.fc_mu = NeuralNetwork([LinearLayer(16, reduced_dim)])  # Output mean
+        self.fc_logsig = NeuralNetwork([LinearLayer(16, reduced_dim)])  # Output log variance
         self.obs_dim = n_features
         self.z_dim = reduced_dim
 
@@ -43,7 +43,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, reduced_dim, n_features):
         super(Decoder, self).__init__()
-        self.net = NeuralNetwork([LinearLayer(reduced_dim, 12), ReLULayer(), LinearLayer(12, 12), ReLULayer(), LinearLayer(12, n_features)])
+        self.net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 32), ReLULayer(), LinearLayer(32, n_features)])
         # self.net.apply(weights_init),
         self.z_dim = reduced_dim
         self.obs_dim = n_features
@@ -65,7 +65,7 @@ class Transition(nn.Module):
         self.u_dim = u_dim
 
         self.fc_A = nn.Sequential(
-            nn.Linear(self.h_dim, self.z_dim * 2),  # v_t and r_t
+        nn.Linear(self.h_dim, self.z_dim * 2),  # v_t and r_t
             nn.ReLU()
         )
         

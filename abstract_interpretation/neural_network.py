@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from abstract_interpretation.domains import Zonotope, Box, DeepPoly
+from abstract_interpretation.domains import DeepPoly
 
 class LinearLayer(nn.Module):
     def __init__(self, input_size, output_size):
@@ -8,9 +8,9 @@ class LinearLayer(nn.Module):
         self.linear = nn.Linear(input_size, output_size)
     
     def forward(self, x):
-        if isinstance(x, Zonotope) or isinstance(x, Box) or isinstance(x, DeepPoly):
-            W = self.linear.weight.detach().numpy()
-            b = self.linear.bias.detach().numpy()
+        if  isinstance(x, DeepPoly):
+            W = self.linear.weight.detach()
+            b = self.linear.bias.detach()
             return x.affine_transform(W, b)
         else:
             return self.linear(x)
@@ -23,7 +23,7 @@ class LinearLayer(nn.Module):
 
 class ReLULayer(nn.Module):
     def forward(self, x):
-        if isinstance(x, Zonotope) or isinstance(x, Box) or isinstance(x, DeepPoly):
+        if isinstance(x, DeepPoly):
             return x.relu()
         else:
             return torch.relu(x)
@@ -33,7 +33,7 @@ class ReLULayer(nn.Module):
         
 class TanhLayer(nn.Module):
     def forward(self, x):
-        if isinstance(x, Zonotope) or isinstance(x, Box)or isinstance(x, DeepPoly):
+        if isinstance(x, DeepPoly):
             return x.tanh()
         else:
             return torch.tanh(x)
@@ -44,7 +44,7 @@ class TanhLayer(nn.Module):
 
 class SigmoidLayer(nn.Module):
     def forward(self, x):
-        if isinstance(x, Zonotope) or isinstance(x, Box) or isinstance(x, DeepPoly):
+        if isinstance(x, DeepPoly):
             return x.sigmoid()
         else:
             return torch.sigmoid(x)

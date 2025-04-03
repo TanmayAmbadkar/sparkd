@@ -154,11 +154,10 @@ while True:
             action = agent(state)  # Sample action from policy
 
             next_state, reward = env_model(state, action,
-                                           use_neural_model=False)
-            
+                                           use_neural_model=True)
             original_next_state, _, _, _, _ = env.step(action)
             original_states.append(original_next_state)
-            predicted_states.append(next_state)
+            predicted_states.append(next_state[0])
             
             done = not np.all(np.abs(next_state) < 1e5) and \
                 not np.any(np.isnan(next_state))
@@ -184,7 +183,7 @@ while True:
 
             agent.add(state.reshape(-1, ), action.reshape(-1, ), reward, next_state.reshape(-1, ), done, cost)
                     
-            state = next_state
+            state = next_state.reshape(-1,)
 
         
         
@@ -249,10 +248,11 @@ while True:
         
             
             
+            
         e2c_mean = env_model.mars.e2c_predictor.mean
         e2c_std = env_model.mars.e2c_predictor.std
         new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
-        new_obs_space = gym.spaces.Box(low=new_obs_space_domain.lower.detach().numpy(), high=new_obs_space_domain.upper.detach().numpy(), shape=(args.red_dim,))
+        new_obs_space = gym.spaces.Box(low=new_obs_space_domain.lower[0].detach().numpy(), high=new_obs_space_domain.upper[0].detach().numpy(), shape=(args.red_dim,))
         
         safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
         
@@ -263,17 +263,19 @@ while True:
         unsafe_domains_list = domains.recover_safe_region(new_obs_space_domain, [safety])
             
         
-        polys = [np.array(safety.to_hyperplanes())]
+        polys = safety.to_hyperplanes()
 
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.e2c_predictor.transform
-        env.transformed_polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
+        env.transformed_polys = [domain.to_hyperplanes() for domain in unsafe_domains_list]
 
-
+        print("LATENT SAFETY", safety)
+        print("LATENT OBS SPACE", new_obs_space_domain)
 
         shield = ProjectionPolicy(
             env_model.get_symbolic_model(), new_obs_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.e2c_predictor.transform)
         safe_agent = Shield(shield, agent)
+        
         
         

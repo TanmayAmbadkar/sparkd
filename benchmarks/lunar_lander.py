@@ -56,22 +56,22 @@ class LunarLanderEnv(gym.Env):
 
         input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
     
-        self.original_safe_polys = [np.array(input_deeppoly.to_hyperplanes())]
-        self.safe_polys = [np.array(input_deeppoly.to_hyperplanes())]
+        self.original_safe_polys = input_deeppoly.to_hyperplanes()
+        self.safe_polys = input_deeppoly.to_hyperplanes()
         self.safety = input_deeppoly
         self.original_safety = input_deeppoly
  
         
     def unsafe_constraints(self):
         
-        
+        print(self.original_safety)
         unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
         self.polys = []
         self.unsafe_domains = unsafe_deeppolys
         
         
         for poly in unsafe_deeppolys:
-            self.polys.append(np.array(poly.to_hyperplanes()))
+            self.polys.append(poly.to_hyperplanes())
 
     def step(self, action):
         

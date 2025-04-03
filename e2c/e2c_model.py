@@ -77,8 +77,8 @@ class E2CPredictor(pl.LightningModule):
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
         
         # Weight the losses: here, we use high weight for reconstruction/prediction early on.
-        total_loss += 50 * recon_term + kl_weight * kl_term
-        total_loss += 1 * consis_term + 50 * pred_loss
+        total_loss += 5 * recon_term + kl_term
+        total_loss += 10 * consis_term + pred_loss
 
         # Logging for monitoring
         self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
