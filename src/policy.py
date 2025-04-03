@@ -56,11 +56,12 @@ class PPOPolicy:
                  replay_size: int,
                  seed: int,
                  batch_size: int,
-                 sac_args):
+                 args):
         self.agent = PPO(gym_env.observation_space.shape[0],
-                         gym_env.action_space, sac_args)
+                         gym_env.action_space, args)
         self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
         self.updates = 0
+        self.minibatch_size = args.mini_batch_size
         self.batch_size = batch_size
 
     def __call__(self, state: np.ndarray, evaluate: bool = False):
@@ -70,7 +71,7 @@ class PPOPolicy:
         self.memory.push(state, action, reward, next_state, done, cost)
 
     def train(self):
-        ret = self.agent.update_parameters(self.memory, batch_size=self.batch_size, epochs = 10)
+        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 10)
         self.updates += 1
         return ret
 
@@ -157,7 +158,7 @@ class ProjectionPolicy:
         return res['x'][:u_dim]
 
 
-    def solve(self,    # noqa: C901
+    def solve_old(self,    # noqa: C901
               state: np.ndarray,
               action: Optional[np.ndarray] = None,
               debug: bool = False) -> np.ndarray:
@@ -170,8 +171,7 @@ class ProjectionPolicy:
         shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
-        with torch.no_grad():
-            state = self.transform(state.reshape(1, -1))
+        state = self.transform(state.reshape(1, -1))
         # state = state.numpy()
         state = state.reshape(-1,)
         # If we don't have a proposed action, look for actions with small
@@ -294,110 +294,178 @@ class ProjectionPolicy:
         self.saved_action = best_u0
         self.shielded = shielded
         return best_u0, shielded
-
-    def solve_slack(self,
-              state: np.ndarray,
-              action: Optional[np.ndarray] = None,
-              debug: bool = False) -> np.ndarray:
+    
+    def solve(self, state: np.ndarray, action: Optional[np.ndarray] = None, debug: bool = False) -> Tuple[np.ndarray, bool]:
         """
-        Solve the safety projection optimization problem.
-        This method constructs a QP whose constraints are relaxed by a constant slack.
+        Solve the safety synthesis problem.
+        
+        First, try to check whether the policy’s proposed action (u0)
+        can be paired with a feasible future action sequence (u1,...,u_H-1)
+        that keeps the trajectory safe. This is done by fixing u0 and
+        optimizing only over future actions.
+        
+        If that QP is infeasible, fall back to solving the original QP that
+        is allowed to change u0.
+        
+        Returns:
+        (safe_action, shielded) where safe_action is the computed safe u0,
+        and shielded is True if we could keep the original action.
         """
         original_state = state.copy()
         shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
+        # Transform the state appropriately.
+        state = self.transform(state.reshape(1, -1)).reshape(-1,)
+        
+        # Use the provided action if available; otherwise, default to zero.
         if action is None:
             action = np.zeros(u_dim)
-        # Get local dynamics
+        
+        # Get local dynamics: here, env.get_matrix_at_point returns a matrix which we split into A, B, and c.
         point = np.concatenate((state, action))
-        mat, eps = self.env.get_matrix_at_point(point, s_dim)
-        A = mat[:, :s_dim]
-        B = mat[:, s_dim:-1]
-        c = mat[:, -1]
-
+        mat_dyn, eps = self.env.get_matrix_at_point(point, s_dim)
+        A = mat_dyn[:, :s_dim]
+        B = mat_dyn[:, s_dim:-1]
+        c = mat_dyn[:, -1]
+        
         best_score = 1e10
         best_u0 = None
 
-        # Loop over all safe polytopes (each represented as an array of hyperplanes)
+        # Iterate over each safe polytope.
         for poly in self.safe_polys:
             P_poly = poly[:, :-1]
             b_poly = poly[:, -1]
+            # Skip if the current state is not in the safe polytope.
             if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
-                continue  # Skip if state is not in this safe polytope
-            # Build constraint matrices for the horizon propagation.
+                continue
+
+            # === Build safety constraints over the horizon ===
+            # We create arrays F, G, and h that capture the propagation of the safe constraints.
             F = []
-            G_list = []
-            h_list = []
+            G = []
+            h = []
             for j in range(1, self.horizon + 1):
                 F.append([None] * (j + 1))
-                G_list.append([None] * (j + 1))
-                h_list.append([None] * (j + 1))
+                G.append([None] * (j + 1))
+                h.append([None] * (j + 1))
                 F[j-1][j] = P_poly
-                G_list[j-1][j] = np.zeros((b_poly.shape[0], u_dim))
-                h_list[j-1][j] = b_poly
+                G[j-1][j] = np.zeros((b_poly.shape[0], u_dim))
+                h[j-1][j] = b_poly
                 for t in range(j - 1, -1, -1):
                     F[j-1][t] = np.dot(F[j-1][t+1], A)
-                    G_list[j-1][t] = np.dot(F[j-1][t+1], B)
-                    # Add slack here to relax the constraint
+                    G[j-1][t] = np.dot(F[j-1][t+1], B)
+                    # eps is an interval; we take the maximum possible deviation.
                     epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
-                    h_list[j-1][t] = np.dot(F[j-1][t+1], c) + h_list[j-1][t+1] + epsmax + self.slack
-            # Stack the constraints from each horizon step
-            num_constraints = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim
-            mat_constraints = np.zeros((num_constraints, self.horizon * u_dim))
-            bias_constraints = np.zeros(num_constraints)
+                    h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1] + epsmax
+
+            # === Assemble the full QP constraints ===
+            # Total number of constraints: safety constraints plus action bounds.
+            n_constraints = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim
+            total_vars = self.horizon * u_dim  # full decision vector: [u0; u1; ...; u_{H-1}]
+            M = np.zeros((n_constraints, total_vars))
+            bias = np.zeros(n_constraints)
             ind = 0
             step = P_poly.shape[0]
             for j in range(self.horizon):
-                # For each horizon step, concatenate the constraint matrices
-                G_list[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
-                mat_constraints[ind:ind+step, :] = np.concatenate(G_list[j][:-1], axis=1)
-                bias_constraints[ind:ind+step] = h_list[j][0] + np.dot(F[j][0], state) + self.slack
+                # Extend G[j] with zeros so that its length is self.horizon.
+                G[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
+                # Concatenate the matrices for time step j (excluding the final entry)
+                M[ind:ind+step, :] = np.concatenate(G[j][:-1], axis=1)
+                bias[ind:ind+step] = h[j][0] + np.dot(F[j][0], state)
                 ind += step
 
-            # Add the action bound constraints
+            # Add action bound constraints.
             ind2 = 0
             for j in range(self.horizon):
-                mat_constraints[ind:ind+u_dim, ind2:ind2+u_dim] = np.eye(u_dim)
-                bias_constraints[ind:ind+u_dim] = -self.action_space.high
+                M[ind:ind+u_dim, ind2:ind2+u_dim] = np.eye(u_dim)
+                bias[ind:ind+u_dim] = -self.action_space.high
                 ind += u_dim
-                mat_constraints[ind:ind+u_dim, ind2:ind2+u_dim] = -np.eye(u_dim)
-                bias_constraints[ind:ind+u_dim] = self.action_space.low
+                M[ind:ind+u_dim, ind2:ind2+u_dim] = -np.eye(u_dim)
+                bias[ind:ind+u_dim] = self.action_space.low
                 ind += u_dim
                 ind2 += u_dim
 
-            # Formulate the QP objective (we wish to stay close to the original action)
-            P_qp = 1e-4 * np.eye(self.horizon * u_dim)
-            P_qp[:u_dim, :u_dim] += np.eye(u_dim)
-            P_qp = cvxopt.matrix(P_qp)
-            q_vec = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))
-            q_qp = cvxopt.matrix(q_vec)
-            G_qp = cvxopt.matrix(mat_constraints)
-            h_qp = cvxopt.matrix(-bias_constraints)
+            # === First attempt: fix u0 to the given action and optimize over u1,...,u_{H-1} ===
+            fixed_total = (self.horizon - 1) * u_dim  # dimension for u1,...,u_{H-1}
+            # Partition the full variable: columns [0:u_dim] correspond to u0, [u_dim:] correspond to future actions.
+            M_first = M[:, :u_dim]
+            M_rest = M[:, u_dim:]
+            # Adjust the bias: since u0 is fixed to "action", add M_first * action to the bias.
+            new_bias = bias + np.dot(M_first, action)
+            # Now, the constraints become: M_rest * x + new_bias <= 0, where x represents [u1; ...; u_{H-1}].
+            
+            # Set up a simple quadratic objective for the future actions (e.g. minimize ||x||^2).
+            P_fixed = 1e-4 * np.eye(fixed_total)
+            q_fixed = np.zeros((fixed_total,))
+            
+            # Also set up bounds for the future actions.
+            act_bounds = np.stack((self.action_space.low, self.action_space.high), axis=1)
+            # Replicate the bounds for (horizon-1) steps.
+            bounds_fixed = np.concatenate([act_bounds] * (self.horizon - 1), axis=0)
+            
+            # Build inequality constraints for the fixed-QP:
+            # The safety constraints: M_rest * x <= -new_bias.
+            G_fixed = M_rest
+            h_fixed = -new_bias
+            
+            # Additionally, enforce the variable bounds: x_i >= lower and x_i <= upper.
+            I_fixed = np.eye(fixed_total)
+            G_bounds = np.concatenate((-I_fixed, I_fixed), axis=0)
+            h_bounds = np.concatenate((-bounds_fixed[:, 0], bounds_fixed[:, 1]), axis=0)
+            
+            # Combine the constraints.
+            G_total = np.vstack((G_fixed, G_bounds))
+            h_total = np.hstack((h_fixed, h_bounds))
+            
+            # Convert to cvxopt matrices.
             try:
-                sol = cvxopt.solvers.qp(P_qp, q_qp, G_qp, h_qp)
+                sol_fixed = cvxopt.solvers.qp(cvxopt.matrix(P_fixed),
+                                            cvxopt.matrix(q_fixed),
+                                            cvxopt.matrix(G_total),
+                                            cvxopt.matrix(h_total))
             except Exception as e:
-                sol = {'status': 'infeasible'}
-                continue
+                sol_fixed = {'status': 'infeasible'}
+            fixed_feasible = (sol_fixed['status'] == 'optimal')
+            
+            if fixed_feasible:
+                # The fixed-QP is feasible: the original policy action u0 is safe.
+                candidate_u0 = action.copy()
+                candidate_score = 0  # no deviation from the policy action.
+            else:
+                # Fixed-QP failed: fall back to solving the full QP where u0 is free.
+                P_full = 1e-4 * np.eye(total_vars)
+                # Add extra weight on the first block so the solution stays close to the policy action.
+                P_full[:u_dim, :u_dim] += np.eye(u_dim)
+                q_full = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))
+                try:
+                    sol_full = cvxopt.solvers.qp(cvxopt.matrix(P_full),
+                                                cvxopt.matrix(q_full),
+                                                cvxopt.matrix(M),
+                                                cvxopt.matrix(-bias))
+                except Exception as e:
+                    sol_full = {'status': 'infeasible'}
+                if sol_full['status'] != 'optimal':
+                    continue  # try the next safe polytope
+                full_sol = np.asarray(sol_full['x']).squeeze()
+                candidate_u0 = full_sol[:u_dim]
+                candidate_score = np.linalg.norm(candidate_u0 - action)
+            
+            # Record the best candidate u0 (the one closest to the original action).
+            if candidate_score < best_score:
+                best_score = candidate_score
+                best_u0 = candidate_u0
 
-            if sol['status'] != 'optimal':
-                continue
-
-            u0 = np.asarray(sol['x'][:u_dim]).squeeze()
-            if u0.ndim == 0:
-                u0 = u0[None]
-            score = np.linalg.norm(u0 - action)
-            if score < best_score:
-                best_score = score
-                best_u0 = u0
-
+        # If no safe solution was found across any polytope, use the backup action.
         if best_u0 is None:
-            best_u0 = self.backup(state)
+            best_u0 = self.backup(original_state)
             shielded = False
+
         self.saved_state = original_state
         self.saved_action = best_u0
         self.shielded = shielded
         return best_u0, shielded
+
 
     def __call__(self, state: np.ndarray) -> np.ndarray:
         if self.saved_state is not None and np.allclose(state, self.saved_state):

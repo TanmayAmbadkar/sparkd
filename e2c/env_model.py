@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import explained_variance_score
 from typing import Union
 
 
@@ -73,9 +74,11 @@ class MarsE2cModel:
 
         # 4. Run the E2C transition:
         #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)
-        z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t = self.e2c_predictor.transition(
-            x_tensor, x_tensor, u_tensor
-        )
+
+        with torch.no_grad():
+            z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t = self.e2c_predictor.transition(
+                x_tensor, x_tensor, u_tensor
+            )
 
         # 5. Convert PyTorch tensors to NumPy, remove batch dimension
         A_t = A_t.detach().cpu().numpy().squeeze(0)    # shape [s_dim, s_dim]
@@ -92,7 +95,7 @@ class MarsE2cModel:
         # eps = np.diag(A_tA_tT) # shape [s_dim]
         eps = np.zeros_like(c_t)
 
-        return M, np.sqrt(eps)
+        return M, eps
 
 
 
@@ -136,7 +139,7 @@ class RewardModel:
         dataloader = DataLoader(dataset, batch_size=1024, shuffle=True)
         
         # Training loop
-        epochs = 100
+        epochs = 0
         self.model.train()
         for epoch in range(epochs):
             total_loss = 0.0
@@ -272,17 +275,21 @@ def get_environment_model(     # noqa: C901
     
     means = np.mean(input_states, axis=0)
     stds = np.std(input_states, axis=0)
-    stds[np.equal(np.round(stds, 2), np.zeros(*stds.shape))] = 1
+    stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
+
+    print("Means:", means)
+    print("Stds:", stds)
     
     means = np.zeros_like(means)
     stds = np.ones_like(stds)
     
-    if e2c_predictor is not None:
-        means = e2c_predictor.mean
-        stds = e2c_predictor.std
+    # if e2c_predictor is not None:
+    #     means = e2c_predictor.mean + 0.001 * (means - e2c_predictor.mean)
+    #     stds = e2c_predictor.std + 0.001 * (means - e2c_predictor.mean)
     
     input_states = (input_states - means) / stds
     output_states = (output_states - means) / stds
+
     
     # domain.lower = (domain.lower - means) / stds
     # domain.upper = (domain.upper - means) / stds
@@ -291,6 +298,9 @@ def get_environment_model(     # noqa: C901
     if e2c_predictor is None:
         e2c_predictor = E2CPredictor(input_states.shape[-1], latent_dim, actions.shape[-1], horizon = horizon)
     fit_e2c(input_states, actions, output_states, e2c_predictor, e2c_predictor.horizon, epochs=epochs)
+
+    e2c_predictor.mean = means
+    e2c_predictor.std = stds
 
     
     # lows, highs = get_ae_bounds(e2c_predictor, domain)
@@ -305,9 +315,6 @@ def get_environment_model(     # noqa: C901
     # input_states = e2c_predictor.transform(input_states)
     # output_states = e2c_predictor.transform(output_states)
     
-    e2c_predictor.mean = means
-    e2c_predictor.std = stds
-
     actions_min = actions.min(axis=0)
     actions_max = actions.max(axis=0)
     rewards_min = rewards.min()
@@ -320,14 +327,16 @@ def get_environment_model(     # noqa: C901
     
     parsed_mars = MarsE2cModel(e2c_predictor, latent_dim, input_states.shape[-1])
     
-    X = np.concatenate((input_states, actions), axis=1)
+    X = np.concatenate((input_states * stds + means, actions), axis=1)
     Yh = np.array([parsed_mars(state, normalized=True) for state in X]).reshape(input_states.shape[0], -1)
     
-    print("Model estimation error:", np.mean((Yh - output_states)**2))
+    print("Model estimation error:", np.mean((Yh - (output_states* stds + means))**2))
+    print("Explained Variance Score:", explained_variance_score(
+        output_states * stds + means, Yh))
     
     
     # Get the maximum distance between a predction and a datapoint
-    diff = np.amax(np.abs(Yh - output_states))
+    diff = np.amax(np.abs(Yh - (output_states* stds + means)))
 
     # Get a confidence interval based on the quantile of the chi-squared
     # distribution
@@ -337,16 +346,11 @@ def get_environment_model(     # noqa: C901
     print("Computed error:", err, "(", diff, conf, ")")
     parsed_mars.error = err
 
-    input_mean, input_std = np.mean(input_states, axis=0), np.std(input_states, axis=0)
     rew_mean, rew_std = np.mean(rewards), np.std(rewards)
-    input_std[np.equal(np.round(input_std, 2), np.zeros(*input_std.shape))] = 1
-
-    print("Input mean:", input_mean)
-    print("Input std:", input_std)
     
-    input_states = (input_states - input_mean) / (input_std)
-    output_states = (output_states - input_mean) / (input_std)
-    # actions = (actions - actions_min) / (actions_max - actions_min)
+    print("Input mean:", means)
+    print("Input std:", stds)
+    
     rewards = (rewards - rew_mean) / (rew_std)
 
     # Now, instead of using only output_states as input to the reward model,
@@ -354,8 +358,8 @@ def get_environment_model(     # noqa: C901
     X_rew = np.concatenate((input_states, actions, output_states), axis=1)
     
     # Create a reward model with input size equal to the new concatenated dimension.
-    input_mean = np.concatenate((input_mean, np.zeros(actions.shape[1]), input_mean))
-    input_std= np.concatenate((input_std, np.ones(actions.shape[1]), input_std))
+    input_mean = np.concatenate((means, np.zeros(actions.shape[1]), means))
+    input_std= np.concatenate((stds, np.ones(actions.shape[1]), stds))
     parsed_rew = RewardModel(X_rew.shape[1], input_mean, input_std, rew_mean, rew_std)
     parsed_rew.train(X_rew, rewards)
 

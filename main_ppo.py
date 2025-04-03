@@ -18,13 +18,14 @@ import traceback
 parser = argparse.ArgumentParser(description='Safe PPO Args')
 parser.add_argument('--env_name', default="lunar_lander")
 parser.add_argument('--gamma', type=float, default=0.99)
-parser.add_argument('--lr', type=float, default=0.0003)
+parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--seed', type=int, default=123456)
 parser.add_argument('--batch_size', type=int, default=2048)
+parser.add_argument('--mini_batch_size', type=int, default=64)
 parser.add_argument('--num_steps', type=int, default=200000)
-parser.add_argument('--hidden_size', type=int, default=256)
+parser.add_argument('--hidden_size', type=int, default=64)
 parser.add_argument('--replay_size', type=int, default=1000000)
-parser.add_argument('--start_steps', type=int, default=10000)
+parser.add_argument('--start_steps', type=int, default=3000)
 parser.add_argument('--cuda', action="store_true")
 parser.add_argument('--horizon', type=int, default=20)
 parser.add_argument('--red_dim', type=int, default = 20)
@@ -87,7 +88,7 @@ while True:
         if not env.unsafe(state, False):
             break
 
-    if (i_episode // 10) % 10 == 0:
+    if True:
 
         print(i_episode, ": Real data")
         tmp_buffer = []
@@ -107,8 +108,8 @@ while True:
             cost = 0
             if env.unsafe(next_state, False):
                 real_unsafe_episodes += 1
-                episode_reward -= 10
-                reward = -10
+                episode_reward -= 100
+                reward = -100
                 print("UNSAFE (outside testing)")
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = True
@@ -119,11 +120,11 @@ while True:
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
             if cost > 0:
-                agent.add(state, action, reward, next_state, done, 1)
-                real_data.push(state, action, reward, next_state, done, 1)
+                agent.add(state, action, reward, next_state, done or trunc, 1)
+                real_data.push(state, action, reward, next_state, done or trunc, 1)
             else:
-                agent.add(state, action, reward, next_state, done, 0)
-                real_data.push(state, action, reward, next_state, done, 0)
+                agent.add(state, action, reward, next_state, done or trunc, 0)
+                real_data.push(state, action, reward, next_state, done or trunc, 0)
             
             
             if len(agent.memory) >= args.batch_size:
@@ -153,60 +154,64 @@ while True:
         
         total_real_episodes += 1 
 
-    elif env_model is not None:
+    # elif env_model is not None:
         
-        print(i_episode, ": Simulated data")
+    #     print(i_episode, ": Simulated data")
 
-        while not done:
-            if episode_steps % 100 == 0:
-                print(i_episode, episode_steps, total_numsteps)
+    #     while not done:
+    #         if episode_steps % 100 == 0:
+    #             print(i_episode, episode_steps, total_numsteps)
             
-            action = agent(state)  # Sample action from policy
+    #         action = agent(state)  # Sample action from policy
 
-            next_state, reward = env_model(state, action,
-                                           use_neural_model=False)
+    #         next_state, reward = env_model(state, action,
+    #                                        use_neural_model=False)
             
-            done = not np.all(np.abs(next_state) < 1e5) and \
-                not np.any(np.isnan(next_state))
-            # done = done or env.pred`ict_done(next_state)
-            done = done or episode_steps == env._max_episode_steps or \
-                not np.all(np.abs(next_state) < 1e5)
-            episode_steps += 1
-            total_numsteps += 1
-            episode_reward += reward
+    #         true_next_state, _, _, _, _ = env.step(action)
+            
+    #         done = not np.all(np.abs(next_state) < 1e5) and \
+    #             not np.any(np.isnan(next_state))
+    #         # done = done or env.pred`ict_done(next_state)
+    #         done = done or episode_steps == env._max_episode_steps or \
+    #             not np.all(np.abs(next_state) < 1e5)
+    #         episode_steps += 1
+    #         total_numsteps += 1
+    #         episode_reward += reward
 
-            cost = 0
-            if env.unsafe(next_state, False):
-                print("UNSAFE SIM", next_state)
-                unsafe_sim_episodes += 1
-                reward =-10
-                episode_reward -= 10
-                done = True
-                cost = 1
+    #         cost = 0
+    #         # print("Next state:", np.round(next_state, 2), "True next state:", np.round(true_next_state, 2))
+    #         if env.unsafe(next_state, False):
+    #             print("UNSAFE SIM", next_state)
+    #             unsafe_sim_episodes += 1
+    #             reward =-10
+    #             episode_reward -= 10
+    #             done = True
+    #             cost = 1
 
-            # Ignore the "done" signal if it comes from hitting the time
-            # horizon.
-            # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
+    #         # Ignore the "done" signal if it comes from hitting the time
+    #         # horizon.
+    #         # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
-            agent.add(state.reshape(-1, ), action.reshape(-1, ), reward, next_state.reshape(-1, ), done, cost)
+    #         agent.add(state.reshape(-1, ), action.reshape(-1, ), reward, next_state.reshape(-1, ), done, cost)
                     
                         
-            if len(agent.memory) >= args.batch_size:
-                losses = agent.train()
+    #         if len(agent.memory) >= args.batch_size:
+    #             losses = agent.train()
 
-                writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
-                writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
-                writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
-                writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
-                writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
-                writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
-                writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
+    #             writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
+    #             writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
+    #             writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
+    #             writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
+    #             writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
+    #             writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
+    #             writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
 
 
 
-            state = next_state
+    #         # state =  env_model.mars.e2c_predictor.inverse_transform(next_state)
+    #         state =  next_state
         
-        total_sim_episodes += 1 
+    #     total_sim_episodes += 1 
 
 
 
@@ -247,7 +252,7 @@ while True:
         if env_model is not None:
             env_model.mars.e2c_predictor.lr = 0.00003
             e2c_predictor = env_model.mars.e2c_predictor
-            epochs = 20
+            epochs = 40
         else:
             e2c_predictor = None
             epochs = 150
@@ -261,12 +266,12 @@ while True:
             
         e2c_mean = env_model.mars.e2c_predictor.mean
         e2c_std = env_model.mars.e2c_predictor.std
-        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
+        new_obs_space_domain = domains.DeepPoly(*verification.get_variational_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
         new_obs_space = gym.spaces.Box(low=new_obs_space_domain.lower.detach().numpy(), high=new_obs_space_domain.upper.detach().numpy(), shape=(args.red_dim,))
         
         safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
         
-        safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
+        safety = domains.DeepPoly(*verification.get_variational_bounds(env_model.mars.e2c_predictor, safety_domain))
         
         
         
@@ -279,7 +284,8 @@ while True:
         # env.state_processor = env_model.mars.e2c_predictor.transform
         env.transformed_polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
 
-
+        print("LATENT SAFETY", safety)
+        print("LATENT OBS SPACE", new_obs_space_domain)
 
         shield = ProjectionPolicy(
             env_model.get_symbolic_model(), new_obs_space,
@@ -340,7 +346,7 @@ while True:
                     done = True
                 if env.unsafe(next_state, False):
                     print("UNSAFE Inside testing")
-                    episode_reward += -10
+                    episode_reward += -100
                     print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                     unsafe_episodes += 1
                     done = True

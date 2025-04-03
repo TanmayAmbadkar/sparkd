@@ -10,7 +10,7 @@ import copy
 
 
 class E2CPredictor(pl.LightningModule):
-    def __init__(self, n_features, z_dim, u_dim, lr=0.001, weight_decay=1e-4, horizon=1, train_ae=True, last_predictor = None):
+    def __init__(self, n_features, z_dim, u_dim, lr=0.0001, weight_decay=1e-4, horizon=1, train_ae=True, last_predictor = None):
         super(E2CPredictor, self).__init__()
         self.encoder = Encoder(n_features, z_dim)
         transition_net = nn.Sequential(
@@ -30,10 +30,6 @@ class E2CPredictor(pl.LightningModule):
         self.mean = np.zeros(n_features)
         self.std = np.ones(n_features)
         self.last_predictor = last_predictor
-        # Hyperparameters for curvature loss (PCC component)
-        self.lambda_curvature = 1.0  # weight for curvature loss (tune as needed)
-        self.delta = 0.1             # standard deviation for latent/state perturbations
-
 
     def forward(self, x_t, u_t=None):
         z_t, _, _ = self.encoder(x_t)
@@ -48,63 +44,52 @@ class E2CPredictor(pl.LightningModule):
         u = u.double()
         x_next = x_next.double()
 
-        # --- Encoding ---
-        z_t, mu, logsig = self.encoder(x)           # Current latent representation
-        z_t_next_enc, mu_next, logsig_next = self.encoder(x_next)  # Next latent representation from encoder
+        # Encode states
+        z_t, mu, logsig = self.encoder(x)
+        z_t_next, mu_next, logsig_next = self.encoder(x_next)
 
-        # --- Reconstruction of current observation ---
+        # Reconstruct states
         x_recon = self.decoder(z_t)
-        loss_recon = F.mse_loss(x_recon, x)
 
-        # --- KL Divergence Loss (VAE loss) ---
-        loss_kl = -0.5 * torch.mean(1 + 2 * logsig - mu.pow(2) - torch.exp(2 * logsig))
-
-        # --- Transition / Prediction ---
-        # Use transition network to predict next latent state and decode to next observation.
-        z_t_next_pred, z_t_next_mean, A_t, B_t, _, v_t, r_t = self.transition(z_t, mu, u)
+        # Predict transitions
+        z_t_next_pred, z_t_next_mean, A_t, _, _, v_t, r_t = self.transition(z_t, mu, u)
+        
+        # Reconstruct next states
         x_next_pred = self.decoder(z_t_next_pred)
-        loss_pred = F.mse_loss(x_next_pred, x_next)
-
-        # --- Consistency Loss ---
-        # Ensure that the latent dynamics prediction (transition distribution) matches the encoded next state.
+        
+        # Define distributions for loss calculations
+        encoder_distribution = NormalDistribution(mu, logsig)
         transition_distribution = NormalDistribution(z_t_next_mean, logsig, v_t.squeeze(), r_t.squeeze())
         next_distribution = NormalDistribution(mu_next, logsig_next)
-        loss_consis = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
+        
+        total_loss = 0
+        
+        # Compute individual loss terms
+        recon_term = F.mse_loss(x_recon, x)
+        
+        # Anneal the KL weight: ramp from 0 to 1 over, e.g., 10 epochs.
+        anneal_epochs = 10
+        kl_weight = min(1.0, self.current_epoch / anneal_epochs)
+        kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
+        
+        pred_loss = F.mse_loss(x_next_pred, x_next)
+        
+        consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
+        
+        # Weight the losses: here, we use high weight for reconstruction/prediction early on.
+        total_loss += 50 * recon_term + kl_weight * kl_term
+        total_loss += 1 * consis_term + 50 * pred_loss
 
-        # # --- Curvature Loss ---
-        # # Perturb the latent state and action to enforce local linearity.
-        # eps_z = torch.randn_like(z_t) * self.delta
-        # eps_u = torch.randn_like(u) * self.delta
-        # z_t_perturbed = z_t + eps_z
-        # u_perturbed = u + eps_u
-
-        # # Compute the perturbed next latent state using the transition network.
-        # # We use the same network structure; here we take the output mean.
-        # with torch.no_grad():
-        #     f_perturbed = self.transition(z_t_perturbed, z_t_perturbed, u_perturbed)[1]
-        # # Linear approximation: f_nominal + A_t * eps_z + B_t * eps_u.
-        # linear_approx = z_t_next_mean + (A_t.bmm(eps_z.unsqueeze(-1))).squeeze(-1) \
-        #                               + (B_t.bmm(eps_u.unsqueeze(-1))).squeeze(-1)
-        # loss_curvature = F.mse_loss(f_perturbed, linear_approx)
-
-        # --- Combine Losses ---
-        # Adjust the weights as needed; here consistency and curvature losses are weighted higher.
-        total_loss = loss_recon + loss_kl + loss_pred + 5 * loss_consis
-
-        # --- Logging ---
-        self.log("loss_recon", loss_recon, prog_bar=True, logger=True, on_epoch=True, on_step=False)
-        self.log("loss_kl", loss_kl, prog_bar=True, logger=True, on_epoch=True, on_step=False)
-        self.log("loss_pred", loss_pred, prog_bar=True, logger=True, on_epoch=True, on_step=False)
-        self.log("loss_consis", loss_consis, prog_bar=True, logger=True, on_epoch=True, on_step=False)
-        # self.log("loss_curvature", loss_curvature, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        # Logging for monitoring
+        self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        self.log("consis_term", consis_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        self.log("recon_term", recon_term + pred_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         self.log("total_loss", total_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
-
+        
         return total_loss
 
-
-
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay, betas = (0.0001, 0.1))
         return optimizer
     
     def transform(self, x):
@@ -126,16 +111,18 @@ class E2CPredictor(pl.LightningModule):
         return z_t.numpy()
     
     def get_next_state(self, x, u):
-        # x = torch.tensor(x).double()
-        # u = torch.tensor(u).double()
+        x = torch.tensor(x).double()
+        u = torch.tensor(u).double()
         with torch.no_grad():
-            mu = self.encoder.encode(x)
-            z_t_next, _, _, _, _, _, _ = self.transition(mu, mu, u)
-            dec_state = self.decoder(z_t_next)
-
+            # Normalize the input
+            x = (x - self.mean) / self.std
+            z_t, _, _ = self.encoder(x)
+            z_t_next, _, _, _, _, _, _ = self.transition(z_t, z_t, u)
+            dec_z_t_next = self.decoder(z_t_next)
+            dec_z_t_next = dec_z_t_next * self.std + self.mean
             # z_t_next = A_t.bmm(z_t.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u.unsqueeze(-1)).squeeze(-1) + o_t
             
-        return dec_state.numpy()
+        return dec_z_t_next.numpy()
 
 class E2CDataset(Dataset):
     """
@@ -187,9 +174,6 @@ def fit_e2c(states, actions, next_states, e2c_predictor, horizon, epochs = 100):
     
     del trainer
     e2c_predictor.last_predictor = copy.deepcopy(e2c_predictor)
-
-    print(np.round(e2c_predictor.get_next_state( torch.tensor(states[:10], dtype=torch.float64), torch.tensor(actions[:10], dtype=torch.float64)), 2))
-    print(np.round(e2c_predictor.transform(next_states[:10]), 2))
     
     del train_loader
     

@@ -133,6 +133,8 @@ runs/
 lightning_logs/
 logs_spice/
 runs_spice/
+runs_ppo/
+logs_ppo
 saved_sac
 
 domain_test.py
@@ -141,3 +143,5 @@ omnisafe_test.py
 *.png
 test*.py
 *ipynb
+*.png
+trajectories.pkl

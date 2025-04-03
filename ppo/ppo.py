@@ -9,11 +9,11 @@ class PPO:
         self.gamma = 0.99
         
         self.lam = 0.95  # GAE lambda
-        self.eps_clip = 0.1
-        self.value_coeff = 0.0001
-        self.entropy_coeff = 0.0001
+        self.eps_clip = 0.2
+        self.value_coeff = 0.5
+        self.entropy_coeff = 0.01
         self.device = torch.device("cuda" if args.cuda else "cpu")
-        self.actor_critic = ActorCritic(obs_dim, action_space.shape[0], args.hidden_size, action_space).to(self.device)
+        self.actor_critic = ActorCritic(obs_dim, action_space, args.hidden_size).to(self.device)
         self.optimizer = Adam(self.actor_critic.parameters(), lr=args.lr)
         self.action_space = action_space
 
@@ -21,7 +21,6 @@ class PPO:
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0).double()
         action, log_prob = self.actor_critic.act(state)
 
-        action = torch.clamp(action, self.action_space.low[0], self.action_space.high[0])
         return action.cpu().detach().numpy()[0], log_prob.cpu().detach().numpy()[0]
 
     @torch.no_grad()
@@ -60,9 +59,6 @@ class PPO:
             advantages[t] = gae
             returns[t] = gae + values[t]
 
-        # Optionally, store computed returns and advantages in memory for later use
-        memory.returns = returns.tolist()
-        memory.advantages = advantages.tolist()
         return state_tensor, actions, self.actor_critic.get_log_prob(state_tensor, actions), returns, advantages
 
 
@@ -82,6 +78,7 @@ class PPO:
         total_kl_div = 0.0
         total_explained_var = 0.0  # Accumulator for explained variance
         num_updates = 0
+
 
         for _ in range(epochs):
             for idx in range(0, len(states), batch_size):
@@ -106,14 +103,16 @@ class PPO:
                 norm_advantages = (advantages[batch_slice] - advantages[batch_slice].mean()) / (advantages[batch_slice].std() + 1e-8)
                 
                 # Compute surrogate losses
-                surr1 = ratios * norm_advantages
-                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * norm_advantages
+
+                surr1 = ratios * norm_advantages.reshape(-1, 1)
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * norm_advantages.reshape(-1, 1)
+
                 policy_loss = -torch.min(surr1, surr2).mean()
                 
-                value_loss = F.mse_loss(values, returns[batch_slice])
+                value_loss = F.mse_loss(values, returns[batch_slice].reshape(-1, 1))
                 entropy_loss = entropy.mean()
 
-                loss = 100 * policy_loss + self.value_coeff * value_loss - self.entropy_coeff * entropy_loss
+                loss = policy_loss + self.value_coeff * value_loss - self.entropy_coeff * entropy_loss
 
                 # Compute explained variance for the critic:
                 # EV = 1 - Var(returns - values) / (Var(returns) + eps)
