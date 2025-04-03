@@ -30,5 +30,8 @@ def get_env_from_name(name):
     if name == 'road_2d':
         from .road_2d import Road2dEnv
         return Road2dEnv()
+    if name == 'lunar_lander':
+        from .lunar_lander import LunarLanderEnv
+        return LunarLanderEnv()
     else:
         raise RuntimeError("Unkonwn environment: " + name)

@@ -127,3 +127,18 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+*png
+*jpg
+*.ipynb_checkpoints
+*.ipynb
+runs_ppo/
+runs/
+saved_sac
+e2c
+lightning_logs/
+abstract_interpretation/
+logs*/
+pcc/
+ppo/
+

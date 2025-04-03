@@ -33,7 +33,7 @@ parser.add_argument('--seed', type=int, default=123456, metavar='N',
                     help='random seed (default: 123456)')
 parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                     help='batch size (default: 256)')
-parser.add_argument('--num_steps', type=int, default=10000000, metavar='N',
+parser.add_argument('--num_steps', type=int, default=200000, metavar='N',
                     help='maximum number of steps (default: 10000000)')
 parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
                     help='hidden size (default: 256)')
@@ -69,7 +69,7 @@ agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
 safe_agent = None
 
 # Tesnorboard
-writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(
+writer = SummaryWriter('runs_spice/{}_SAC_{}_{}_{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
@@ -105,7 +105,7 @@ for i_episode in itertools.count(1):
                 else:
                     action = agent(state)
 
-            if len(agent.memory) > args.batch_size:
+            if len(agent.memory) > args.batch_size and total_numsteps % 100 == 0:
                 # Number of updates per step in environment
                 for i in range(args.updates_per_step):
                     # Update parameters of all the networks
@@ -141,14 +141,10 @@ for i_episode in itertools.count(1):
 
             tmp_buffer.append((state, action, reward, next_state, mask, cost))
 
-            if env.unsafe(next_state):
-                episode_reward -= 10000
 
             # Don't add states to the training data if they hit the edge of
             # the state space, this seems to cause problems for the regression.
-            if not (np.any(next_state <= env.observation_space.low) or
-                    np.any(next_state >= env.observation_space.high)):
-                real_buffer.append((state, action, reward, next_state, mask,
+            real_buffer.append((state, action, reward, next_state, mask,
                                     cost))
 
             state = next_state
@@ -181,7 +177,7 @@ for i_episode in itertools.count(1):
             else:
                 action = agent(state)  # Sample action from policy
 
-            if len(agent.memory) > args.batch_size:
+            if len(agent.memory) > args.batch_size and total_numsteps % 100 == 0:
                 # Number of updates per step in environment
                 for i in range(args.updates_per_step):
                     # Update parameters of all the networks
@@ -225,6 +221,7 @@ for i_episode in itertools.count(1):
             state = next_state
 
     if (i_episode - 9) % 100 == 0:
+
         states, actions, rewards, next_states, dones, costs = \
             real_data.sample(min(len(real_data), 50000), get_cost=True)
         if args.neural_safety:
@@ -304,6 +301,9 @@ for i_episode in itertools.count(1):
         avg_length /= episodes
 
         writer.add_scalar('avg_reward/test', avg_reward, i_episode)
+        writer.add_scalar('agent/unsafe_episodes', total_unsafe_episodes, i_episode)
+        writer.add_scalar('agent/shield', s, i_episode)
+        writer.add_scalar('agent/neural', a, i_episode)
 
         print("----------------------------------------")
         print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"
