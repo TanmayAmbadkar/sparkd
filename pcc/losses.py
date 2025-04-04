@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from pcc.networks import MultivariateNormalDiag
 from torch.distributions.kl import kl_divergence
 
@@ -32,13 +33,13 @@ def gaussian(z, p):
 
 
 def vae_bound(x, p_x, p_z):
-    recon_loss = -bernoulli(x, p_x)
+    recon_loss = F.mse_loss(x, p_x)
     regularization_loss = KL(p_z, MultivariateNormalDiag(torch.zeros_like(p_z.mean), torch.ones_like(p_z.stddev)))
     return recon_loss + regularization_loss
 
 
 def ae_loss(x, p_x):
-    recon_loss = -bernoulli(x, p_x)
+    recon_loss = F.mse_loss(x, p_x)
     return recon_loss
 
 
@@ -47,26 +48,27 @@ def curvature(model, z, u, delta, armotized):
     u_alias = u.detach().requires_grad_(True)
     eps_z = torch.normal(mean=torch.zeros_like(z), std=torch.empty_like(z).fill_(delta))
     eps_u = torch.normal(mean=torch.zeros_like(u), std=torch.empty_like(u).fill_(delta))
-
+    # print ('eps u ' + str(eps_u.size()))
     z_bar = z_alias + eps_z
     u_bar = u_alias + eps_u
 
-    f_z_bar, A, B = model.transition(z_bar, u_bar)
+    f_z_bar, A_bar, B_bar = model.transition(z_bar, u_bar)
     f_z_bar = f_z_bar.mean
     f_z, A, B = model.transition(z_alias, u_alias)
     f_z = f_z.mean
-
-    z_dim, u_dim = z.size(1), u.size(1)
+    # print ('f_z ' + str(f_z.size()))
     if not armotized:
-        _, B = get_jacobian(model.dynamics, z_alias, u_alias)
+        grad_z, grad_u = torch.autograd.grad(f_z, [z_alias, u_alias], grad_outputs=[eps_z, eps_u], retain_graph=True, create_graph=True)
+        taylor_error = f_z_bar - (grad_z + grad_u) - f_z
+        cur_loss = torch.mean(torch.sum(taylor_error.pow(2), dim = 1))
     else:
-        A = A.view(-1, z_dim, z_dim)
-        B = B.view(-1, z_dim, u_dim)
-
-    (grad_z,) = torch.autograd.grad(f_z, z_alias, grad_outputs=eps_z, retain_graph=True, create_graph=True)
-    grad_u = torch.bmm(B, eps_u.view(-1, u_dim, 1)).squeeze()
-    taylor_error = f_z_bar - (grad_z + grad_u) - f_z
-    cur_loss = torch.mean(torch.sum(taylor_error.pow(2), dim=1))
+        z_dim, u_dim = z.size(1), u.size(1)
+        A_bar = A_bar.view(-1, z_dim, z_dim)
+        B_bar = B_bar.view(-1, z_dim, u_dim)
+        eps_z = eps_z.view(-1, z_dim, 1)
+        eps_u = eps_u.view(-1, u_dim, 1)
+        taylor_error = f_z_bar - (torch.bmm(A_bar, eps_z).squeeze() + torch.bmm(B_bar, eps_u).squeeze()) - f_z
+        cur_loss = torch.mean(torch.sum(taylor_error.pow(2), dim = 1))
     return cur_loss
 
 

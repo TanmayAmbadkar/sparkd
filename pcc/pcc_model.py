@@ -8,39 +8,37 @@ torch.set_default_dtype(torch.float64)
 
 
 class PCC(nn.Module):
-    def __init__(self, armotized, x_dim, z_dim, u_dim):
+    def __init__(self, amortized: bool, x_dim: int, z_dim: int, u_dim: int):
         super(PCC, self).__init__()
 
         self.x_dim = x_dim
         self.z_dim = z_dim
         self.u_dim = u_dim
-        self.armotized = armotized
+        self.amortized = amortized
 
-        
-
-        self.encoder = Encoder(x_dim, z_dim)
-        self.decoder = Decoder(z_dim, x_dim)
-        self.dynamics = Dynamics(armotized, z_dim, u_dim)
+        self.encoder = Encoder(n_features=x_dim, reduced_dim=z_dim)
+        self.decoder = Decoder(reduced_dim=z_dim, n_features=x_dim)
+        self.dynamics = Dynamics(z_dim, u_dim, amortized)
         self.backward_dynamics = BackwardDynamics(z_dim, u_dim, x_dim)
 
-    def encode(self, x):
+    def encode(self, x: torch.Tensor):
         return self.encoder(x)
 
-    def decode(self, z):
+    def decode(self, z: torch.Tensor):
         return self.decoder(z)
 
-    def transition(self, z, u):
+    def transition(self, z: torch.Tensor, u: torch.Tensor):
         return self.dynamics(z, u)
 
-    def back_dynamics(self, z, u, x):
+    def back_dynamics(self, z: torch.Tensor, u: torch.Tensor, x: torch.Tensor):
         return self.backward_dynamics(z, u, x)
 
-    def reparam(self, mean, std):
+    def reparam(self, mean: torch.Tensor, std: torch.Tensor):
         # sigma = (logvar / 2).exp()
         epsilon = torch.randn_like(std)
         return mean + torch.mul(epsilon, std)
 
-    def forward(self, x, u, x_next):
+    def forward(self, x: torch.Tensor, u: torch.Tensor, x_next: torch.Tensor):
         # prediction and consistency loss
         # 1st term and 3rd
         q_z_next = self.encode(x_next)  # Q(z^_t+1 | x_t+1)
@@ -64,13 +62,16 @@ class PCC(nn.Module):
 
         return p_x_next, q_z_backward, p_z, q_z_next, z_next, p_z_next, z_p, u, p_x, p_x_next_determ
 
-    def predict(self, x, u):
-        mu, logvar = self.encoder(x)
-        z = self.reparam(mu, logvar)
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor, u: torch.Tensor):
+
+        x = torch.tensor(x, dtype=torch.float64)
+        u = torch.tensor(u, dtype=torch.float64)
+        z_dist = self.encoder(x)
+        z = z_dist.mean
         x_recon = self.decode(z)
 
-        mu_next, logvar_next, A, B = self.transition(z, u)
-        z_next = self.reparam(mu_next, logvar_next)
-        x_next_pred = self.decode(z_next)
+        transition_dist, A, B = self.transition(z, u)
+        # z_next = self.reparam(mu_next, logvar_next)
+        x_next_pred = self.decode(transition_dist.mean)
         return x_recon, x_next_pred
-
