@@ -32,8 +32,8 @@ def gaussian(z, p):
     return log_p_z
 
 
-def vae_bound(x, p_x, p_z):
-    recon_loss = F.mse_loss(x, p_x)
+def vae_bound(x, dist_p_x, p_z):
+    recon_loss = -gaussian(x, dist_p_x)
     regularization_loss = KL(p_z, MultivariateNormalDiag(torch.zeros_like(p_z.mean), torch.ones_like(p_z.stddev)))
     return recon_loss + regularization_loss
 

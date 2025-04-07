@@ -43,7 +43,8 @@ class PCC(nn.Module):
         # 1st term and 3rd
         q_z_next = self.encode(x_next)  # Q(z^_t+1 | x_t+1)
         z_next = self.reparam(q_z_next.mean, q_z_next.stddev)  # sample z^_t+1
-        p_x_next = self.decode(z_next)  # P(x_t+1 | z^t_t+1)
+        dist_p_x_next = self.decode(z_next)  # P(x_t+1 | z^t_t+1)
+        p_x_next = self.reparam(dist_p_x_next.mean, dist_p_x_next.stddev)
         # 2nd term
         q_z_backward = self.back_dynamics(z_next, u, x)  # Q(z_t | z^_t+1, u_t, x_t)
         p_z = self.encode(x)  # P(z_t | x_t)
@@ -55,12 +56,16 @@ class PCC(nn.Module):
         # additional VAE loss
         z_p = self.reparam(p_z_next.mean, p_z_next.stddev)  # samples from P(z_t | x_t)
         p_x = self.decode(z_p)  # for additional vae loss
+        
+        dist_p_x = self.decode(z_p)  # P(x_t+1 | z^t_t+1)
+        p_x = self.reparam(dist_p_x.mean, dist_p_x.stddev)
 
         # additional deterministic loss
         mu_z_next_determ = self.transition(p_z.mean, u)[0].mean
         p_x_next_determ = self.decode(mu_z_next_determ)
+        p_x_next_determ = self.reparam(p_x_next_determ.mean, p_x_next_determ.stddev)
 
-        return p_x_next, q_z_backward, p_z, q_z_next, z_next, p_z_next, z_p, u, p_x, p_x_next_determ
+        return p_x_next, dist_p_x_next, q_z_backward, p_z, q_z_next, z_next, p_z_next, z_p, u, p_x, dist_p_x_next, p_x_next_determ
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor, u: torch.Tensor):
@@ -70,8 +75,10 @@ class PCC(nn.Module):
         z_dist = self.encoder(x)
         z = z_dist.mean
         x_recon = self.decode(z)
+        x_recon = x_recon.mean
 
         transition_dist, A, B = self.transition(z, u)
         # z_next = self.reparam(mu_next, logvar_next)
         x_next_pred = self.decode(transition_dist.mean)
+        x_next_pred = x_next_pred.mean
         return x_recon, x_next_pred

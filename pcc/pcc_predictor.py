@@ -29,9 +29,9 @@ class PCCPredictor(pl.LightningModule):
         self.amortized = amortized
         
         # Loss hyper-parameters (you can tune these)
-        self.lam_p = 100.0
-        self.lam_c = 1.0
-        self.lam_cur = 0.0001
+        self.lam_p = 1.0
+        self.lam_c = 5.0
+        self.lam_cur = 1.0
         self.vae_coeff = 0.01
         self.determ_coeff = 0.3
         self.delta = 0.1
@@ -48,6 +48,7 @@ class PCCPredictor(pl.LightningModule):
         u,
         x_next,
         p_x_next,
+        dist_p_x_next,
         q_z_backward,
         p_z,
         q_z_next,
@@ -55,6 +56,7 @@ class PCCPredictor(pl.LightningModule):
         p_z_next,
         z,
         p_x,
+        dist_p_x,
         p_x_next_determ,
         lam=(1.0, 8.0, 8.0),
         delta=0.1,
@@ -62,7 +64,7 @@ class PCCPredictor(pl.LightningModule):
         determ_coeff=0.3,
     ):
         # prediction and consistency loss
-        pred_loss = F.mse_loss(x_next, p_x_next) + KL(q_z_backward, p_z) - entropy(q_z_next) - gaussian(z_next, p_z_next)
+        pred_loss = -gaussian(x_next, dist_p_x_next) + KL(q_z_backward, p_z) - entropy(q_z_next) - gaussian(z_next, p_z_next)
 
         consis_loss = -entropy(q_z_next) - gaussian(z_next, p_z_next) + KL(q_z_backward, p_z)
 
@@ -70,9 +72,9 @@ class PCCPredictor(pl.LightningModule):
         cur_loss = curvature(self.model, z, u, delta, amortized)
 
         # additional vae loss
-        vae_loss = vae_bound(x, p_x, p_z)
+        vae_loss = vae_bound(x, dist_p_x, p_z)
 
-        # additional deterministic loss
+        # additional deterministic loss)
         determ_loss = F.mse_loss(x_next, p_x_next_determ)
 
         lam_p, lam_c, lam_cur = lam
@@ -93,8 +95,8 @@ class PCCPredictor(pl.LightningModule):
         # Flatten observations if needed9
         
         # Forward pass through PCC
-        (p_x_next, q_z_backward, p_z, q_z_next, z_next,
-         p_z_next, z_sample, _, p_x, p_x_next_determ) = self.model(x, u, x_next)
+        (p_x_next, dist_p_x_next, q_z_backward, p_z, q_z_next, z_next,
+         p_z_next, z_sample, _, p_x, dist_p_x, p_x_next_determ) = self.model(x, u, x_next)
         
         # Use the loss computation from your train_pcc.py
         lam_tuple = (self.lam_p, self.lam_c, self.lam_cur)
@@ -104,6 +106,7 @@ class PCCPredictor(pl.LightningModule):
             u = u, 
             x_next = x_next,
             p_x_next = p_x_next, 
+            dist_p_x_next=dist_p_x_next,
             q_z_backward = q_z_backward, 
             p_z = p_z, 
             q_z_next = q_z_next, 
@@ -111,6 +114,7 @@ class PCCPredictor(pl.LightningModule):
             p_z_next = p_z_next,
             z=z_sample, 
             p_x = p_x, 
+            dist_p_x = dist_p_x,
             p_x_next_determ = p_x_next_determ,
             lam=lam_tuple, 
             delta=self.delta,
@@ -170,15 +174,6 @@ def fit_pcc(states, actions, next_states, model,
     """
     dataset = PCCDataset(states, actions, next_states)
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=1)
-    
-    model.lam_p = 1
-    model.lam_c = 0
-    model.lam_cur = 0
-    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1)
-    trainer.fit(model, train_loader)
-    model.lam_p = 1
-    model.lam_c = 1
-    model.lam_cur = 1
     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1)
     trainer.fit(model, train_loader)
     return model

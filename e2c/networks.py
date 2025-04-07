@@ -40,20 +40,36 @@ class Encoder(nn.Module):
         return mu
         
 
+
 class Decoder(nn.Module):
-    def __init__(self, reduced_dim, n_features):
+    # P(x_t+1 | z^_t+1)
+    def __init__(self, reduced_dim: int, n_features: int):
         super(Decoder, self).__init__()
-        self.net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 32), ReLULayer(), LinearLayer(32, n_features)])
+        self.shared_net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 32), ReLULayer()])
+        self.fc_mu = NeuralNetwork([LinearLayer(32, n_features)])  # Output mean
+        self.fc_logsig = NeuralNetwork([LinearLayer(32, n_features)])  # Output log variance
         # self.net.apply(weights_init),
         self.z_dim = reduced_dim
         self.obs_dim = n_features
 
-    def forward(self, z):
+    def forward(self, z: torch.Tensor):
         """
         :param z: latent representation
         :return: reconstructed x
         """
-        return self.net(z)
+        hidden_neurons = self.shared_net(z)
+        mean = self.fc_mu(hidden_neurons)
+        logstd = self.fc_logsig(hidden_neurons)
+        std = torch.exp(logstd)  # Convert log variance to standard deviation
+        eps = torch.randn_like(std)  # Sample noise
+        z = mean + eps * std  # Reparameterization
+        return z, mean, logstd
+    
+    def decode(self, x):
+        
+        shared_output = self.shared_net(x)
+        mu = self.fc_mu(shared_output)  # Compute mean
+        return mu
 
 class Transition(nn.Module):
     def __init__(self, net, z_dim, u_dim):

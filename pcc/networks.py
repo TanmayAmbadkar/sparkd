@@ -37,7 +37,9 @@ class Decoder(nn.Module):
     # P(x_t+1 | z^_t+1)
     def __init__(self, reduced_dim: int, n_features: int):
         super(Decoder, self).__init__()
-        self.net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 32), ReLULayer(), LinearLayer(32, n_features)])
+        self.net = NeuralNetwork([LinearLayer(reduced_dim, 16), ReLULayer(), LinearLayer(16, 32), ReLULayer()])
+        self.fc_mu = NeuralNetwork([LinearLayer(32, n_features)])  # Output mean
+        self.fc_logsig = NeuralNetwork([LinearLayer(32, n_features)])  # Output log variance
         # self.net.apply(weights_init),
         self.z_dim = reduced_dim
         self.obs_dim = n_features
@@ -47,7 +49,11 @@ class Decoder(nn.Module):
         :param z: latent representation
         :return: reconstructed x
         """
-        return self.net(z)
+        hidden_neurons = self.net(z)
+        mean = self.fc_mu(hidden_neurons)
+        logstd = self.fc_logsig(hidden_neurons)
+        return MultivariateNormalDiag(mean, torch.exp(logstd))
+
 
 
 class Dynamics(nn.Module):

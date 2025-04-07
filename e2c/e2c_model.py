@@ -6,6 +6,8 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader, Dataset
 from e2c.networks import Encoder, Decoder, Transition
 from e2c.distribution import NormalDistribution
+from torch.distributions.independent import Independent
+from torch.distributions.normal import Normal
 import copy
 
 
@@ -49,13 +51,13 @@ class E2CPredictor(pl.LightningModule):
         z_t_next, mu_next, logsig_next = self.encoder(x_next)
 
         # Reconstruct states
-        x_recon = self.decoder(z_t)
+        x_recon, x_recon_mean, x_recon_logstd = self.decoder(z_t)
 
         # Predict transitions
         z_t_next_pred, z_t_next_mean, A_t, _, _, v_t, r_t = self.transition(z_t, mu, u)
         
         # Reconstruct next states
-        x_next_pred = self.decoder(z_t_next_pred)
+        x_next_pred, x_next_pred_mean, x_next_pred_logstd = self.decoder(z_t_next_pred)
         
         # Define distributions for loss calculations
         encoder_distribution = NormalDistribution(mu, logsig)
@@ -65,16 +67,19 @@ class E2CPredictor(pl.LightningModule):
         total_loss = 0
         
         # Compute individual loss terms
-        recon_term = F.mse_loss(x_recon, x)
+        recon_term = -Independent(Normal(x_recon_mean, torch.exp(x_recon_logstd)), 1).log_prob(x).mean()
         
         # Anneal the KL weight: ramp from 0 to 1 over, e.g., 10 epochs.
         anneal_epochs = 10
-        kl_weight = min(1.0, self.current_epoch / anneal_epochs)
         kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
         
-        pred_loss = F.mse_loss(x_next_pred, x_next)
+        pred_loss = -Independent(Normal(x_next_pred_mean, torch.exp(x_next_pred_logstd)), 1).log_prob(x_next).mean()
         
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
+        
+        if batch_idx == 5:
+            print(x_next_pred_mean[0], x_next_pred_logstd[0].exp(), x_next[0])
+            print(x_recon_mean[0], x_recon_logstd[0].exp(), x[0])
         
         # Weight the losses: here, we use high weight for reconstruction/prediction early on.
         total_loss += 5 * recon_term + kl_term
@@ -104,7 +109,7 @@ class E2CPredictor(pl.LightningModule):
     def inverse_transform(self, x):
         x = torch.tensor(x).double()
         with torch.no_grad():
-            z_t = self.decoder(x)
+            z_t = self.decoder.decode(x)
         
         z_t = z_t * self.std + self.mean
         
@@ -116,9 +121,9 @@ class E2CPredictor(pl.LightningModule):
         with torch.no_grad():
             # Normalize the input
             x = (x - self.mean) / self.std
-            z_t, _, _ = self.encoder(x)
+            z_t = self.encoder.encode(x)
             z_t_next, _, _, _, _, _, _ = self.transition(z_t, z_t, u)
-            dec_z_t_next = self.decoder(z_t_next)
+            dec_z_t_next = self.decoder.decode(z_t_next)
             dec_z_t_next = dec_z_t_next * self.std + self.mean
             # z_t_next = A_t.bmm(z_t.unsqueeze(-1)).squeeze(-1) + B_t.bmm(u.unsqueeze(-1)).squeeze(-1) + o_t
             
