@@ -38,7 +38,8 @@ class DeepPoly:
         if self.lower.shape != self.upper.shape:
             raise ValueError("Lower and upper bounds must have the same shape.")
 
-        batch_size, input_size = self.lower.shape
+        if lower_bounds.dim() != 1:
+           batch_size, input_size = self.lower.shape
 
         if A_L is None:
             # Create initial affine coefficient matrices.
@@ -269,7 +270,7 @@ class DeepPoly:
 
 
     
-    def batch_split_and_join_bounds_all_dims(self, propagate_fn, parts_per_dim=5, batch_size=10000):
+    def batch_split_and_join_bounds_all_dims(self, propagate_fn, parts_per_dim=8, batch_size=100000):
         """
         Perform trace partitioning over all dimensions with batching to avoid the exponential
         blowup of analyzing every subdomain individually. This version accumulates subdomains,

@@ -66,20 +66,30 @@ class E2CPredictor(pl.LightningModule):
         
         total_loss = 0
         
-        # Compute individual loss terms
+        # if self.train_ae:        
         recon_term = F.mse_loss(x_recon, x)
+        kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
+        total_loss += 5*recon_term + kl_term
         
-        # Anneal the KL weight: ramp from 0 to 1 over, e.g., 10 epochs.
-        anneal_epochs = 10
-        kl_term = -torch.mean(0.5 * torch.sum(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig), dim=1), dim = 0)
-        
+    # else:
         pred_loss = F.mse_loss(x_next_pred, x_next)
         
+
+        # consistency loss
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-    
-        # Weight the losses: here, we use high weight for reconstruction/prediction early on.
-        total_loss += recon_term + kl_term
-        total_loss += 10 * consis_term + pred_loss
+        total_loss += 10*consis_term + pred_loss
+        
+        # if self.last_predictor is not None: 
+        #     with torch.no_grad():
+        #         z_t_old, mu_old, logvar_old = self.last_predictor.encoder(x)
+        #         z_t_next_old, mu_next_old, logvar_next_old = self.last_predictor.encoder(x_next)
+        #         # Predict transitions
+        #         z_t_next_pred_old, _, _, _, v_t, r_t = self.last_predictor.transition(mu_old, u)
+                
+        #         #Reconstruct next states
+        #         x_next_pred_old = self.decoder(z_t_next_pred_old)
+        #     total_loss += 0.001 * F.mse_loss(x_next_pred, x_next_pred_old) + 0.001 * F.mse_loss(z_t_next_pred, z_t_next_pred_old) + 0.001 * F.mse_loss(z_t, z_t_old) + total_loss
+                
 
         # Logging for monitoring
         self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)

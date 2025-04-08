@@ -218,7 +218,7 @@ if not args.no_safety:
     e2c_mean = env_model.mars.e2c_predictor.mean
     e2c_std = env_model.mars.e2c_predictor.std
     new_obs_space = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, domains.DeepPoly((env.observation_space.low - e2c_mean)/e2c_std, (env.observation_space.high - e2c_mean)/e2c_std)))
-    env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy(), high=new_obs_space.upper.detach().numpy(), shape=(args.red_dim,))
+    env.observation_space = gym.spaces.Box(low=new_obs_space.lower.detach().numpy()[0], high=new_obs_space.upper.detach().numpy()[0], shape=(args.red_dim,))
     agent = SACPolicy(env, args.replay_size, args.seed, args.batch_size, args)
     
     safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
@@ -233,11 +233,11 @@ if not args.no_safety:
         
     
     
-    polys = [np.array(env.safety.to_hyperplanes())]
+    polys = env.safety.to_hyperplanes()
 
     env.safe_polys = polys
     env.state_processor = env_model.mars.e2c_predictor.transform
-    env.polys = [np.array(domain.to_hyperplanes()) for domain in unsafe_domains_list]
+    env.polys = [domain.to_hyperplanes() for domain in unsafe_domains_list]
     
     print(env.safety)
     print(env.observation_space)

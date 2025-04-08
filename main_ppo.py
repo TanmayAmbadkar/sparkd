@@ -255,7 +255,7 @@ while True:
             epochs = 40
         else:
             e2c_predictor = None
-            epochs = 150
+            epochs = 40
     
         env_model = get_environment_model(
                 states, actions, next_states, rewards,
@@ -274,6 +274,14 @@ while True:
         safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor, safety_domain))
         
         
+        low_obs_space = torch.Tensor(env_model.mars.e2c_predictor.transform(env.original_observation_space.low))
+        high_obs_space = torch.Tensor(env_model.mars.e2c_predictor.transform(env.original_observation_space.high))
+        low_safe_space = torch.Tensor(env_model.mars.e2c_predictor.transform(env.original_safety.lower))
+        high_safe_space = torch.Tensor(env_model.mars.e2c_predictor.transform(env.original_safety.upper))
+
+        print("OBS SPACE", torch.min(torch.vstack([low_obs_space, high_obs_space]), dim=0)[0], torch.max(torch.vstack([low_obs_space, high_obs_space]), dim=0)[0])
+        print("SAFE SPACE", torch.min(torch.vstack([low_safe_space, high_safe_space]), dim=0)[0], torch.max(torch.vstack([low_safe_space, high_safe_space]), dim=0)[0])
+
         
         unsafe_domains_list = domains.recover_safe_region(new_obs_space_domain, [safety])
             
