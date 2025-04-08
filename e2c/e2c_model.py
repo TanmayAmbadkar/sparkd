@@ -67,22 +67,18 @@ class E2CPredictor(pl.LightningModule):
         total_loss = 0
         
         # Compute individual loss terms
-        recon_term = -Independent(Normal(x_recon_mean, torch.exp(x_recon_logstd)), 1).log_prob(x).mean()
+        recon_term = F.mse_loss(x_recon, x)
         
         # Anneal the KL weight: ramp from 0 to 1 over, e.g., 10 epochs.
         anneal_epochs = 10
-        kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
+        kl_term = -torch.mean(0.5 * torch.sum(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig), dim=1), dim = 0)
         
-        pred_loss = -Independent(Normal(x_next_pred_mean, torch.exp(x_next_pred_logstd)), 1).log_prob(x_next).mean()
+        pred_loss = F.mse_loss(x_next_pred, x_next)
         
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-        
-        if batch_idx == 5:
-            print(x_next_pred_mean[0], x_next_pred_logstd[0].exp(), x_next[0])
-            print(x_recon_mean[0], x_recon_logstd[0].exp(), x[0])
-        
+    
         # Weight the losses: here, we use high weight for reconstruction/prediction early on.
-        total_loss += 5 * recon_term + kl_term
+        total_loss += recon_term + kl_term
         total_loss += 10 * consis_term + pred_loss
 
         # Logging for monitoring

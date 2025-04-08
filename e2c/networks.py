@@ -63,7 +63,7 @@ class Decoder(nn.Module):
         std = torch.exp(logstd)  # Convert log variance to standard deviation
         eps = torch.randn_like(std)  # Sample noise
         z = mean + eps * std  # Reparameterization
-        return z, mean, logstd
+        return mean, mean, logstd
     
     def decode(self, x):
         

@@ -333,6 +333,9 @@ def get_environment_model(     # noqa: C901
     print("Model estimation error:", np.mean((Yh - (output_states* stds + means))**2))
     print("Explained Variance Score:", explained_variance_score(
         output_states * stds + means, Yh))
+
+    print(Yh[:10])
+    print((output_states* stds + means )[:10])
     
     
     # Get the maximum distance between a predction and a datapoint
