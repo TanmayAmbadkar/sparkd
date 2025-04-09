@@ -67,17 +67,20 @@ class E2CPredictor(pl.LightningModule):
         total_loss = 0
         
         # if self.train_ae:        
-        recon_term = F.mse_loss(x_recon, x)
+        # recon_term = F.mse_loss(x_recon, x)
+        recon_term = -Normal(x_recon_mean, torch.exp(x_recon_logstd)).log_prob(x).sum(dim=-1).mean()
         kl_term = -torch.mean(1 + 2*encoder_distribution.logsig - encoder_distribution.mean.pow(2) - torch.exp(2*encoder_distribution.logsig))
-        total_loss += 5*recon_term + kl_term
+        total_loss += recon_term + kl_term
         
     # else:
-        pred_loss = F.mse_loss(x_next_pred, x_next)
+        # pred_loss = F.mse_loss(x_next_pred, x_next)
         
 
         # consistency loss
         consis_term = NormalDistribution.KL_divergence(transition_distribution, next_distribution)
-        total_loss += 10*consis_term + pred_loss
+        total_loss += 10*consis_term - Normal(x_next_pred_mean, torch.exp(x_next_pred_logstd)).log_prob(x_next).sum(dim=-1).mean()
+
+        # total_loss += torch.distributions.kl.kl_divergence(Normal(x_recon_mean, torch.exp(x_recon_logstd)), Normal(torch.zeros_like(x_recon_mean), torch.ones_like(x_recon_mean))).mean()
         
         # if self.last_predictor is not None: 
         #     with torch.no_grad():
@@ -94,7 +97,7 @@ class E2CPredictor(pl.LightningModule):
         # Logging for monitoring
         self.log("kl_term", kl_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         self.log("consis_term", consis_term, prog_bar=True, logger=True, on_epoch=True, on_step=False)
-        self.log("recon_term", recon_term + pred_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
+        # self.log("recon_term", recon_term + pred_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         self.log("total_loss", total_loss, prog_bar=True, logger=True, on_epoch=True, on_step=False)
         
         return total_loss

@@ -267,7 +267,7 @@ while True:
 
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.e2c_predictor.transform
-        env.transformed_polys = [domain.to_hyperplanes() for domain in unsafe_domains_list]
+        env.transformed_polys = unsafe_domains_list.to_hyperplanes()
 
         print("LATENT SAFETY", safety)
         print("LATENT OBS SPACE", new_obs_space_domain)

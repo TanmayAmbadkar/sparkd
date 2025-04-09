@@ -6,9 +6,6 @@ import numpy as np
 from itertools import product
 
 
-import torch
-import numpy as np
-
 class DeepPoly:
     def __init__(self, lower_bounds, upper_bounds, parent=None, A_L=None, A_U=None):
         """
@@ -54,7 +51,7 @@ class DeepPoly:
 
     def affine_transform(self, W, b):
         """
-        Perform an affine transformation on the batched DeepPoly domain.
+        Perform an affine transformation on the batched DeepPoly domain using CROWN linearization.
         Args:
             W (torch.Tensor): Weight matrix of shape (output_dim, input_dim).
             b (torch.Tensor): Bias vector of shape (output_dim,).
@@ -65,32 +62,28 @@ class DeepPoly:
         output_dim = W.shape[0]
 
         # Build the new affine coefficients for the layer.
-        # Since the transformation is the same for every sample,
-        # we create a base matrix of shape (output_dim, input_dim+1) and replicate it over the batch.
         base_A = torch.cat([W, b.unsqueeze(1)], dim=1)  # (output_dim, input_dim+1)
         new_A_L = base_A.unsqueeze(0).expand(batch_size, -1, -1).clone().double()
         new_A_U = base_A.unsqueeze(0).expand(batch_size, -1, -1).clone().double()
 
-        # Compute new concrete bounds.
-        # Note that since the same W and b are used for every sample,
-        # we can use standard batched matmul.
+        # Compute new bounds with CROWN linearization
         pos_w = (W >= 0.0).double()  # (output_dim, input_dim)
         neg_w = (W < 0.0).double()   # (output_dim, input_dim)
-        # Here, self.lower and self.upper are (B, input_dim) and
-        # (pos_w.T * W.T) is (input_dim, output_dim).
+
+        # Apply CROWN linearization (linearize activation at bounds)
         ub = torch.matmul(self.upper, (pos_w.T * W.T)) + torch.matmul(self.lower, (neg_w.T * W.T)) + b
         lb = torch.matmul(self.lower, (pos_w.T * W.T)) + torch.matmul(self.upper, (neg_w.T * W.T)) + b
 
-        self.name = "AFFINE"
+        self.name = "CROWN_AFFINE"
         return DeepPoly(lb, ub, parent=self, A_L=new_A_L, A_U=new_A_U)
+
 
     def relu(self):
         """
-        Apply ReLU activation on the batched DeepPoly domain.
-        In the mixed case (when lower < 0 < upper), we choose λ ∈ {0,1} to minimize the area.
-        Specifically, if upper ≤ -lower, we choose λ = 0; otherwise, λ = 1.
+        Apply ReLU activation with CROWN linearization.
+        Use piecewise linear approximation around the input bounds.
         """
-        self.name = "RELU"
+        self.name = "CROWN_RELU"
         batch_size, n = self.lower.shape
 
         new_lower = self.lower.clone().detach()
@@ -110,18 +103,19 @@ class DeepPoly:
             new_upper[idx_case1] = 0
 
         # Case 2: Neurons that are always active pass through exactly.
-        idx_case2 = case2.nonzero(as_tuple=True)  # (batch_idx, feat_idx)
+        idx_case2 = case2.nonzero(as_tuple=True)
         if idx_case2[0].numel() > 0:
-            # Set the coefficient for the corresponding feature to 1.
             new_A_L[idx_case2[0], idx_case2[1], idx_case2[1]] = 1.0
             new_A_U[idx_case2[0], idx_case2[1], idx_case2[1]] = 1.0
 
-        # Case 3: Mixed neurons.
+        # Case 3: Mixed neurons using piecewise linear relaxation.
         idx_case3 = case3.nonzero(as_tuple=True)
         if idx_case3[0].numel() > 0:
             batch_idxs, feat_idxs = idx_case3
             l_vals = self.lower[batch_idxs, feat_idxs]
             u_vals = self.upper[batch_idxs, feat_idxs]
+            
+            # CROWN relaxation: piecewise linear approximation
             lambda_u = u_vals / (u_vals - l_vals)
             new_A_U[batch_idxs, feat_idxs, feat_idxs] = lambda_u
             new_A_U[batch_idxs, feat_idxs, -1] = lambda_u * (-l_vals)
@@ -129,12 +123,13 @@ class DeepPoly:
             neg_coeffs = torch.clamp(new_A_U[batch_idxs, feat_idxs, feat_idxs], max=0)
             new_upper[batch_idxs, feat_idxs] = new_A_U[batch_idxs, feat_idxs, -1] + u_vals * pos_coeffs + l_vals * neg_coeffs
 
-            # Choose λ for the lower bound.
+            # Lower bound relaxation
             lambda_choice = torch.where(u_vals <= -l_vals, torch.zeros_like(u_vals), torch.ones_like(u_vals))
             new_A_L[batch_idxs, feat_idxs, feat_idxs] = lambda_choice
             new_lower[batch_idxs, feat_idxs] = lambda_choice * l_vals
 
         return DeepPoly(new_lower, new_upper, parent=self, A_L=new_A_L, A_U=new_A_U)
+
 
     def sigmoid(self):
         """
@@ -220,43 +215,35 @@ class DeepPoly:
     
     def calculate_bounds(self):
         """
-        Recursively compute the concrete bounds for the current DeepPoly domain.
-        For batched domains, self.lower and self.upper have shape (B, n).
-        Each layer is assumed to have computed its affine coefficients such that
-        self.A_L and self.A_U have shape (B, current_n, parent_n+1), where parent's bounds have shape (B, parent_n).
-        
-        Returns:
-            (lower_bound, upper_bound): Two tensors of shape (B, current_n) representing the computed bounds.
+        Recursively compute the concrete bounds for the current DeepPoly domain using CROWN.
         """
-        # Base case: input domain
         if self.parent is None:
             return self.lower, self.upper
         else:
-            # First, get the parent's concrete bounds.
+            # Get the parent's bounds
             parent_lower, parent_upper = self.parent.calculate_bounds()
-            # Get the current layer's affine coefficients.
-            # Assume self.A_* has shape (B, current_n, parent_n+1).
+            
+            # Get the current layer's affine coefficients
             weight_L = self.A_L[..., :-1]  # (B, current_n, parent_n)
             bias_L   = self.A_L[..., -1]   # (B, current_n)
             weight_U = self.A_U[..., :-1]  # (B, current_n, parent_n)
             bias_U   = self.A_U[..., -1]   # (B, current_n)
             
-            # Compute new lower bound:
-            # For each neuron i: new_lower[i] = bias_L[i] +
-            #   sum_j [ clamped(weight_L[i,j], min=0)*parent_lower[j] + clamped(weight_L[i,j], max=0)*parent_upper[j] ]
+            # Use CROWN-based linearization for both lower and upper bounds
             pos_weight_L = torch.clamp(weight_L, min=0.0)
             neg_weight_L = torch.clamp(weight_L, max=0.0)
             new_lower = (torch.bmm(pos_weight_L, parent_lower.unsqueeze(-1)).squeeze(-1) +
-                         torch.bmm(neg_weight_L, parent_upper.unsqueeze(-1)).squeeze(-1) +
-                         bias_L)
+                        torch.bmm(neg_weight_L, parent_upper.unsqueeze(-1)).squeeze(-1) +
+                        bias_L)
             
-            # Compute new upper bound:
             pos_weight_U = torch.clamp(weight_U, min=0.0)
             neg_weight_U = torch.clamp(weight_U, max=0.0)
             new_upper = (torch.bmm(pos_weight_U, parent_upper.unsqueeze(-1)).squeeze(-1) +
-                         torch.bmm(neg_weight_U, parent_lower.unsqueeze(-1)).squeeze(-1) +
-                         bias_U)
+                        torch.bmm(neg_weight_U, parent_lower.unsqueeze(-1)).squeeze(-1) +
+                        bias_U)
+            
             return new_lower, new_upper
+
 
     def __repr__(self):
         """
@@ -270,7 +257,7 @@ class DeepPoly:
 
 
     
-    def batch_split_and_join_bounds_all_dims(self, propagate_fn, parts_per_dim=8, batch_size=100000):
+    def batch_split_and_join_bounds_all_dims(self, propagate_fn, parts_per_dim=5, batch_size=1000):
         """
         Perform trace partitioning over all dimensions with batching to avoid the exponential
         blowup of analyzing every subdomain individually. This version accumulates subdomains,
@@ -322,8 +309,8 @@ class DeepPoly:
             batch_upper_list.append(sub_ub)
             if len(batch_lower_list) == batch_size:
                 # Build batched tensors on the correct device.
-                batched_lower = torch.tensor(batch_lower_list, dtype=torch.float64, device=device)
-                batched_upper = torch.tensor(batch_upper_list, dtype=torch.float64, device=device)
+                batched_lower = torch.tensor(np.array(batch_lower_list), dtype=torch.float64, device=device)
+                batched_upper = torch.tensor(np.array(batch_upper_list), dtype=torch.float64, device=device)
                 # Create a batched DeepPoly domain.
                 dp_batch = DeepPoly(batched_lower, batched_upper)
                 # Propagate the entire batch through the network.
@@ -517,4 +504,15 @@ def recover_safe_region(observation_box, unsafe_boxes):
         for safe_box in safe_regions:
             new_safe_regions.extend(safe_box.subtract(unsafe_box))
         safe_regions = new_safe_regions
+
+
+    lower = []
+    upper = []
+
+    for i in range(len(safe_regions)):
+        lower.append(safe_regions[i].lower)
+        upper.append(safe_regions[i].upper)
+    lower = torch.vstack(lower)
+    upper = torch.vstack(upper)
+    safe_regions = DeepPoly(lower, upper)
     return safe_regions

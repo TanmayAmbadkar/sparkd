@@ -113,8 +113,8 @@ class BipedalWalkerEnv(gym.Env):
         # Set the safety constraints using the DeepPolyDomain and the polys
         self.safety = input_deeppoly_domain
         self.original_safety = input_deeppoly_domain
-        self.safe_polys = [np.array(polys)]
-        self.original_safe_polys = [np.array(polys)]
+        self.safe_polys = polys
+        self.original_safe_polys = polys
       
     def unsafe_constraints(self):
         
@@ -124,7 +124,7 @@ class BipedalWalkerEnv(gym.Env):
         
         
         for poly in unsafe_deeppolys:
-            self.polys.append(np.array(poly.to_hyperplanes()))
+            self.polys.append(poly.to_hyperplanes())
 
     def step(self, action):
         

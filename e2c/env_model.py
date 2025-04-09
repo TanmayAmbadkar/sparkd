@@ -280,8 +280,8 @@ def get_environment_model(     # noqa: C901
     print("Means:", means)
     print("Stds:", stds)
     
-    means = np.zeros_like(means)
-    stds = np.ones_like(stds)
+    # means = np.zeros_like(means)
+    # stds = np.ones_like(stds)
     
     # if e2c_predictor is not None:
     #     means = e2c_predictor.mean + 0.001 * (means - e2c_predictor.mean)
