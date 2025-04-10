@@ -83,8 +83,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
         # Set the safety constraints using the DeepPolyDomain and the polys
         self.safety = input_deeppoly_domain
         self.original_safety = input_deeppoly_domain
-        self.safe_polys = [np.array(polys)]
-        self.original_safe_polys = [np.array(polys)]
+        self.safe_polys = polys
+        self.original_safe_polys = polys
         print(self.original_safety)
         # print(self.observation_space)
         
@@ -93,10 +93,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
         unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
         self.polys = []
         self.unsafe_domains = unsafe_deeppolys
-        
-        
-        for poly in unsafe_deeppolys:
-            self.polys.append(np.array(poly.to_hyperplanes()))
+        self.polys = unsafe_deeppolys.to_hyperplanes()
             
         
     def step(self, action):

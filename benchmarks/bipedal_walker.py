@@ -121,10 +121,7 @@ class BipedalWalkerEnv(gym.Env):
         unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
         self.polys = []
         self.unsafe_domains = unsafe_deeppolys
-        
-        
-        for poly in unsafe_deeppolys:
-            self.polys.append(poly.to_hyperplanes())
+        self.polys = unsafe_deeppolys.to_hyperplanes()
 
     def step(self, action):
         

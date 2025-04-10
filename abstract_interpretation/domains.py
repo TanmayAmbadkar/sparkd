@@ -257,7 +257,7 @@ class DeepPoly:
 
 
     
-    def batch_split_and_join_bounds_all_dims(self, propagate_fn, parts_per_dim=5, batch_size=1000):
+    def batch_split_and_join_bounds_all_dims(self, propagate_fn, parts_per_dim=1, batch_size=1000):
         """
         Perform trace partitioning over all dimensions with batching to avoid the exponential
         blowup of analyzing every subdomain individually. This version accumulates subdomains,

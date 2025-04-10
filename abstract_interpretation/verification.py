@@ -17,7 +17,7 @@ def get_ae_bounds(model, input_domain):
     # domain = get_constraints(model.encoder.shared_net, input_domain)
     # mu_domain = get_constraints(model.encoder.fc_mu, domain)
 
-    propagate_fn = lambda x: get_constraints(model.encoder.fc_mu, get_constraints(model.encoder.shared_net, x))
+    propagate_fn = lambda x: get_constraints(model, x)
     
     return input_domain.batch_split_and_join_bounds_all_dims(propagate_fn)
     
