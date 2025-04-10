@@ -236,7 +236,7 @@ class ProjectionPolicy:
             # Now, the constraints become: M_rest * x + new_bias <= 0, where x represents [u1; ...; u_{H-1}].
             
             # Set up a simple quadratic objective for the future actions (e.g. minimize ||x||^2).
-            P_fixed = 1e-4 * np.eye(fixed_total)
+            P_fixed = 1e-8 * np.eye(fixed_total)
             q_fixed = np.zeros((fixed_total,))
             
             # Also set up bounds for the future actions.
@@ -247,23 +247,14 @@ class ProjectionPolicy:
             # Build inequality constraints for the fixed-QP:
             # The safety constraints: M_rest * x <= -new_bias.
             G_fixed = M_rest
-            h_fixed = -new_bias
-            
-            # Additionally, enforce the variable bounds: x_i >= lower and x_i <= upper.
-            I_fixed = np.eye(fixed_total)
-            G_bounds = np.concatenate((-I_fixed, I_fixed), axis=0)
-            h_bounds = np.concatenate((-bounds_fixed[:, 0], bounds_fixed[:, 1]), axis=0)
-            
-            # Combine the constraints.
-            G_total = np.vstack((G_fixed, G_bounds))
-            h_total = np.hstack((h_fixed, h_bounds))
+            h_fixed = new_bias
             
             # Convert to cvxopt matrices.
             try:
                 sol_fixed = cvxopt.solvers.qp(cvxopt.matrix(P_fixed),
                                             cvxopt.matrix(q_fixed),
-                                            cvxopt.matrix(G_total),
-                                            cvxopt.matrix(h_total))
+                                            cvxopt.matrix(G_fixed),
+                                            cvxopt.matrix(-h_fixed))
             except Exception as e:
                 sol_fixed = {'status': 'infeasible'}
             fixed_feasible = (sol_fixed['status'] == 'optimal')
