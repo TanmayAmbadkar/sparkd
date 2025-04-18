@@ -381,6 +381,41 @@ class DeepPoly:
                     inequalities.append(np.append(A_lower, lower[b, i].item()))
                 all_inequalities.append(np.array(inequalities))
             return all_inequalities
+        
+    def invert_polytope(self):
+
+        """
+        Invert the DeepPoly domain to obtain the set of hyperplanes.
+        This is done by negating the lower and upper bounds.
+        """
+        lower, upper = self.calculate_bounds()
+        if lower.ndim == 1:
+            dims = lower.shape[0]
+            inequalities = []
+            for i in range(dims):
+                A_upper = np.zeros(dims)
+                A_upper[i] = -1
+                inequalities.append(np.append(A_upper, upper[i].item()))
+                A_lower = np.zeros(dims)
+                A_lower[i] = 1
+                inequalities.append(np.append(A_lower, -lower[i].item()))
+            return inequalities
+        else:
+            B, dims = lower.shape
+            all_inequalities = []
+            for b in range(B):
+                inequalities = []
+                for i in range(dims):
+                    A_upper = np.zeros(dims)
+                    A_upper[i] = -1
+                    all_inequalities.append(np.array([np.append(A_upper, upper[b, i].item())]))
+                    A_lower = np.zeros(dims)
+                    A_lower[i] = 1
+                    all_inequalities.append(np.array([np.append(A_lower, -lower[b, i].item())]))
+                # all_inequalities.append(np.array([inequalities]))3
+            return all_inequalities
+
+
 
     def intersects(self, other):
         """
@@ -512,6 +547,7 @@ def recover_safe_region(observation_box, unsafe_boxes):
     for i in range(len(safe_regions)):
         lower.append(safe_regions[i].lower)
         upper.append(safe_regions[i].upper)
+
     lower = torch.vstack(lower)
     upper = torch.vstack(upper)
     safe_regions = DeepPoly(lower, upper)

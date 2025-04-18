@@ -107,6 +107,10 @@ class ProjectionPolicy:
         self.saved_state = None
         self.saved_action = None
         self.transform = transform
+        self.mat_dyn = None
+        self.F = None
+        self.G = None
+        self.h = None
 
         
         self.slack = 0.1
@@ -182,7 +186,6 @@ class ProjectionPolicy:
         u_dim = self.action_space.shape[0]
         # Transform the state appropriately.
         state = self.transform(state.reshape(1, -1)).reshape(-1,)
-        
         # Use the provided action if available; otherwise, default to zero.
         if action is None:
             action = np.zeros(u_dim)
@@ -190,6 +193,7 @@ class ProjectionPolicy:
         # Get local dynamics: here, env.get_matrix_at_point returns a matrix which we split into A, B, and c.
         point = np.concatenate((state, action))
         mat_dyn, eps = self.env.get_matrix_at_point(point, s_dim)
+
         A = mat_dyn[:, :s_dim]
         B = mat_dyn[:, s_dim:-1]
         c = mat_dyn[:, -1]
@@ -197,6 +201,7 @@ class ProjectionPolicy:
         
         best_score = 1e10
         best_u0 = None
+
 
         # Iterate over each safe polytope.
         for poly in self.safe_polys:
@@ -264,13 +269,13 @@ class ProjectionPolicy:
             # Now, the constraints become: M_rest * x + new_bias <= 0, where x represents [u1; ...; u_{H-1}].
             
             # Set up a simple quadratic objective for the future actions (e.g. minimize ||x||^2).
-            P_fixed = 1e-8 * np.eye(fixed_total)
+            P_fixed = 1e-4 * np.eye(fixed_total)
             q_fixed = np.zeros((fixed_total,))
             
             # Also set up bounds for the future actions.
-            act_bounds = np.stack((self.action_space.low, self.action_space.high), axis=1)
-            # Replicate the bounds for (horizon-1) steps.
-            bounds_fixed = np.concatenate([act_bounds] * (self.horizon - 1), axis=0)
+            # act_bounds = np.stack((self.action_space.low, self.action_space.high), axis=1)
+            # # Replicate the bounds for (horizon-1) steps.
+            # bounds_fixed = np.concatenate([act_bounds] * (self.horizon - 1), axis=0)
             
             # Build inequality constraints for the fixed-QP:
             # The safety constraints: M_rest * x <= -new_bias.
@@ -294,9 +299,9 @@ class ProjectionPolicy:
                 shielded = False
             else:
                 # Fixed-QP failed: fall back to solving the full QP where u0 is free.
-                P_full = 1e-8 * np.eye(total_vars)
+                P_full = 1e-4 * np.eye(total_vars)
                 # Add extra weight on the first block so the solution stays close to the policy action.
-                P_full[:u_dim, :u_dim] = np.eye(u_dim)
+                P_full[:u_dim, :u_dim] += np.eye(u_dim)
                 q_full = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))
                 try:
                     sol_full = cvxopt.solvers.qp(cvxopt.matrix(P_full),

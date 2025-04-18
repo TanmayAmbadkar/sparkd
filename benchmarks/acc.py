@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
-
+from abstract_interpretation import domains
 
 class AccEnv(gym.Env):
 
@@ -34,10 +34,14 @@ class AccEnv(gym.Env):
             np.array([[1.0, 0.0, 0.01]])
         ]
 
+        self.safety = domains.DeepPoly(
+                np.array([-10, -10]),
+                np.array([-0.01, 10]))
+        
     def reset(self) -> np.ndarray:
         self.state = self.init_space.sample()
         self.steps = 0
-        return self.state
+        return self.state, {}
 
     def step(self, action: np.ndarray) -> \
             Tuple[np.ndarray, float, bool, Dict[Any, Any]]:
@@ -52,7 +56,7 @@ class AccEnv(gym.Env):
         reward = 2.0 + x if x < 0 else -10
         done = bool(x >= 0) or self.steps > self._max_episode_steps
         self.steps += 1
-        return self.state, reward, done, {}
+        return self.state, reward, done, False, {}
 
     def predict_done(self, state: np.ndarray) -> bool:
         return state[0] >= 0
@@ -63,5 +67,5 @@ class AccEnv(gym.Env):
         self.init_space.seed(seed)
         self.rng = np.random.default_rng(np.random.PCG64(seed))
 
-    def unsafe(self, state: np.ndarray) -> bool:
+    def unsafe(self, state: np.ndarray, sim = None) -> bool:
         return state[0] >= 0

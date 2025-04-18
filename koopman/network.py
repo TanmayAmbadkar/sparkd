@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
 from torchmetrics.regression import ExplainedVariance
 
@@ -36,9 +36,9 @@ class KoopmanDataset(Dataset):
 
     def __getitem__(self, idx):
         return {
-            'states': self.states[idx],         # shape: (horizon+1, state_dim)
+            'states': self.states[idx],         # shape: (horizon, state_dim)
             'actions': self.actions[idx],       # shape: (horizon, action_dim)
-            'next_states': self.next_states[idx]  # shape: (horizon+1, state_dim)
+            'next_states': self.next_states[idx]  # shape: (horizon, state_dim)
         }
 
 ###################################################
@@ -68,25 +68,41 @@ class StateEmbedding(nn.Module):
         z = torch.cat([s, features], dim=-1)  # shape: (batch, state_dim + embed_dim)
         return z
 
+import torch
+import torch.nn as nn
+
 class KoopmanOperator(nn.Module):
     """
-    Implements the Koopman operator for multi-step prediction.
-    It is assumed to work linearly in the embedding space as:
-         z_{t+1} = A * z_t + B * u_t
-    where A and B are learnable linear mappings.
+    Implements the Koopman operator for multi-step prediction with affine term:
+         z_{t+1} = A * z_t + B * u_t + c
+    where A and B are learnable linear mappings (no bias),
+    and c is an explicit offset parameter.
     """
     def __init__(self, embed_total_dim, control_dim):
         super(KoopmanOperator, self).__init__()
         self.A = nn.Linear(embed_total_dim, embed_total_dim, bias=False)
         self.B = nn.Linear(control_dim, embed_total_dim, bias=False)
+        # Explicit constant offset
+        self.c = nn.Parameter(torch.zeros(embed_total_dim))
 
     def forward(self, z, u):
-        # z: (batch, embed_total_dim)
-        # u: (batch, control_dim)
-        return self.A(z) + self.B(u)
+        # z: (batch_size, embed_total_dim)
+        # u: (batch_size, control_dim)
+        return self.A(z) + self.B(u) + self.c
 
     def get_koopman_operators(self):
-        return self.A.weight.data, self.B.weight.data
+        """
+        Returns:
+            A_w (Tensor): shape (embed_total_dim, embed_total_dim)
+            B_w (Tensor): shape (embed_total_dim, control_dim)
+            c   (Tensor): shape (embed_total_dim,)
+        """
+        # clone to avoid in-place modifications
+        A_w = self.A.weight.data.clone()
+        B_w = self.B.weight.data.clone()
+        c   = self.c.data.clone()
+        return A_w, B_w, c
+
 
 ##########################################################
 # 3. PyTorch Lightning Module for Multi-Step Koopman Learning #
@@ -157,44 +173,75 @@ class KoopmanLightning(pl.LightningModule):
         actions = batch['actions'].double()
         next_states = batch['next_states'].double()
         
-        # For target, we want to match the predicted latent trajectory
-        # with the encoder outputs applied to the true future states.
-        # Here we use next_states[:, 1:, :] (i.e. from s_1 to s_horizon+1)
-        with torch.no_grad():
-            target_latents = self.embedding_net(next_states)
-        
-        pred_latents = self.forward(states, actions)
+        # Corrected target calculation:
+        # Target states are s_1, s_2, ..., s_horizon from the ground truth
+        target_s = next_states # Shape: (B, horizon, state_dim)
+        B, H, S_dim = target_s.shape
+        embed_total_dim = self.state_dim + self.embed_dim
 
+        # Reshape to (B*H, state_dim) for the embedding network
+        target_s_flat = target_s.reshape(B * H, -1)
+
+        with torch.no_grad():
+            # Ensure embedding net is in eval mode if it has dropout/batchnorm, though yours doesn't seem to
+            # self.embedding_net.eval() # Optional here as training_step implies train mode
+            target_latents_flat = self.embedding_net(target_s_flat) # Use .float() assuming float32
+            # self.embedding_net.train() # Optional: switch back if needed
+
+            # Reshape back to (B, horizon, embed_total_dim)
+            target_latents = target_latents_flat.reshape(B, H, -1)
+
+        pred_latents = self.forward(states, actions)
         loss = (pred_latents - target_latents) ** 2
         for i in range(self.horizon):
             loss[:, i] = loss[:, i] * 0.95**i
         loss = loss.mean()
-        loss = self.criterion(pred_latents, target_latents)
         self.log('train_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('ev_score', self.ev(pred_latents, target_latents), prog_bar=True, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
+        # Expected shapes:
+        # batch['states']: (B, horizon+1, state_dim)
+        # batch['actions']: (B, horizon, action_dim)
+        # batch['next_states']: (B, horizon+1, state_dim)
         states = batch['states'].double()
         actions = batch['actions'].double()
         next_states = batch['next_states'].double()
         
-        with torch.no_grad():
-            target_latents = self.embedding_net(next_states)
+        # Corrected target calculation:
+        # Target states are s_1, s_2, ..., s_horizon from the ground truth
+        target_s = next_states # Shape: (B, horizon, state_dim)
+        B, H, S_dim = target_s.shape
+        embed_total_dim = self.state_dim + self.embed_dim
 
-        print(target_latents.shape)
+        # Reshape to (B*H, state_dim) for the embedding network
+        target_s_flat = target_s.reshape(B * H, -1)
+
+        with torch.no_grad():
+            # Ensure embedding net is in eval mode if it has dropout/batchnorm, though yours doesn't seem to
+            # self.embedding_net.eval() # Optional here as training_step implies train mode
+            target_latents_flat = self.embedding_net(target_s_flat) # Use .float() assuming float32
+            # self.embedding_net.train() # Optional: switch back if needed
+
+            # Reshape back to (B, horizon, embed_total_dim)
+            target_latents = target_latents_flat.reshape(B, H, -1)
+
         pred_latents = self.forward(states, actions)
-        print(pred_latents.shape)
-        loss = self.criterion(pred_latents, target_latents)
-        self.log('val_loss', loss, prog_bar=True)
+        loss = (pred_latents - target_latents) ** 2
+        for i in range(self.horizon):
+            loss[:, i] = loss[:, i] * 0.95**i
+        loss = loss.mean()
+        self.log('val_train_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val_ev_score', self.ev(pred_latents, target_latents), prog_bar=True, on_step=False, on_epoch=True)
         return loss
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
     
     def transition(self, z=None, z_1=None, u=None):
-        A, B = self.koopman_operator.get_koopman_operators()
-        return None, None, A, B, torch.zeros((A.shape[0],)), None, None
+        A, B, c = self.koopman_operator.get_koopman_operators()
+        return None, None, A, B, c, None, None
     
     def transform(self, x):
         """
@@ -213,8 +260,8 @@ class KoopmanLightning(pl.LightningModule):
         """
         Given a sequence of states and actions, predict the future latent sequence.
         Args:
-            states: Array of shape (B, horizon+1, state_dim)
-            actions: Array of shape (B, horizon, action_dim)
+            states: Array of shape (B, state_dim)
+            actions: Array of shape (B, action_dim)
         Returns:
             pred_latents: Predicted latent states of shape (B, horizon, state_dim+embed_dim)
         """
@@ -226,11 +273,10 @@ class KoopmanLightning(pl.LightningModule):
         
         return z.detach().cpu().numpy()
 
-# Fit the Koopman model using the multi-step sequences.
-def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100):
+def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100, val_size=0.3):
     """
-    Fit the Koopman model on multi-step trajectory data.
-    
+    Fit the Koopman model on multi-step trajectory data, splitting into train and validation sets.
+
     Args:
         states (np.ndarray): Array of shape (N, horizon+1, state_dim)
         actions (np.ndarray): Array of shape (N, horizon, action_dim)
@@ -238,12 +284,20 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
         koopman_model (KoopmanLightning): The Lightning module for Koopman learning.
         horizon (int): The prediction horizon.
         epochs (int): Number of training epochs.
+        val_size (float): Proportion of the dataset to use for validation (e.g., 0.3 for 30%).
     """
     dataset = KoopmanDataset(states, actions, next_states)
-    train_loader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=1)
-    
-    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1)
-    trainer.fit(koopman_model, train_loader)
-    
+    total_size = len(dataset)
+    val_len = int(total_size * val_size)
+    train_len = total_size - val_len
+    train_dataset, val_dataset = random_split(dataset, [train_len, val_len])
+
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=1)
+    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, num_workers=1)
+
+    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
+    trainer.fit(koopman_model, train_loader, val_loader)
+
     del trainer
     del train_loader
+    del val_loader

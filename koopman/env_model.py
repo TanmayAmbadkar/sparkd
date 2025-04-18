@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import explained_variance_score
+from sklearn.metrics import explained_variance_score, r2_score
 from typing import Union
 
 
@@ -22,6 +22,7 @@ class MarsE2cModel:
         self.e2c_predictor = e2c_predictor
         self.s_dim = s_dim
         self.original_s_dim = original_s_dim
+        self.error = 0
 
     def __call__(self, state, action,  normalized: bool = False) -> np.ndarray:
         """
@@ -40,7 +41,7 @@ class MarsE2cModel:
 
         # Predict next latent state
         
-        return z_t_next[:, :self.original_s_dim].squeeze(0).detach().cpu().numpy()
+        return z_t_next.squeeze(0).detach().cpu().numpy()
 
     def get_matrix_at_point(self, point: np.ndarray, s_dim: int, steps: int = 1, normalized: bool = False):
         """
@@ -82,8 +83,9 @@ class MarsE2cModel:
 
         # 5. Convert PyTorch tensors to NumPy, remove batch dimension
         A_t = A_t.detach().cpu().numpy()   # shape [s_dim, s_dim]
-        B_t = B_t.detach().cpu().numpy()    # shape [s_dim, u_dim]
+        B_t = B_t.detach().cpu().numpy()    # shape [s_dim, u_dim]C
         c_t = c_t.detach().cpu().numpy()    # shape [s_dim]
+        # c_T = np.zeros(A_t.shape[0]) 
 
         # 6. Construct M by stacking [A | B | c], giving shape [s_dim, s_dim + u_dim + 1]
         #    Note: c_t[:, None] is the bias column
@@ -91,7 +93,6 @@ class MarsE2cModel:
 
         # 7. Compute eps as the diagonal of A_t @ A_t^T.
         #    That yields a 1D array of length s_dim.
-        A_tA_tT = A_t @ A_t.T  # shape [s_dim, s_dim]
         # eps = np.diag(A_tA_tT) # shape [s_dim]
         eps = np.zeros_like(c_t)
 
@@ -224,25 +225,57 @@ def get_environment_model(     # noqa: C901
     print(input_states.shape, actions.shape, output_states.shape)
     parsed_mars = MarsE2cModel(e2c_predictor, latent_dim, input_states.shape[-1])
     Yh = np.array([parsed_mars(state, action, normalized=True) for state, action in zip(input_states, actions)])
-    # output_states = output_states.reshape(-1, input_states.shape[-1])
-    for i in range(horizon):
-        print(f"Model estimation error, horizon {i}:", np.mean((Yh[:,i,:input_states.shape[-1]] - (output_states[:, i]))**2))
-        print(f"Explained Variance Score, horizon {i}:", explained_variance_score(
-            output_states[:,i].reshape(-1, input_states.shape[-1]), Yh[:,i,:input_states.shape[-1]].reshape(-1, input_states.shape[-1])))
-    
-    
-    # Get the maximum distance between a predction and a datapoint
-    diff = np.amax(np.abs(Yh[:,:,:input_states.shape[-1]] - (output_states)))
 
-    # Get a confidence interval based on the quantile of the chi-squared
-    # distribution
-    conf = data_stddev * np.sqrt(scipy.stats.chi2.ppf(
-        0.9, output_states.shape[1]))
-    err = diff + conf
-    print("Computed error:", err, "(", diff, conf, ")")
-    parsed_mars.error = 0
+    output_states = parsed_mars.e2c_predictor.transform(output_states)
+    # output_states = output_states.reshape(-1, input_states.shape[-1])
+
+    print(np.min(Yh[:,0], axis = 0), np.max(Yh[:,0], axis = 0))
+    print(np.min(output_states[:,0], axis = 0), np.max(output_states[:,0], axis = 0))
+    ev_score = None
+    r2 = None
+    for i in range(horizon):
+        print(f"Model estimation error, horizon {i}:", np.mean((Yh[:,i] - (output_states[:, i]))**2))
+        ev_score = explained_variance_score(
+            output_states[:,i].reshape(-1), Yh[:,i,].reshape(-1))
+        r2 = r2_score(
+            output_states[:,i].reshape(-1), Yh[:,i,].reshape(-1))
+        print(f"Explained Variance Score, horizon {i}:", ev_score)
+        print(f"R2 Score, horizon {i}:", r2)
+                
+            # number of output dims
+        n_out = output_states.shape[-1]
+
+        # 1) compute dimension‑wise maximum abs‑error over all samples & timesteps
+        #    (broadcast output_states across the middle axis of Yh)
+        #    Yh: (n_samples, n_steps, n_out)
+        #    output_states: (n_samples, n_out)
+        diff_dim = np.max(
+            np.abs(
+                Yh[:, 0] 
+                - output_states[:, 0, :]
+            ),
+            axis=0 # max over samples and steps, leave shape (n_out,)
+        )
+
+        # 2) compute your conf interval (this will be a scalar or (n_out,) already)
+        conf = data_stddev * np.sqrt(
+            scipy.stats.chi2.ppf(0.9, output_states.shape[1])
+        )
+        # if conf is a scalar, broadcast to length n_out
+        if np.ndim(conf) == 0:
+            conf = np.full(n_out, conf)
+
+        # 3) final per‑dimension error bound
+        err = diff_dim + conf
+
+        # 4) for logging, show only the worst dimension
+        print("Max error:", err)
+
+        # 5) still store the full vector
+        parsed_mars.error = err
+
 
 
     print(parsed_mars)
 
-    return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy())
+    return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2

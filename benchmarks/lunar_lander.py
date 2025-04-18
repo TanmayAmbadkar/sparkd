@@ -70,7 +70,7 @@ class LunarLanderEnv(gym.Env):
         self.unsafe_domains = unsafe_deeppolys
         
         
-        self.polys = unsafe_deeppolys.to_hyperplanes()
+        self.polys = self.original_safety.invert_polytope()
 
     def step(self, action):
         

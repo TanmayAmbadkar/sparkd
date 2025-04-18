@@ -176,48 +176,49 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.e2c_predictor.lr = 0.0001
+            env_model.mars.e2c_predictor.lr = 0.00003
             e2c_predictor = env_model.mars.e2c_predictor
             epochs = 40
         else:
             e2c_predictor = None
-            epochs = 150
+            epochs = 200
     
-        env_model = get_environment_model(
+        env_model, ev_score, r2_score = get_environment_model(
                 states, actions, next_states, rewards,
-                domains.DeepPoly(env.original_observation_space.low, env.original_observation_space.high),
+                domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                 seed=args.seed, e2c_predictor = e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
         
-            
+        writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
+        writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)   
             
         e2c_mean = env_model.mars.e2c_predictor.mean
         e2c_std = env_model.mars.e2c_predictor.std
-        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly((env.original_observation_space.low - e2c_mean)/e2c_std, (env.original_observation_space.high - e2c_mean)/e2c_std)))
+        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly((env.observation_space.low - e2c_mean)/e2c_std, (env.observation_space.high - e2c_mean)/e2c_std)))
         
         
-        safety_domain = domains.DeepPoly((env.original_safety.lower - e2c_mean)/e2c_std, (env.original_safety.upper - e2c_mean)/e2c_std)
+        safety_domain = domains.DeepPoly((env.safety.lower - e2c_mean)/e2c_std, (env.safety.upper - e2c_mean)/e2c_std)
         
         safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, safety_domain))
         
         
         
             
-        safety = domains.DeepPoly(torch.cat([env.original_safety.lower[0], safety.lower[0]]), torch.cat([env.original_safety.upper[0], safety.upper[0]]))
+        safety = domains.DeepPoly(torch.cat([env.safety.lower[0], safety.lower[0]]), torch.cat([env.safety.upper[0], safety.upper[0]]))
 
         polys = safety.to_hyperplanes()
 
 
-        new_obs_space = gym.spaces.Box(low=np.concatenate([env.original_observation_space.low, new_obs_space_domain.lower[0].detach().numpy()]), high=np.concatenate([env.original_observation_space.high, new_obs_space_domain.upper[0].detach().numpy()]), shape=(args.red_dim + env.original_observation_space.shape[0],))
+        new_obs_space = gym.spaces.Box(low=np.concatenate([env.observation_space.low, new_obs_space_domain.lower[0].detach().numpy()]), high=np.concatenate([env.observation_space.high, new_obs_space_domain.upper[0].detach().numpy()]), shape=(args.red_dim + env.observation_space.shape[0],))
         
+        print("LATENT SAFETY", safety)
+        print("LATENT OBS SPACE", new_obs_space)
+
         unsafe_domains = domains.recover_safe_region(domains.DeepPoly(new_obs_space.low, new_obs_space.high), [safety])
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.e2c_predictor.transform
         env.transformed_polys = unsafe_domains.to_hyperplanes()
-        print("LATENT SAFETY", safety)
-        print("LATENT OBS SPACE", new_obs_space)
-
         shield = ProjectionPolicy(
-            env_model.get_symbolic_model(), new_obs_space, env.original_observation_space,
+            env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.e2c_predictor.transform)
         safe_agent = Shield(shield, agent)
         

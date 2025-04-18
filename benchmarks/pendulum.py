@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
-
+from abstract_interpretation import domains
 
 class PendulumEnv(gym.Env):
 
@@ -23,19 +23,26 @@ class PendulumEnv(gym.Env):
         self._max_episode_steps = 100
 
         self.polys = [
-            np.array([[1.0, 0.0, 0.4]]),
-            np.array([[-1.0, 0.0, 0.4]])
+            np.array([[1.0, 0.0, 0.0, 0.0, 0.4]]),
+            np.array([[-1.0, 0.0, 0.0, 0.0,  0.4]])
         ]
 
         self.safe_polys = [
-            np.array([[-1.0, 0.0, -0.39],
-                      [1.0, 0.0, -0.39]])
+            np.array([[-1.0, 0.0, 0.0, 0.0, -0.39],
+                      [1.0, 0.0, 0.0, 0.0, -0.39]])
         ]
+        self.safety = domains.DeepPoly(
+                np.array([-0.39, -1]),
+                np.array([0.39, 1]))
+        
+        self.original_safety = domains.DeepPoly(
+                np.array([-0.39, -1]),
+                np.array([0.39, 1]))
 
     def reset(self) -> np.ndarray:
         self.state = self.init_space.sample()
         self.steps = 0
-        return self.state
+        return self.state, {}
 
     def step(self, action: np.ndarray) -> \
             Tuple[np.ndarray, float, bool, Dict[Any, Any]]:
@@ -55,7 +62,7 @@ class PendulumEnv(gym.Env):
         done = bool(abs(theta) >= 0.4) or \
             self.steps >= self._max_episode_steps or self.unsafe(self.state)
         self.steps += 1
-        return self.state, reward, done, {}
+        return self.state, reward, done, False, {}
 
     def predict_done(self, state: np.ndarray) -> bool:
         return abs(state[0]) >= 0.4
@@ -65,5 +72,5 @@ class PendulumEnv(gym.Env):
         self.observation_space.seed(seed)
         self.init_space.seed(seed)
 
-    def unsafe(self, state: np.ndarray) -> bool:
+    def unsafe(self, state: np.ndarray, sim = None) -> bool:
         return abs(self.state[0]) >= 0.4
