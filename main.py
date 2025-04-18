@@ -160,9 +160,9 @@ for i_episode in itertools.count(1):
                 real_data.push(state, action, reward, next_state, mask, 0)
         if safe_agent is not None:
             try:
-                s, a, t = safe_agent.report()
-                print("Shield steps:", s, "  Neural steps:", a)
-                print("Average time:", t / (s + a))
+                s, a, b, t = safe_agent.report()
+                print("Shield steps:", s, "  Neural steps:", a, "  Backup steps:", b)
+                print("Average time:", t / (s + a + b))
                 safe_agent.reset_count()
             except Exception:
                 pass
@@ -263,6 +263,10 @@ for i_episode in itertools.count(1):
         episodes = 1
         unsafe_episodes = 0
         avg_length = 0.
+        shield_count = 0
+        backup_count = 0
+        neural_count = 0
+        t = 0
         for _ in range(episodes):
             state = env.reset()
             episode_reward = 0
@@ -285,25 +289,36 @@ for i_episode in itertools.count(1):
                     done = True
                 if done:
                     try:
-                        s, a, t = safe_agent.report()
-                        print("Finished test episode:", s, "shield and", a,
-                              "neural")
-                        print("Average time:", t / (s + a))
+                        s, a, b, t = safe_agent.report()
+                        print("Finished test episode:", s, "shield and", b, "backup and", a, "neural")
+                        shield_count += s
+                        backup_count += b
+                        neural_count += a
+
+                        print("Average time:", t / (s + a + b))
                         safe_agent.reset_count()
-                    except Exception:
+                    except Exception as e:
+                        print(e)
                         pass
                     break
                 state = next_state
                 trajectory.append(state)
             avg_reward += episode_reward
             avg_length += episode_steps
-        avg_reward /= episodes
-        avg_length /= episodes
 
-        writer.add_scalar('avg_reward/test', avg_reward, i_episode)
-        writer.add_scalar('agent/unsafe_episodes', total_unsafe_episodes, i_episode)
-        writer.add_scalar('agent/shield', s, i_episode)
-        writer.add_scalar('agent/neural', a, i_episode)
+            avg_reward /= episodes
+            avg_length /= episodes
+            shield_count /= episodes
+            neural_count /= episodes
+            backup_count /= episodes
+            writer.add_scalar(f'agent/shield', shield_count, total_numsteps)
+            writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
+            writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
+
+            writer.add_scalar('avg_reward/test', avg_reward, i_episode)
+            writer.add_scalar('agent/unsafe_episodes', total_unsafe_episodes, i_episode)
+            writer.add_scalar('agent/shield', s, i_episode)
+            writer.add_scalar('agent/neural', a, i_episode)
 
         print("----------------------------------------")
         print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"

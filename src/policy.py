@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import numpy as np
 from typing import Optional, List, Tuple
 import cvxopt
@@ -9,6 +9,8 @@ import time
 from .env_model import MARSModel
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
+from scipy.optimize import linprog
+
 
 
 cvxopt.solvers.options['show_progress'] = False
@@ -68,7 +70,7 @@ class ProjectionPolicy:
         self.safe_polys = safe_polys
         self.saved_state = None
         self.saved_action = None
-
+        
     def backup(self, state: np.ndarray) -> np.ndarray:
         """
         Choose a backup action if the projection fails.
@@ -144,6 +146,7 @@ class ProjectionPolicy:
         # Return the first action
         return res['x'][:u_dim]
 
+
     def solve(self,    # noqa: C901
               state: np.ndarray,
               action: Optional[np.ndarray] = None,
@@ -153,26 +156,24 @@ class ProjectionPolicy:
         action and state because very often we will call unsafe and then
         __call__ on the same state.
         """
-        original_state = state.copy()
+        
         shielded = True
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
-        
-        # Use the provided action if available; otherwise, default to zero.
+        # If we don't have a proposed action, look for actions with small
+        # magnitude
         if action is None:
             action = np.zeros(u_dim)
-        
-        # Get local dynamics: here, env.get_matrix_at_point returns a matrix which we split into A, B, and c.
+        # Get the local dynamics
         point = np.concatenate((state, action))
-        mat_dyn, eps = self.env.get_matrix_at_point(point, s_dim)
-        A = mat_dyn[:, :s_dim]
-        B = mat_dyn[:, s_dim:-1]
-        c = mat_dyn[:, -1]
-        
+        mat, eps = self.env.get_matrix_at_point(point, s_dim)
+        A = mat[:, :s_dim]
+        B = mat[:, s_dim:-1]
+        c = mat[:, -1]
+
         best_score = 1e10
         best_u0 = None
 
-        # Iterate over each safe polytope.
         for poly in self.safe_polys:
             P_poly = poly[:, :-1]
             b_poly = poly[:, -1]
@@ -236,7 +237,7 @@ class ProjectionPolicy:
             # Now, the constraints become: M_rest * x + new_bias <= 0, where x represents [u1; ...; u_{H-1}].
             
             # Set up a simple quadratic objective for the future actions (e.g. minimize ||x||^2).
-            P_fixed = 1e-8 * np.eye(fixed_total)
+            P_fixed = 1e-4 * np.eye(fixed_total)
             q_fixed = np.zeros((fixed_total,))
             
             # Also set up bounds for the future actions.
@@ -247,14 +248,23 @@ class ProjectionPolicy:
             # Build inequality constraints for the fixed-QP:
             # The safety constraints: M_rest * x <= -new_bias.
             G_fixed = M_rest
-            h_fixed = new_bias
+            h_fixed = -new_bias
+            
+            # Additionally, enforce the variable bounds: x_i >= lower and x_i <= upper.
+            I_fixed = np.eye(fixed_total)
+            G_bounds = np.concatenate((-I_fixed, I_fixed), axis=0)
+            h_bounds = np.concatenate((-bounds_fixed[:, 0], bounds_fixed[:, 1]), axis=0)
+            
+            # Combine the constraints.
+            G_total = np.vstack((G_fixed, G_bounds))
+            h_total = np.hstack((h_fixed, h_bounds))
             
             # Convert to cvxopt matrices.
             try:
                 sol_fixed = cvxopt.solvers.qp(cvxopt.matrix(P_fixed),
                                             cvxopt.matrix(q_fixed),
-                                            cvxopt.matrix(G_fixed),
-                                            cvxopt.matrix(-h_fixed))
+                                            cvxopt.matrix(G_total),
+                                            cvxopt.matrix(h_total))
             except Exception as e:
                 sol_fixed = {'status': 'infeasible'}
             fixed_feasible = (sol_fixed['status'] == 'optimal')
@@ -263,6 +273,7 @@ class ProjectionPolicy:
                 # The fixed-QP is feasible: the original policy action u0 is safe.
                 candidate_u0 = action.copy()
                 candidate_score = 0  # no deviation from the policy action.
+                shielded = False
             else:
                 # Fixed-QP failed: fall back to solving the full QP where u0 is free.
                 P_full = 1e-4 * np.eye(total_vars)
@@ -287,24 +298,25 @@ class ProjectionPolicy:
                 best_score = candidate_score
                 best_u0 = candidate_u0
 
-        # If no safe solution was found across any polytope, use the backup action.
         if best_u0 is None:
-            best_u0 = self.backup(original_state)
+            best_u0 = self.backup(state)
             shielded = False
+            # best_u0 = action
 
+        self.saved_state = state
         self.saved_action = best_u0
-        return best_u0
+        self.shielded = shielded
+        return best_u0, shielded
 
     def __call__(self, state: np.ndarray) -> np.ndarray:
-        if self.saved_state is not None and \
-                np.allclose(state, self.saved_state):
-            return self.saved_action
+        if self.saved_state is not None and np.allclose(state, self.saved_state):
+            return self.saved_action, self.shielded
         return self.solve(state)
 
     def unsafe(self,
                state: np.ndarray,
                action: np.ndarray) -> bool:
-        res = self.solve(state, action=action)
+        res = self.solve(state, action=action)[0]
         return not np.allclose(res, action)
 
 
@@ -320,6 +332,7 @@ class Shield:
         self.shield = shield_policy
         self.agent = unsafe_policy
         self.shield_times = 0
+        self.backup_times = 0
         self.agent_times = 0
         self.total_time = 0.
 
@@ -327,8 +340,10 @@ class Shield:
         start = time.time()
         proposed_action = self.agent(state, **kwargs)
         if self.shield.unsafe(state, proposed_action):
-            act = self.shield(state)
-            self.shield_times += 1
+            act, shielded  = self.shield(state)
+            self.shield_times += 1 if shielded else 0
+            self.backup_times += 1 if not shielded else 0
+            
             return act
         self.agent_times += 1
         end = time.time()
@@ -336,12 +351,13 @@ class Shield:
         return proposed_action
 
     def report(self) -> Tuple[int, int]:
-        return self.shield_times, self.agent_times, self.total_time
+        return self.shield_times, self.agent_times, self.backup_times, self.total_time
 
     def reset_count(self):
         self.shield_times = 0
         self.agent_times = 0
-        self.total_time = 0.
+        self.backup_times = 0
+        self.total_time = 0
 
 
 class CSCShield:
