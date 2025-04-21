@@ -145,9 +145,9 @@ class PCCDataset(Dataset):
         return len(self.states)
     
     def __getitem__(self, idx):
-        state = torch.tensor(self.states[idx], dtype=torch.float64)
-        action = torch.tensor(self.actions[idx], dtype=torch.float64)
-        next_state = torch.tensor(self.next_states[idx], dtype=torch.float64)
+        state = torch.tensor(self.states[idx], )
+        action = torch.tensor(self.actions[idx], )
+        next_state = torch.tensor(self.next_states[idx], )
         return state, action, next_state
 
 

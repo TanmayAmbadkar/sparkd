@@ -121,7 +121,7 @@ class LunarLanderEnv2(gym.Env):
 
         if self.state_processor is not None:
             # state = self.reduce_state(state)
-            # state = torch.Tensor(state, dtype = torch.float64)
+            # state = torch.Tensor(state, )
             with torch.no_grad():
                 state = self.state_processor(state.reshape(1, -1))
             # state = state.numpy()

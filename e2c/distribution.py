@@ -1,7 +1,5 @@
 import torch
 
-torch.set_default_dtype(torch.float64)
-
 class NormalDistribution:
     def __init__(self, mean, logsig, v=None, r=None, A=None):
         """

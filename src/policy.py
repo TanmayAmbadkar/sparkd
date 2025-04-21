@@ -162,7 +162,6 @@ class ProjectionPolicy:
         res = scipy.optimize.linprog(-m, bounds=bounds)
         # Return the first action
         return res['x'][:u_dim]
-
     
     def solve(self, state: np.ndarray, action: Optional[np.ndarray] = None, debug: bool = False) -> Tuple[np.ndarray, bool]:
         """
@@ -205,8 +204,8 @@ class ProjectionPolicy:
 
         # Iterate over each safe polytope.
         for poly in self.safe_polys:
-            P_poly = poly[:self.ori_state_space.shape[0]*2, :-1]
-            b_poly = poly[:self.ori_state_space.shape[0]*2, -1]
+            P_poly = poly[:, :-1]
+            b_poly = poly[:, -1]
             # print()
             # Skip if the current state is not in the safe polytope.
             if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
@@ -269,7 +268,7 @@ class ProjectionPolicy:
             # Now, the constraints become: M_rest * x + new_bias <= 0, where x represents [u1; ...; u_{H-1}].
             
             # Set up a simple quadratic objective for the future actions (e.g. minimize ||x||^2).
-            P_fixed = 1e-4 * np.eye(fixed_total)
+            P_fixed = 1e-6 * np.eye(fixed_total)
             q_fixed = np.zeros((fixed_total,))
             
             # Also set up bounds for the future actions.
@@ -307,11 +306,24 @@ class ProjectionPolicy:
                     sol_full = cvxopt.solvers.qp(cvxopt.matrix(P_full),
                                                 cvxopt.matrix(q_full),
                                                 cvxopt.matrix(M),
-                                                cvxopt.matrix(-bias))
+                                                cvxopt.matrix(-bias), show_progress = False)
                 except Exception as e:
                     sol_full = {'status': 'infeasible'}
                 if sol_full['status'] != 'optimal':
-                    continue  # try the next safe polytope
+                    P_full = 1e-4 * np.eye(total_vars)
+                    q_full = np.zeros((self.horizon) * u_dim)
+                    try:
+                        sol_full = cvxopt.solvers.qp(cvxopt.matrix(P_full),
+                                                    cvxopt.matrix(q_full),
+                                                    cvxopt.matrix(M),
+                                                    cvxopt.matrix(-bias), show_progress = False)
+                    
+                    except Exception as e:
+                        sol_full = {'status': 'infeasible'}
+                
+                    
+                    if sol_full['status'] != 'optimal':
+                        continue
                 full_sol = np.asarray(sol_full['x']).squeeze()
                 candidate_u0 = full_sol[:u_dim]
                 candidate_score = np.linalg.norm(candidate_u0 - action)

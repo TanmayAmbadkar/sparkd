@@ -83,9 +83,9 @@ class GaussianPolicy(nn.Module):
             self.action_scale = torch.tensor(1.)
             self.action_bias = torch.tensor(0.)
         else:
-            self.action_scale = torch.FloatTensor(
+            self.action_scale = torch.Tensor(
                 (action_space.high - action_space.low) / 2.)
-            self.action_bias = torch.FloatTensor(
+            self.action_bias = torch.Tensor(
                 (action_space.high + action_space.low) / 2.)
 
     def forward(self, state):
@@ -99,7 +99,7 @@ class GaussianPolicy(nn.Module):
         return mean, log_std
 
     def sample(self, state):
-        state = state.double()
+        state = state
         mean, log_std = self.forward(state)
         std = log_std.exp()
         normal = Normal(mean, std)
@@ -135,9 +135,9 @@ class DeterministicPolicy(nn.Module):
             self.action_scale = 1.
             self.action_bias = 0.
         else:
-            self.action_scale = torch.FloatTensor(
+            self.action_scale = torch.Tensor(
                 (action_space.high - action_space.low) / 2.)
-            self.action_bias = torch.FloatTensor(
+            self.action_bias = torch.Tensor(
                 (action_space.high + action_space.low) / 2.)
 
     def forward(self, state):

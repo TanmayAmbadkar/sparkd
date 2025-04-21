@@ -42,9 +42,9 @@ class E2CPredictor(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, u, x_next = batch
-        x = x.double()
-        u = u.double()
-        x_next = x_next.double()
+        x = x
+        u = u
+        x_next = x_next
 
         # Encode states
         z_t, mu, logsig = self.encoder(x)
@@ -108,7 +108,7 @@ class E2CPredictor(pl.LightningModule):
     
     def transform(self, x):
         x = (x - self.mean) / self.std
-        x = torch.tensor(x).double()
+        x = torch.tensor(x)
         # print(x)
         with torch.no_grad():
             z_t = self.encoder.encode(x)
@@ -116,7 +116,7 @@ class E2CPredictor(pl.LightningModule):
         return z_t.numpy()
     
     def inverse_transform(self, x):
-        x = torch.tensor(x).double()
+        x = torch.tensor(x)
         with torch.no_grad():
             z_t = self.decoder.decode(x)
         
@@ -125,8 +125,8 @@ class E2CPredictor(pl.LightningModule):
         return z_t.numpy()
     
     def get_next_state(self, x, u):
-        x = torch.tensor(x).double()
-        u = torch.tensor(u).double()
+        x = torch.tensor(x)
+        u = torch.tensor(u)
         with torch.no_grad():
             # Normalize the input
             x = (x - self.mean) / self.std

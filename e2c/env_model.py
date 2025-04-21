@@ -31,8 +31,8 @@ class MarsE2cModel:
         x_norm = point[:self.original_s_dim ]
         u_norm = point[self.original_s_dim:]
         # Convert to tensors
-        x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
+        x_tensor = torch.tensor(x_norm, ).unsqueeze(0)
+        u_tensor = torch.tensor(u_norm, ).unsqueeze(0)
 
         # Use E2CPredictor to predict next state
         z_t_next = self.e2c_predictor.get_next_state(x_tensor, u_tensor)
@@ -69,8 +69,8 @@ class MarsE2cModel:
         u_norm = point[s_dim:]
 
         # 3. Convert to torch tensors
-        x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
+        x_tensor = torch.tensor(x_norm, ).unsqueeze(0)
+        u_tensor = torch.tensor(u_norm, ).unsqueeze(0)
 
         # 4. Run the E2C transition:
         #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)

@@ -14,13 +14,9 @@ class DeepPoly:
         """
         # Convert inputs to torch tensors with type float64.
         if not torch.is_tensor(lower_bounds):
-            lower_bounds = torch.tensor(lower_bounds, dtype=torch.float64)
-        else:
-            lower_bounds = lower_bounds.double()
+            lower_bounds = torch.Tensor(lower_bounds)
         if not torch.is_tensor(upper_bounds):
-            upper_bounds = torch.tensor(upper_bounds, dtype=torch.float64)
-        else:
-            upper_bounds = upper_bounds.double()
+            upper_bounds = torch.Tensor(upper_bounds)
 
         # Ensure there is a batch dimension.
         if lower_bounds.dim() == 1:
@@ -41,8 +37,8 @@ class DeepPoly:
         if A_L is None:
             # Create initial affine coefficient matrices.
             # They have shape (B, input_size, input_size+1) where the last column is the constant.
-            self.A_L = torch.zeros((batch_size, input_size, input_size + 1), dtype=torch.float64)
-            self.A_U = torch.zeros((batch_size, input_size, input_size + 1), dtype=torch.float64)
+            self.A_L = torch.zeros((batch_size, input_size, input_size + 1), )
+            self.A_U = torch.zeros((batch_size, input_size, input_size + 1), )
             self.A_L[:, :, -1] = self.lower
             self.A_U[:, :, -1] = self.upper
         else:
@@ -63,14 +59,12 @@ class DeepPoly:
 
         # Build the new affine coefficients for the layer.
         base_A = torch.cat([W, b.unsqueeze(1)], dim=1)  # (output_dim, input_dim+1)
-        new_A_L = base_A.unsqueeze(0).expand(batch_size, -1, -1).clone().double()
-        new_A_U = base_A.unsqueeze(0).expand(batch_size, -1, -1).clone().double()
+        new_A_L = base_A.unsqueeze(0).expand(batch_size, -1, -1).clone()
+        new_A_U = base_A.unsqueeze(0).expand(batch_size, -1, -1).clone()
 
         # Compute new bounds with CROWN linearization
-        pos_w = (W >= 0.0).double()  # (output_dim, input_dim)
-        neg_w = (W < 0.0).double()   # (output_dim, input_dim)
-
-        # Apply CROWN linearization (linearize activation at bounds)
+        pos_w = (W >= 0.0)  # (output_dim, input_dim)
+        neg_w = (W < 0.0)   # (output_dim, input_dim)]]
         ub = torch.matmul(self.upper, (pos_w.T * W.T)) + torch.matmul(self.lower, (neg_w.T * W.T)) + b
         lb = torch.matmul(self.lower, (pos_w.T * W.T)) + torch.matmul(self.upper, (neg_w.T * W.T)) + b
 
@@ -88,8 +82,8 @@ class DeepPoly:
 
         new_lower = self.lower.clone().detach()
         new_upper = self.upper.clone().detach()
-        new_A_L = torch.zeros((batch_size, n, n+1), dtype=torch.float64)
-        new_A_U = torch.zeros((batch_size, n, n+1), dtype=torch.float64)
+        new_A_L = torch.zeros((batch_size, n, n+1), )
+        new_A_U = torch.zeros((batch_size, n, n+1), )
 
         # Compute masks for the three cases.
         case1 = self.upper <= 0      # Completely inactive.
@@ -156,13 +150,13 @@ class DeepPoly:
         General method for applying a non-linear activation function in a batched fashion.
         """
         batch_size, n = self.lower.shape
-        new_A_L = torch.zeros((batch_size, n, n+1), dtype=torch.float64)
-        new_A_U = torch.zeros((batch_size, n, n+1), dtype=torch.float64)
+        new_A_L = torch.zeros((batch_size, n, n+1), )
+        new_A_U = torch.zeros((batch_size, n, n+1), )
 
         l_j = self.lower.clone()
         u_j = self.upper.clone()
-        l_prime = func(l_j).double()
-        u_prime = func(u_j).double()
+        l_prime = func(l_j)
+        u_prime = func(u_j)
 
         # For coordinates where the bounds are equal.
         equal_mask = (l_j == u_j)
@@ -182,7 +176,7 @@ class DeepPoly:
             denominator = u_j_neq - l_j_neq
             denominator = torch.where(denominator == 0, torch.full_like(denominator, 1e-6), denominator)
             lambda_val = (func(u_j_neq) - func(l_j_neq)) / denominator
-            lambda_prime = torch.min(func_prime(l_j_neq), func_prime(u_j_neq)).double()
+            lambda_prime = torch.min(func_prime(l_j_neq), func_prime(u_j_neq))
 
             # Update lower affine expressions.
             l_positive_mask = l_j_neq > 0
@@ -309,8 +303,8 @@ class DeepPoly:
             batch_upper_list.append(sub_ub)
             if len(batch_lower_list) == batch_size:
                 # Build batched tensors on the correct device.
-                batched_lower = torch.tensor(np.array(batch_lower_list), dtype=torch.float64, device=device)
-                batched_upper = torch.tensor(np.array(batch_upper_list), dtype=torch.float64, device=device)
+                batched_lower = torch.Tensor(np.array(batch_lower_list), device=device)
+                batched_upper = torch.Tensor(np.array(batch_upper_list), device=device)
                 # Create a batched DeepPoly domain.
                 dp_batch = DeepPoly(batched_lower, batched_upper)
                 # Propagate the entire batch through the network.
@@ -329,8 +323,8 @@ class DeepPoly:
 
         # Process any remaining subdomains.
         if batch_lower_list:
-            batched_lower = torch.tensor(batch_lower_list, dtype=torch.float64, device=device)
-            batched_upper = torch.tensor(batch_upper_list, dtype=torch.float64, device=device)
+            batched_lower = torch.Tensor(np.array(batch_lower_list), device=device)
+            batched_upper = torch.Tensor(np.array(batch_upper_list), device=device)
             dp_batch = DeepPoly(batched_lower, batched_upper)
             dp_batch = propagate_fn(dp_batch)
             lower_batch, upper_batch = dp_batch.calculate_bounds()
@@ -395,10 +389,10 @@ class DeepPoly:
             for i in range(dims):
                 A_upper = np.zeros(dims)
                 A_upper[i] = -1
-                inequalities.append(np.append(A_upper, upper[i].item()))
+                inequalities.append(np.append(A_upper + 0.01, upper[i].item()))
                 A_lower = np.zeros(dims)
                 A_lower[i] = 1
-                inequalities.append(np.append(A_lower, -lower[i].item()))
+                inequalities.append(np.append(A_lower - 0.01, -lower[i].item()))
             return inequalities
         else:
             B, dims = lower.shape
@@ -408,10 +402,10 @@ class DeepPoly:
                 for i in range(dims):
                     A_upper = np.zeros(dims)
                     A_upper[i] = -1
-                    all_inequalities.append(np.array([np.append(A_upper, upper[b, i].item())]))
+                    all_inequalities.append(np.array([np.append(A_upper + 0.01, upper[b, i].item())]))
                     A_lower = np.zeros(dims)
                     A_lower[i] = 1
-                    all_inequalities.append(np.array([np.append(A_lower, -lower[b, i].item())]))
+                    all_inequalities.append(np.array([np.append(A_lower - 0.01, -lower[b, i].item())]))
                 # all_inequalities.append(np.array([inequalities]))3
             return all_inequalities
 

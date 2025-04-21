@@ -110,11 +110,12 @@ while True:
             episode_steps += 1
             total_numsteps += 1
             episode_reward += reward
+            
 
             cost = 0
             if env.unsafe(next_state, False):
-                real_unsafe_episodes += 1
-                episode_reward -= 100
+                real_unsafe_episodes += 1 * (not done)
+                episode_reward -= 100 * (not done)
                 reward = -100
                 print("UNSAFE (outside testing)", shielded)
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
@@ -191,12 +192,10 @@ while True:
         writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
         writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)   
             
-        e2c_mean = env_model.mars.e2c_predictor.mean
-        e2c_std = env_model.mars.e2c_predictor.std
-        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly((env.observation_space.low - e2c_mean)/e2c_std, (env.observation_space.high - e2c_mean)/e2c_std)))
+        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
         
         
-        safety_domain = domains.DeepPoly((env.safety.lower - e2c_mean)/e2c_std, (env.safety.upper - e2c_mean)/e2c_std)
+        safety_domain = domains.DeepPoly(env.safety.lower, env.safety.upper)
         
         safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, safety_domain))
         

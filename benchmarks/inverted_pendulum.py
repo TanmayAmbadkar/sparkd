@@ -3,9 +3,9 @@ import torch
 import numpy as np
 from abstract_interpretation import domains, verification
 
-class InvertedDoublePendulumEnv(gym.Env):
+class InvertedPendulumEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("InvertedDoublePendulum-v5")
+        self.env = gym.make("InvertedPendulum-v5")
 
 
         self.action_space = self.env.action_space

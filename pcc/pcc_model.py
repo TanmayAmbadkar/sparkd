@@ -3,10 +3,6 @@ from torch import nn
 from pcc.networks import Encoder, Decoder, Dynamics, BackwardDynamics
 
 
-torch.set_default_dtype(torch.float64)
-# torch.manual_seed(0)
-
-
 class PCC(nn.Module):
     def __init__(self, amortized: bool, x_dim: int, z_dim: int, u_dim: int):
         super(PCC, self).__init__()
@@ -70,8 +66,8 @@ class PCC(nn.Module):
     @torch.no_grad()
     def predict(self, x: torch.Tensor, u: torch.Tensor):
 
-        x = torch.tensor(x, dtype=torch.float64)
-        u = torch.tensor(u, dtype=torch.float64)
+        x = torch.tensor(x, )
+        u = torch.tensor(u, )
         z_dist = self.encoder(x)
         z = z_dist.mean
         x_recon = self.decode(z)

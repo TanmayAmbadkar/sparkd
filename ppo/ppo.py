@@ -18,7 +18,7 @@ class PPO:
         self.action_space = action_space
 
     def select_action(self, state):
-        state = torch.FloatTensor(state).to(self.device).unsqueeze(0).double()
+        state = torch.Tensor(state).to(self.device).unsqueeze(0)
         action, log_prob = self.actor_critic.act(state)
 
         return action.cpu().detach().numpy()[0], log_prob.cpu().detach().numpy()[0]
@@ -39,9 +39,9 @@ class PPO:
         actions = memory.actions
 
         # Compute value estimates for current and next states using the critic
-        state_tensor = torch.FloatTensor(states).to(self.device).double()
-        next_state_tensor = torch.FloatTensor(next_states).to(self.device).double()
-        actions = torch.FloatTensor(actions).to(self.device).double()
+        state_tensor = torch.Tensor(states).to(self.device)
+        next_state_tensor = torch.Tensor(next_states).to(self.device)
+        actions = torch.Tensor(actions).to(self.device)
         with torch.no_grad():
             values = self.actor_critic.get_value(state_tensor).squeeze().detach()
             next_values = self.actor_critic.get_value(next_state_tensor).squeeze().detach()
@@ -92,7 +92,7 @@ class PPO:
                 # Compute probability ratios
                 ratios = torch.exp(log_probs - log_probs_old[batch_slice])
                 # Compute clip fraction: fraction of samples where ratios are outside [1-eps_clip, 1+eps_clip]
-                clip_fraction = torch.mean(((ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))).float()).item()
+                clip_fraction = torch.mean((ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))).item()
                 total_clip_frac += clip_fraction
 
                 # Approximate KL divergence as the mean difference between old and new log probabilities

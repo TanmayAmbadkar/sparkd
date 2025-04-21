@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from abstract_interpretation.neural_network import LinearLayer, ReLULayer, SigmoidLayer, NeuralNetwork
 
-torch.set_default_dtype(torch.float64)
 
 def weights_init(m):
     if type(m) in [nn.Conv2d, nn.Linear, nn.ConvTranspose2d]:

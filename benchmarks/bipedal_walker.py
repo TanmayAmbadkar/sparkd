@@ -33,21 +33,11 @@ class BipedalWalkerEnv(gym.Env):
         obs_space_upper = self.original_observation_space.high
 
         # Calculate the center of the observation space
-        center = (obs_space_lower + obs_space_upper) / 2
 
         # Initialize the lower and upper bounds arrays
         lower_bounds = np.copy(obs_space_lower)
         upper_bounds = np.copy(obs_space_upper)
 
-        # Modify the specific components based on the constraints
-        # Angular Speed
-        # Set the new bounds for each relevant component
-        # hull angle speed, angular velocity, horizontal speed, vertical speed, position of joints and joints angular speed, legs contact with ground, and 10 lidar rangefinder measurements. 
-        
-#         [-0.5260418  -0.162413   -0.07771564  0.02850035  1.1349214   0.
-#   1.0774546   2.5153055   0.          0.7931532   0.5590972   0.6383554
-#   0.82584924  0.          0.46091083  0.46614516  0.48245916  0.5118689
-#   0.55845267  0.62992734  0.74147916  0.9263216   1.          1.        ]
         #Hull angle speed
         lower_bounds[0] = -2
         upper_bounds[0] = 2
@@ -121,7 +111,7 @@ class BipedalWalkerEnv(gym.Env):
         unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
         self.polys = []
         self.unsafe_domains = unsafe_deeppolys
-        self.polys = unsafe_deeppolys.to_hyperplanes()
+        self.polys = self.safety.invert_polytope()
 
     def step(self, action):
         
@@ -132,7 +122,7 @@ class BipedalWalkerEnv(gym.Env):
         
         if self.state_processor is not None:
             # state = self.reduce_state(state)
-            # state = torch.Tensor(state, dtype = torch.float64)
+            # state = torch.Tensor(state, )
             
             with torch.no_grad():
                 state = self.state_processor(original_state.reshape(1, -1))

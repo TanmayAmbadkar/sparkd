@@ -32,8 +32,8 @@ class MarsE2cModel:
         x_norm = state
         u_norm = action
         # Convert to tensors
-        x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
+        x_tensor = torch.tensor(x_norm, ).unsqueeze(0)
+        u_tensor = torch.tensor(u_norm, ).unsqueeze(0)
 
         # print(x_tensor.shape, u_tensor.shape)
         # Use KoopmanLightning to predict next state
@@ -70,8 +70,8 @@ class MarsE2cModel:
         u_norm = point[s_dim+ self.e2c_predictor.embed_dim:]
 
         # 3. Convert to torch tensors
-        x_tensor = torch.tensor(x_norm, dtype=torch.float64).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, dtype=torch.float64).unsqueeze(0)
+        x_tensor = torch.tensor(x_norm, ).unsqueeze(0)
+        u_tensor = torch.tensor(u_norm, ).unsqueeze(0)
 
         # 4. Run the E2C transition:
         #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)

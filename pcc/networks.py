@@ -6,9 +6,6 @@ from torch.distributions.independent import Independent
 from torch.distributions.normal import Normal
 
 
-torch.set_default_dtype(torch.float64)
-
-
 def MultivariateNormalDiag(loc, scale_diag):
     if loc.dim() < 1:
         raise ValueError("loc must be at least one-dimensional.")

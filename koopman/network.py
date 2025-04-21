@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 from torchmetrics.regression import ExplainedVariance
 
 # If you are using the abstract_interpretation package:
-from abstract_interpretation.neural_network import LinearLayer, ReLULayer, SigmoidLayer, NeuralNetwork
+from abstract_interpretation.neural_network import LinearLayer, ReLULayer, TanhLayer, NeuralNetwork
 
 ###############################################
 # 1. Modified Dataset Class for Sequences (s, a, s_next) #
@@ -58,7 +58,8 @@ class StateEmbedding(nn.Module):
         self.embed_net = NeuralNetwork([
             LinearLayer(state_dim, embed_dim), 
             ReLULayer(), 
-            LinearLayer(embed_dim, embed_dim)
+            LinearLayer(embed_dim, embed_dim),
+            TanhLayer()
         ])
         self.state_dim = state_dim
 
@@ -67,10 +68,6 @@ class StateEmbedding(nn.Module):
         features = self.embed_net(s)  # shape: (batch, embed_dim)
         z = torch.cat([s, features], dim=-1)  # shape: (batch, state_dim + embed_dim)
         return z
-
-import torch
-import torch.nn as nn
-
 class KoopmanOperator(nn.Module):
     """
     Implements the Koopman operator for multi-step prediction with affine term:
@@ -169,9 +166,9 @@ class KoopmanLightning(pl.LightningModule):
         # batch['states']: (B, horizon+1, state_dim)
         # batch['actions']: (B, horizon, action_dim)
         # batch['next_states']: (B, horizon+1, state_dim)
-        states = batch['states'].double()
-        actions = batch['actions'].double()
-        next_states = batch['next_states'].double()
+        states = batch['states']
+        actions = batch['actions']
+        next_states = batch['next_states']
         
         # Corrected target calculation:
         # Target states are s_1, s_2, ..., s_horizon from the ground truth
@@ -205,9 +202,9 @@ class KoopmanLightning(pl.LightningModule):
         # batch['states']: (B, horizon+1, state_dim)
         # batch['actions']: (B, horizon, action_dim)
         # batch['next_states']: (B, horizon+1, state_dim)
-        states = batch['states'].double()
-        actions = batch['actions'].double()
-        next_states = batch['next_states'].double()
+        states = batch['states']
+        actions = batch['actions']
+        next_states = batch['next_states']
         
         # Corrected target calculation:
         # Target states are s_1, s_2, ..., s_horizon from the ground truth
@@ -251,7 +248,7 @@ class KoopmanLightning(pl.LightningModule):
         Returns:
             A numpy array of the latent representation of shape (B, state_dim+embed_dim) or (state_dim+embed_dim,)
         """
-        x = torch.tensor(x).double()
+        x = torch.tensor(x)
         if x.dim() == 1:
             x = x.unsqueeze(0)
         return self.embedding_net(x).detach().cpu().numpy()
@@ -265,8 +262,8 @@ class KoopmanLightning(pl.LightningModule):
         Returns:
             pred_latents: Predicted latent states of shape (B, horizon, state_dim+embed_dim)
         """
-        states = torch.tensor(states).double()
-        actions = torch.tensor(actions).double()
+        states = torch.tensor(states)
+        actions = torch.tensor(actions)
 
         z = self.embedding_net(states)   # shape: (B, embed_total_dim)
         z = self.koopman_operator(z, actions)   # shape: (B, embed_total_dim)
@@ -295,8 +292,9 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=1)
     val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, num_workers=1)
 
-    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
+    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1, precision = 16)
     trainer.fit(koopman_model, train_loader, val_loader)
+    torch.cuda.empty_cache()
 
     del trainer
     del train_loader

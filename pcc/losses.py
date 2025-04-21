@@ -4,8 +4,6 @@ from pcc.networks import MultivariateNormalDiag
 from torch.distributions.kl import kl_divergence
 
 
-torch.set_default_dtype(torch.float64)
-
 
 def bernoulli(x, p):
     p = p.probs

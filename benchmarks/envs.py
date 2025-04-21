@@ -40,8 +40,8 @@ def get_env_from_name(name):
         from .bipedal_walker import BipedalWalkerEnv
         return BipedalWalkerEnv()
     if name == 'inverted_pendulum':
-        from .inverted_pendulum import InvertedDoublePendulumEnv
-        return InvertedDoublePendulumEnv()
+        from .inverted_pendulum import InvertedPendulumEnv
+        return InvertedPendulumEnv()
     if name == 'hopper':
         from .hopper import HopperEnv
         return HopperEnv()
