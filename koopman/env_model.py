@@ -32,8 +32,8 @@ class MarsE2cModel:
         x_norm = state
         u_norm = action
         # Convert to tensors
-        x_tensor = torch.tensor(x_norm, ).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, ).unsqueeze(0)
+        x_tensor = torch.tensor(x_norm, )
+        u_tensor = torch.tensor(u_norm, )
 
         # print(x_tensor.shape, u_tensor.shape)
         # Use KoopmanLightning to predict next state
@@ -41,7 +41,7 @@ class MarsE2cModel:
 
         # Predict next latent state
         
-        return z_t_next.squeeze(0).detach().cpu().numpy()
+        return z_t_next.detach().cpu().numpy()
 
     def get_matrix_at_point(self, point: np.ndarray, s_dim: int, steps: int = 1, normalized: bool = False):
         """
@@ -65,13 +65,13 @@ class MarsE2cModel:
         # if not normalized:
         #     point = (point - self.inp_means) / self.inp_stds
 
-        # 2. Split into state (x_norm) and action (u_norm)
-        x_norm = point[:s_dim + self.e2c_predictor.embed_dim]
-        u_norm = point[s_dim+ self.e2c_predictor.embed_dim:]
+        # 2. Split into state (x_norm) and action (u_norm))
+        x_norm = point[:s_dim]
+        u_norm = point[s_dim:]
 
         # 3. Convert to torch tensors
-        x_tensor = torch.tensor(x_norm, ).unsqueeze(0)
-        u_tensor = torch.tensor(u_norm, ).unsqueeze(0)
+        x_tensor = torch.Tensor(x_norm).unsqueeze(0)
+        u_tensor = torch.Tensor(u_norm).unsqueeze(0)
 
         # 4. Run the E2C transition:
         #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)
@@ -84,7 +84,7 @@ class MarsE2cModel:
         # 5. Convert PyTorch tensors to NumPy, remove batch dimension
         A_t = A_t.detach().cpu().numpy()   # shape [s_dim, s_dim]
         B_t = B_t.detach().cpu().numpy()    # shape [s_dim, u_dim]C
-        c_t = c_t.detach().cpu().numpy()    # shape [s_dim]
+        c_t = c_t.squeeze(0).detach().cpu().numpy()    # shape [s_dim]
         # c_T = np.zeros(A_t.shape[0]) 
 
         # 6. Construct M by stacking [A | B | c], giving shape [s_dim, s_dim + u_dim + 1]
@@ -94,8 +94,9 @@ class MarsE2cModel:
         # 7. Compute eps as the diagonal of A_t @ A_t^T.
         #    That yields a 1D array of length s_dim.
         # eps = np.diag(A_tA_tT) # shape [s_dim]
-        eps = np.zeros_like(c_t)
-
+        # eps = np.zeros_like(c_t)
+        # eps = self.e2c_predictor.get_eps(x_tensor, u_tensor).squeeze(0).detach().cpu().numpy()
+        eps = self.error
         return M, eps
 
 
@@ -224,7 +225,7 @@ def get_environment_model(     # noqa: C901
     
     print(input_states.shape, actions.shape, output_states.shape)
     parsed_mars = MarsE2cModel(e2c_predictor, latent_dim, input_states.shape[-1])
-    Yh = np.array([parsed_mars(state, action, normalized=True) for state, action in zip(input_states, actions)])
+    Yh = parsed_mars(input_states, actions, normalized=True)
 
     output_states = parsed_mars.e2c_predictor.transform(output_states)
     # output_states = output_states.reshape(-1, input_states.shape[-1])
@@ -243,36 +244,41 @@ def get_environment_model(     # noqa: C901
         print(f"R2 Score, horizon {i}:", r2)
                 
             # number of output dims
-        n_out = output_states.shape[-1]
+    n_out = output_states.shape[-1]
 
-        # 1) compute dimension‑wise maximum abs‑error over all samples & timesteps
-        #    (broadcast output_states across the middle axis of Yh)
-        #    Yh: (n_samples, n_steps, n_out)
-        #    output_states: (n_samples, n_out)
-        diff_dim = np.max(
-            np.abs(
-                Yh[:, 0] 
-                - output_states[:, 0, :]
-            ),
-            axis=0 # max over samples and steps, leave shape (n_out,)
-        )
+    # 1) compute dimension‑wise maximum abs‑error over all samples & timesteps
+    #    (broadcast output_states across the middle axis of Yh)
+    #    Yh: (n_samples, n_steps, n_out)
+    #    output_states: (n_samples, n_out)
+            
+        # 1) Compute the absolute residuals for every (sample, step, feature)
+    res = np.abs(
+        Yh[:, 0] 
+        - output_states[:, 0, :]
+    )           # shape: (N, T, n_out)
 
-        # 2) compute your conf interval (this will be a scalar or (n_out,) already)
-        conf = data_stddev * np.sqrt(
-            scipy.stats.chi2.ppf(0.9, output_states.shape[1])
-        )
-        # if conf is a scalar, broadcast to length n_out
-        if np.ndim(conf) == 0:
-            conf = np.full(n_out, conf)
+    # 2) Flatten over samples & time
+    res_flat = res.reshape(-1, n_out)             # shape: (N*T, n_out))
 
-        # 3) final per‑dimension error bound
-        err = diff_dim + conf
+    # 3) Empirical max
 
-        # 4) for logging, show only the worst dimension
-        print("Max error:", err)
+    # 4) Empirical 95%-quantile (or whatever α you choose)
+    quantile = np.percentile(res_flat, 99, axis=0)   # shape: (n_out,)
 
-        # 5) still store the full vector
-        parsed_mars.error = err
+    q1 = np.percentile(res_flat, 25, axis=0)   # shape: (n_out,)
+    q3 = np.percentile(res_flat, 75, axis=0)   # shape: (n_out,)
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+    print("Below LB", res_flat[res_flat < lower_bound].shape)
+    print("Above UB", res_flat[res_flat > upper_bound].shape)
+    print(quantile)
+    print(upper_bound)
+    
+    print("Max error:", upper_bound)
+
+    # 5) still store the full vector
+    parsed_mars.error = upper_bound
 
 
 

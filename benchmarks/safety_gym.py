@@ -11,14 +11,15 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.env = gym.make("SafetyPointGoal1-v0", render_mode = "rgb_array")
         self.action_space = self.env.action_space
         
-        self.observation_space = gymnasium.spaces.Box(low=np.concatenate((np.array([-5, -19, -9.82, -0.8, -0.2, -0.1, -0.1, -0.1, -5., -1,
-                -0.52, -0.1, ]), np.zeros(48))), high=np.concatenate((np.array([5, 19, 9.82, 0.8, 0.2, 0.1, 0.1, 0.1, 5., 1,
-                0.52, 0.1, ]), np.ones(48))), shape=self.env.observation_space.shape) if state_processor is None else gymnasium.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
+        self.observation_space = gymnasium.spaces.Box(
+            low=np.nan_to_num(self.env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333),
+            high=np.nan_to_num(self.env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333),
+            dtype=np.float32
+        )
 
 #[-5,   -19,  -9.82, -0.8, -0.2,  -0.1, -0.1, 0.1, -3.,  -0.5, -0.52, -0.1, ]
 #[-2.69 -2.73  9.81  -0.06 -0.04  0.    0.    0.    2.23  0.5  -0.04  0.
 
-        self.original_observation_space = self.observation_space
         self.state_processor = state_processor
         self.safety = safety
 
@@ -29,8 +30,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.safe_polys = []
         self.polys = []
         
-        self.MIN = np.array([-5, -19, 9.8, -0.8, -0.2, -0.1, -0.1, -0.1, -3, -0.5,
-                -0.52, -0.1, 0., 0., 0., 0., 0., 0., 0., 0.,
+        self.MIN = np.array([-100, -100, -100, -100, -100, -100, -100, -100, -100, -100,
+                -100, -0.1, 0., 0., 0., 0., 0., 0., 0., 0.,
                 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
                 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
                 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
@@ -56,12 +57,12 @@ class SafetyPointGoalEnv(gymnasium.Env):
         obs_space_lower = self.observation_space.low
         obs_space_upper = self.observation_space.high
 
-        # Calculate the center of the observation space
-        center = (obs_space_lower + obs_space_upper) / 2
 
         # Initialize the lower and upper bounds arrays
         lower_bounds = np.copy(obs_space_lower)
         upper_bounds = np.copy(obs_space_upper)
+        lower_bounds = np.nan_to_num(lower_bounds, nan=-9999, posinf=33333333, neginf=-33333333)
+        upper_bounds = np.nan_to_num(upper_bounds, nan=-9999, posinf=33333333, neginf=-33333333)
 
         # lower_bounds[:12] = [ -4.12, -18.4, 9.80, -0.63, -0.18, -0.1,     -0.1,     -0.1,    -3,    -0.5, -0.51,   -0.1,  ]
         # upper_bounds[:12] =  [ 4.01, 18.39,  9.82,  0.72,  0.15,  0.1,    0.1,    0.1,   3,    0.5,   0.51,  0.1,  ]
@@ -90,10 +91,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
         
     def unsafe_constraints(self):
         
-        unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
-        self.polys = []
-        self.unsafe_domains = unsafe_deeppolys
-        self.polys = unsafe_deeppolys.to_hyperplanes()
+        self.polys = self.safety.invert_polytope(self.env.observation_space)
+        print(len(self.polys))
             
         
     def step(self, action):
@@ -101,39 +100,18 @@ class SafetyPointGoalEnv(gymnasium.Env):
         state, reward, cost, done, truncation, info = self.env.step(action)
         self.done = done or self.step_counter >= self._max_episode_steps# Store the done flag
 
-        original_state = np.copy(state)
-        if self.state_processor is not None:
-            # state = self.reduce_state(state)
-            # state = torch.Tensor(state, )
-            with torch.no_grad():
-                state = self.state_processor(state.reshape(1, -1))
-            # state = state.numpy()
-            state = state.reshape(-1,)
-            # original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
-            
         self.step_counter+=1
         
-        return state, reward, self.done, truncation, {"state_original": original_state}
+        return state, reward, self.done, truncation, {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)
 
         self.step_counter = 0
         self.done = False 
-        original_state = np.copy(state)
-        if self.state_processor is not None:
-            # state = self.reduce_state(state)
-            # state = torch.Tensor(state)
-            with torch.no_grad():
-                state = self.state_processor(state.reshape(1, -1))
-            # state = state.numpy()
-            state = state.reshape(-1,)
-            # original_state = normalize_constraints(original_state, self.MIN, self.MAX, target_range=(-1, 1))
-        # else:
-        #     state = normalize_constraints(state, self.MIN, self.MAX, target_range=(-1, 1))
-        
+       
             
-        return state, {"state_original": original_state}
+        return state, {}
 
     def render(self, mode='human'):
         return self.env.render()

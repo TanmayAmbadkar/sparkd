@@ -341,7 +341,7 @@ class DeepPoly:
 
         return joined_lower, joined_upper
 
-    def to_hyperplanes(self):
+    def to_hyperplanes(self, observation_space=None):
         """
         Convert the DeepPoly domain into a set of hyperplane inequalities.
         Each dimension yields two hyperplanes.
@@ -349,17 +349,24 @@ class DeepPoly:
         If the domain is batched (shape (B, n)), the function returns a list of length B,
         where each entry is a list of 2*n hyperplane inequalities (each a NumPy array).
         """
-        lower, upper = self.calculate_bounds()
+        lower, upper = self.lower, self.upper
         if lower.ndim == 1:
             dims = lower.shape[0]
             inequalities = []
             for i in range(dims):
                 A_upper = np.zeros(dims)
                 A_upper[i] = 1
-                inequalities.append(np.append(A_upper, -upper[i].item()))
                 A_lower = np.zeros(dims)
                 A_lower[i] = -1
-                inequalities.append(np.append(A_lower, lower[i].item()))
+                if observation_space is not None:
+                    if observation_space.high[i] != upper[i].item():
+                        inequalities.append(np.append(A_upper, -upper[i].item()))
+                    if observation_space.low[i] != lower[i].item():              
+                        inequalities.append(np.append(A_lower, lower[i].item()))
+                else:                    
+                    inequalities.append(np.append(A_upper, -upper[i].item()))    
+                    inequalities.append(np.append(A_lower, lower[i].item()))
+                
             return inequalities
         else:
             B, dims = lower.shape
@@ -369,30 +376,47 @@ class DeepPoly:
                 for i in range(dims):
                     A_upper = np.zeros(dims)
                     A_upper[i] = 1
-                    inequalities.append(np.append(A_upper, -upper[b, i].item()))
                     A_lower = np.zeros(dims)
                     A_lower[i] = -1
-                    inequalities.append(np.append(A_lower, lower[b, i].item()))
+                    if observation_space is not None:
+                        if observation_space.high[i] != upper[b, i].item():
+                            inequalities.append(np.append(A_upper, -upper[b, i].item()))
+                        if observation_space.low[i] != lower[b, i].item():                
+                            inequalities.append(np.append(A_lower, lower[b, i].item()))
+                    else:                    
+                        inequalities.append(np.append(A_upper, -upper[b, i].item()))
+                        inequalities.append(np.append(A_lower, lower[b, i].item()))
+                    
+                    # inequalities.append(np.append(A_upper, -upper[b, i].item()))
+                    # inequalities.append(np.append(A_lower, lower[b, i].item()))
                 all_inequalities.append(np.array(inequalities))
+                
             return all_inequalities
         
-    def invert_polytope(self):
+    def invert_polytope(self, observation_space = None):
 
         """
         Invert the DeepPoly domain to obtain the set of hyperplanes.
         This is done by negating the lower and upper bounds.
         """
-        lower, upper = self.calculate_bounds()
+        lower, upper = self.lower, self.upper
         if lower.ndim == 1:
             dims = lower.shape[0]
             inequalities = []
             for i in range(dims):
                 A_upper = np.zeros(dims)
                 A_upper[i] = -1
-                inequalities.append(np.append(A_upper + 0.01, upper[i].item()))
                 A_lower = np.zeros(dims)
                 A_lower[i] = 1
-                inequalities.append(np.append(A_lower - 0.01, -lower[i].item()))
+                if observation_space is not None:
+                    if observation_space.high[i] != upper[i].item():
+                        inequalities.append(np.expand_dims(np.append(A_upper, upper[i].item() + 0.01), axis=0))
+                    if observation_space.low[i] != lower[i].item():                
+                        inequalities.append(np.expand_dims(np.append(A_lower, -lower[i].item() + 0.01), axis=0))
+                else:                    
+                    inequalities.append(np.expand_dims(np.append(A_upper, upper[i].item() + 0.01), axis=0))    
+                    inequalities.append(np.expand_dims(np.append(A_lower, -lower[i].item() + 0.01), axis=0))
+                    
             return inequalities
         else:
             B, dims = lower.shape
@@ -402,10 +426,17 @@ class DeepPoly:
                 for i in range(dims):
                     A_upper = np.zeros(dims)
                     A_upper[i] = -1
-                    all_inequalities.append(np.array([np.append(A_upper + 0.01, upper[b, i].item())]))
                     A_lower = np.zeros(dims)
                     A_lower[i] = 1
-                    all_inequalities.append(np.array([np.append(A_lower - 0.01, -lower[b, i].item())]))
+                    
+                    if observation_space is not None:
+                        if observation_space.high[i] != upper[b, i].item():
+                            all_inequalities.append(np.expand_dims(np.append(A_upper, upper[b, i].item() + 0.01), axis=0))
+                        if observation_space.low[i] != lower[b, i].item():                
+                            all_inequalities.append(np.expand_dims(np.append(A_lower, -lower[b, i].item() + 0.01), axis=0))
+                    else:                    
+                        all_inequalities.append(np.expand_dims(np.append(A_lower, -lower[b, i].item() + 0.01), axis=0))
+                        all_inequalities.append(np.expand_dims(np.append(A_upper, upper[b, i].item() + 0.01), axis=0))
                 # all_inequalities.append(np.array([inequalities]))3
             return all_inequalities
 

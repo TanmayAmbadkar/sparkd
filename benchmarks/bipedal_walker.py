@@ -95,10 +95,11 @@ class BipedalWalkerEnv(gym.Env):
 
         # Construct the polyhedra constraints (polys)
         
-        print(lower_bounds, upper_bounds)
            
         input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
-        polys = input_deeppoly_domain.to_hyperplanes()
+        polys = input_deeppoly_domain.to_hyperplanes(self.env.observation_space)
+        
+        print("NUMBER OF SAFE POLYS", len(polys[0]))
 
         # Set the safety constraints using the DeepPolyDomain and the polys
         self.safety = input_deeppoly_domain
@@ -108,10 +109,14 @@ class BipedalWalkerEnv(gym.Env):
       
     def unsafe_constraints(self):
         
-        unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
-        self.polys = []
-        self.unsafe_domains = unsafe_deeppolys
-        self.polys = self.safety.invert_polytope()
+        # unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
+        # self.polys = []
+        # self.unsafe_domains = unsafe_deeppolys
+        # self.polys = self.safety.invert_polytope()
+        self.polys = self.safety.invert_polytope(self.env.observation_space)
+        
+        print("NUMBER OF UNSAFE POLYS", len(self.polys))
+
 
     def step(self, action):
         

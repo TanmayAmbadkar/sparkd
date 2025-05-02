@@ -36,7 +36,9 @@ class AccEnv(gym.Env):
 
         self.safety = domains.DeepPoly(
                 np.array([-10, -10]),
-                np.array([-0.01, 10]))
+                np.array([-0.01, 10])
+        )
+        
         
     def reset(self) -> np.ndarray:
         self.state = self.init_space.sample()

@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from ppo.model import ActorCritic
 import numpy as np
+from sklearn.metrics import explained_variance_score
 
 class PPO:
     def __init__(self, obs_dim, action_space, args):
@@ -32,11 +33,11 @@ class PPO:
         Stores the computed returns and advantages into memory.
         """
         # Convert stored lists to arrays
-        states = memory.states
-        rewards = memory.rewards
-        dones = memory.dones
-        next_states = memory.next_states
-        actions = memory.actions
+        states = memory.states[:memory.size]
+        rewards = memory.rewards[:memory.size]
+        dones = memory.dones[:memory.size]
+        next_states = memory.next_states[:memory.size]
+        actions = memory.actions[:memory.size]
 
         # Compute value estimates for current and next states using the critic
         state_tensor = torch.Tensor(states).to(self.device)
@@ -81,6 +82,16 @@ class PPO:
 
 
         for _ in range(epochs):
+            # Initialize accumulators for logging
+            total_policy_loss = 0.0
+            total_value_loss = 0.0
+            total_entropy_loss = 0.0
+            total_loss = 0.0
+            total_clip_frac = 0.0
+            total_kl_div = 0.0
+            total_explained_var = 0.0  # Accumulator for explained variance
+            num_updates = 0
+
             for idx in range(0, len(states), batch_size):
                 batch_slice = slice(idx, idx + batch_size)
 
@@ -92,7 +103,10 @@ class PPO:
                 # Compute probability ratios
                 ratios = torch.exp(log_probs - log_probs_old[batch_slice])
                 # Compute clip fraction: fraction of samples where ratios are outside [1-eps_clip, 1+eps_clip]
-                clip_fraction = torch.mean((ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))).item()
+                clipped_mask = (ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))
+
+                clip_fraction = torch.mean(clipped_mask.float()).item()
+                
                 total_clip_frac += clip_fraction
 
                 # Approximate KL divergence as the mean difference between old and new log probabilities
@@ -114,11 +128,10 @@ class PPO:
 
                 loss = policy_loss + self.value_coeff * value_loss - self.entropy_coeff * entropy_loss
 
-                # Compute explained variance for the critic:
-                # EV = 1 - Var(returns - values) / (Var(returns) + eps)
-                var_returns = returns[batch_slice].var()
-                var_errors = (returns[batch_slice] - values).var()
-                explained_variance = 1.0 - var_errors / (var_returns + 1e-8)
+                explained_variance = explained_variance_score(
+                    returns[batch_slice].detach().cpu().numpy(),
+                    values.detach().cpu().numpy(),
+                )
                 total_explained_var += explained_variance.item()
 
                 # Accumulate losses and count updates

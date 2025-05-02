@@ -25,7 +25,7 @@ parser.add_argument('--mini_batch_size', type=int, default=64)
 parser.add_argument('--num_steps', type=int, default=200000)
 parser.add_argument('--hidden_size', type=int, default=64)
 parser.add_argument('--replay_size', type=int, default=1000000)
-parser.add_argument('--start_steps', type=int, default=3000)
+parser.add_argument('--start_steps', type=int, default=5000)
 parser.add_argument('--cuda', action="store_true")
 parser.add_argument('--horizon', type=int, default=20)
 parser.add_argument('--red_dim', type=int, default = 20)
@@ -51,7 +51,7 @@ print(hyperparams)
 if not os.path.exists("logs_ppo"):
     os.makedirs("logs_ppo")
 
-file = open('logs_ppo/{}_PPO_{}_H{}_D{}.txt'.format(
+file = open('runs_ppo/{}_PPO_{}_H{}_D{}/log.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim), "w+")
 
@@ -59,7 +59,6 @@ file = open('logs_ppo/{}_PPO_{}_H{}_D{}.txt'.format(
 
 # Replay memories
 real_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
-e2c_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
 
 
 iterator_loop = itertools.count(1)
@@ -77,18 +76,15 @@ unsafe_test_episodes = 0
 total_test_episodes = 0
 unsafe_sim_episodes = 0
 total_sim_episodes = 0
+train_steps = 1
 while True:
     i_episode = next(iterator_loop)
     episode_reward = 0
     episode_steps = 0
     done = False
     trunc = False
-    while True:
-        state, info = env.reset()
-        if not env.unsafe(state, False):
-            break
-    
-    next_state_pred = state
+    state, info = env.reset()
+    unsafe_flag = False
     if True:
 
         print(i_episode, ": Real data")
@@ -103,9 +99,6 @@ while True:
                 shielded = None
 
             next_state, reward, done, trunc, info = env.step(action)
-            if safe_agent is not None:
-                next_state_pred = env_model.mars.e2c_predictor.get_next_state(next_state_pred[:env.observation_space.shape[0]], action)
-                next_state_pred = next_state_pred.reshape(-1, )
                 
             episode_steps += 1
             total_numsteps += 1
@@ -114,14 +107,16 @@ while True:
 
             cost = 0
             if env.unsafe(next_state, False):
-                real_unsafe_episodes += 1 * (not done)
-                episode_reward -= 100 * (not done)
+
+                real_unsafe_episodes += 1 * (not unsafe_flag)
+                episode_reward -= 100 * (not unsafe_flag)
                 reward = -100
                 print("UNSAFE (outside testing)", shielded)
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = done or (True if safe_agent is not None else False)
                 cost = 1
 
+                unsafe_flag = True or unsafe_flag
             # Ignore the "done" signal if it comes from hitting the time
             # horizon.
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
@@ -161,11 +156,11 @@ while True:
         
         total_real_episodes += 1 
 
-    if ((i_episode-1) // 10) % 10 == 0 and ((i_episode) // 10) % 10 != 0 and not args.no_safety:
+    if total_numsteps >= args.start_steps * train_steps:
     # if False:
+        train_steps*=2
         try:
             
-            print("E2C DATA", len(e2c_data))
             states, actions, rewards, next_states, dones, costs = \
                 real_data.sample(batch_size = min(len(real_data), 100000), get_cost=True, remove_samples=False, horizon = args.horizon)
                 
@@ -177,9 +172,9 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.e2c_predictor.lr = 0.00003
+            env_model.mars.e2c_predictor.lr = 0.00001
             e2c_predictor = env_model.mars.e2c_predictor
-            epochs = 40
+            epochs = 80
         else:
             e2c_predictor = None
             epochs = 200
@@ -192,30 +187,31 @@ while True:
         writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
         writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)   
             
-        new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
+        # new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
         
         
-        safety_domain = domains.DeepPoly(env.safety.lower, env.safety.upper)
+        # safety_domain = domains.DeepPoly(env.safety.lower, env.safety.upper)
         
-        safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, safety_domain))
+        # safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, safety_domain))
         
         
         
             
-        safety = domains.DeepPoly(torch.cat([env.safety.lower[0], safety.lower[0]]), torch.cat([env.safety.upper[0], safety.upper[0]]))
+        safety = domains.DeepPoly(torch.cat([env.safety.lower[0], -torch.ones(args.red_dim, )]), torch.cat([env.safety.upper[0], torch.ones(args.red_dim, )]))
 
-        polys = safety.to_hyperplanes()
-
-
-        new_obs_space = gym.spaces.Box(low=np.concatenate([env.observation_space.low, new_obs_space_domain.lower[0].detach().numpy()]), high=np.concatenate([env.observation_space.high, new_obs_space_domain.upper[0].detach().numpy()]), shape=(args.red_dim + env.observation_space.shape[0],))
         
-        print("LATENT SAFETY", safety)
-        print("LATENT OBS SPACE", new_obs_space)
 
-        unsafe_domains = domains.recover_safe_region(domains.DeepPoly(new_obs_space.low, new_obs_space.high), [safety])
+        new_obs_space = gym.spaces.Box(low=np.concatenate([env.observation_space.low, -np.ones(args.red_dim, )]), high=np.concatenate([env.observation_space.high, np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
+        polys = safety.to_hyperplanes(new_obs_space)
+        print("LATENT OBS SPACE", new_obs_space)
+        
+        unsafe_domains = safety.invert_polytope(new_obs_space)
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.e2c_predictor.transform
-        env.transformed_polys = unsafe_domains.to_hyperplanes()
+        env.transformed_polys = unsafe_domains
+        
+        print("LATENT SAFETY", safety, len(polys[0]))
+        print("LATENT UNSAFETY",  len(env.transformed_polys))
         shield = ProjectionPolicy(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.e2c_predictor.transform)
@@ -232,7 +228,7 @@ while True:
     if safe_agent is not None:
         safe_agent.reset_count()
 
-    if (i_episode - 99) % 1 == 0:
+    if i_episode % 10 == 0:
         print("starting testing...")
         avg_reward = 0.
         episodes = 1
@@ -267,6 +263,7 @@ while True:
                 else:
                     action = agent(state)
                     shielded = None
+
 
                 next_state, reward, done, trunc, info = env.step(action)
                 episode_reward += reward
