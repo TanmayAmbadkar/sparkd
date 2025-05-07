@@ -90,9 +90,9 @@ class StateEmbedding(nn.Module):
         self.embed_net = NeuralNetwork([
             LinearLayer(state_dim, 256), 
             ReLULayer(), 
-            LinearLayer(256, 128),
+            LinearLayer(256, 256),
             ReLULayer(), 
-            LinearLayer(128, embed_dim),
+            LinearLayer(256, embed_dim),
             TanhLayer()
         ])
         self.state_dim = state_dim
@@ -122,7 +122,7 @@ class KoopmanOperator(nn.Module):
             nn.ReLU(), 
             nn.Linear(128, embed_total_dim),
         )
-        
+        self.embed_total_dim = embed_total_dim
         # self.c.weight.data.fill_(0.0)  # Initialize c to zero
         # self.c.bias.data.fill_(0.0)    # Initialize c to zero
         # self.c.require_grad = False  # Disable gradient updates for c
@@ -130,7 +130,8 @@ class KoopmanOperator(nn.Module):
     def forward(self, z, u):
         # z: (batch_size, embed_total_dim)
         # u: (batch_size, control_dim)
-        return self.A(z) + self.B(u) + self.c(torch.cat([z, u], dim=-1))
+        # return self.A(z) + self.B(u) + self.c(torch.cat([z, u], dim=-1))
+        return self.A(z) + self.B(u)
 
     def get_koopman_operators(self, z, u):
         """
@@ -142,88 +143,54 @@ class KoopmanOperator(nn.Module):
         # clone to avoid in-place modifications
         A_w = self.A.weight.data.clone()
         B_w = self.B.weight.data.clone()
-        return A_w, B_w, self.c( torch.cat([z, u], dim=-1)).data.clone()
+        return A_w, B_w, torch.zeros(self.embed_total_dim, dtype=torch.float32)
+        # return A_w, B_w, self.c( torch.cat([z, u], dim=-1)).data.clone()
+
+
+class UncertaintyNet(pl.LightningModule):
+    
+    def __init__(self, state_dim, control_dim, quantile: float = 0.95, lr: float = 1e-3):
+        super(UncertaintyNet, self).__init__()
+        self.state_dim = state_dim
+        self.control_dim = control_dim
+        self.quantile = quantile
+        self.lr = lr
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + control_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, state_dim),
+            nn.ReLU()
+        )
+        
+    def forward(self, z, u):
+        return self.net(torch.cat([z, u], dim=-1))
+    
+    def training_step(self, batch, batch_idx):
+        z = batch['states']       # (B, state_dim)
+        u = batch['actions']      # (B, control_dim)
+        r_true = torch.abs(batch['residuals'])  # (B, state_dim+control_dim)
+        
+        r_pred = self(z, u)
+        error = (r_true - r_pred)**2  # shape (B, state_dim+control_dim)
+        
+        # Pinball (quantile) loss
+        # q = self.quantile
+        # loss_matrix = torch.maximum(q * error, (q - 1) * error)**2
+        loss = error.mean()
+        
+        self.log('loss', loss, prog_bar=True, on_epoch=True, on_step=True)
+        self.log("ev", explained_variance(r_pred.flatten(), r_true.flatten() , multioutput='uniform_average'), prog_bar=True, on_step=False, on_epoch=True)
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.lr)
 
 
 ##########################################################
 # 3. PyTorch Lightning Module for Multi-Step Koopman Learning #
 ##########################################################
-
-class UncertaintyNet(pl.LightningModule):
-    """
-    Uncertainty network with spectral normalization to enforce a Lipschitz bound.
-    """
-    def __init__(self, embed_total_dim: int, action_dim: int, lip_const: float = 1.0, penalty_coef: float = 1.0):
-        """
-        Args:
-            embed_total_dim: dimensionality of the latent + state embedding (input to network).
-            action_dim: dimensionality of the control input.
-            lip_const: desired Lipschitz constant (default = 1.0).
-            penalty_coef: weight on gradient‐penalty term.
-        """
-        super().__init__()
-        self.lip_const = lip_const
-        self.penalty_coef = penalty_coef
-        
-        # Spectral-normalized layers
-        self.eps_net = nn.Sequential(
-            spectral_norm(nn.Linear(embed_total_dim + action_dim, embed_total_dim)),
-            nn.ReLU(),
-            spectral_norm(nn.Linear(embed_total_dim, embed_total_dim)),
-            nn.ReLU(),
-            spectral_norm(nn.Linear(embed_total_dim, embed_total_dim))
-        )
-        
-        self.ev = ExplainedVariance()
-        self.criterion = nn.MSELoss()
-
-    def forward(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        xu = torch.cat([x, u], dim=-1)
-        # Spectral norms cap each linear layer’s Lipschitz to 1, ReLU caps to 1.
-        out = self.eps_net(xu)
-        # Scale to achieve a global Lipschitz constant lip_const
-        return torch.abs(self.lip_const * out)
-
-    def training_step(self, batch, batch_idx):
-        x = batch['states']    # shape: (B, embed_total_dim)
-        u = batch['actions']   # shape: (B, action_dim)
-        r_true = batch['residuals']  # shape: (B, embed_total_dim)
-
-        # Predict residuals
-        r_pred = self(x, u)
-        
-        # MSE loss
-        loss_mse = self.criterion(r_pred, r_true)
-        
-        # Gradient penalty for Lipschitz regularization
-        # Compute gradient of outputs w.r.t. inputs (xu)
-        xu = torch.cat([x, u], dim=-1).requires_grad_(True)
-        r_pred_xu = self.eps_net(xu) *  self.lip_const
-        grads = torch.autograd.grad(
-            outputs=r_pred_xu,
-            inputs=xu,
-            grad_outputs=torch.ones_like(r_pred_xu),
-            create_graph=True,
-            retain_graph=True
-        )[0]  # shape: (B, embed_total_dim + action_dim)
-        
-        # Compute per-sample gradient norms
-        grad_norms = grads.view(grads.size(0), -1).norm(2, dim=1)
-        # Penalty = (max(0, grad_norms - lip_const))^2
-        penalty = ((grad_norms - self.lip_const).clamp(min=0) ** 2).mean()
-        
-        loss = loss_mse + self.penalty_coef * penalty
-        
-        # Logging
-        self.log('train_loss', loss, prog_bar=True, on_epoch=True, on_step=False)
-        self.log('ev_score', self.ev(r_pred, r_true), prog_bar=True, on_epoch=True, on_step=False)
-        self.log('grad_max', grad_norms.max(), prog_bar=False, on_epoch=True, on_step=False)
-        self.log('lip_penalty', penalty, prog_bar=False, on_epoch=True, on_step=False)
-        
-        return loss
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-4)
 
 class KoopmanLightning(pl.LightningModule):
     """
@@ -276,11 +243,10 @@ class KoopmanLightning(pl.LightningModule):
         # Use the first state of each trajectory to initialize.
         s0 = states[:, 0, :]         # shape: (B, state_dim)
         z = self.embedding_net(s0)   # shape: (B, embed_total_dim)
-        c = self.koopman_operator.c( torch.cat([z, actions[:, 0, :]], dim=-1))
         pred_latents = []
         for t in range(self.horizon):
             a_t = actions[:, t, :]   # shape: (B, control_dim
-            z = self.koopman_operator.A(z) + self.koopman_operator.B(a_t) + c    # shape: (B, embed_total_dim)
+            z = self.koopman_operator(z, a_t)  # shape: (B, embed_total_dim)
             pred_latents.append(z.unsqueeze(1))
         pred_latents = torch.cat(pred_latents, dim=1)  # shape: (B, horizon, embed_total_dim)
         return pred_latents
@@ -298,7 +264,6 @@ class KoopmanLightning(pl.LightningModule):
         # Target states are s_1, s_2, ..., s_horizon from the ground truth
         target_s = next_states # Shape: (B, horizon, state_dim)
         B, H, S_dim = target_s.shape
-        embed_total_dim = self.state_dim + self.embed_dim
 
         # Reshape to (B*H, state_dim) for the embedding network
         target_s_flat = target_s.reshape(B * H, -1)
@@ -316,7 +281,7 @@ class KoopmanLightning(pl.LightningModule):
         pred_latents = self.forward(states, actions)
         loss = (pred_latents - target_latents) ** 2
         for i in range(self.horizon):
-            loss[:, i] = loss[:, i] * 0.95**i
+            loss[:, i] = loss[:, i] * 0.99**i
         loss = loss.mean()
          
         # # sparsity on Koopman weights
@@ -362,7 +327,7 @@ class KoopmanLightning(pl.LightningModule):
         pred_latents = self.forward(states, actions)
         loss = (pred_latents - target_latents) ** 2
         for i in range(self.horizon):
-            loss[:, i] = loss[:, i] * 0.95**i
+            loss[:, i] = loss[:, i] * 0.9**i
         loss = loss.mean()
         
                
@@ -382,32 +347,9 @@ class KoopmanLightning(pl.LightningModule):
         
     
     @torch.no_grad()
-    def get_eps(self,z, u):
-        """
-        Computes the Lipschitz‐based epsilons for the Koopman operator,
-        assuming calibration at (x0 = 0, u0 = 0) with x_next = 0.
-
-        eps(z) = |c| + L * ||z||_2
-
-        Here z = g_theta(x), and c = Koopman offset parameter.
-        """
-        # 1) Batchify x, ignore u (u0=0 for calibration but still needed to lift if needed)
-        dist = torch.norm(z, dim=1)                        # shape (B,)
-
-        z0 = self.transform(torch.zeros(1, self.state_dim))
-        z0 = torch.as_tensor(z0, dtype=torch.float32) # shape (B, embed_total_dim)
-        u0 = torch.zeros_like(u)                       # shape (B, control_dim)
-        e_0 = self.eps_net(z0, u0) 
-        dist = torch.norm(z - z0, dim=1) # shape (B, embed_total_dim)
-        # 4) Get the Koopman offset c
-        #    (A, B, c) = KoopmanOperator, but we only need c here
-        _, _, c_vec = self.koopman_operator.get_koopman_operators()
-        c = torch.as_tensor(c_vec.abs(), dtype=torch.float32)  # shape (embed_total_dim,)
-
-        # 5) Build per-sample eps: eps = |c| + L * ||z||
-        eps = e_0 + self.lip_const * dist.unsqueeze(1)  # shape (B, embed_total_dim)
-
-        return eps
+    def get_eps(self, z, u):
+        
+        return self.eps_net(z, u)
     
     def transform(self, x):
         """
@@ -465,18 +407,15 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     trainer.fit(koopman_model, train_loader, val_loader)
 
     # with torch.no_grad():
+        
     #     koopman_model.eps_net = UncertaintyNet(koopman_model.state_dim + koopman_model.embed_dim, koopman_model.control_dim) if koopman_model.eps_net is None else koopman_model.eps_net
     #     residuals = koopman_model.transform(dataset.next_states[:, 0]) - koopman_model.get_next_state(dataset.states[:, 0], dataset.actions[:, 0])
     #     residuals_dataset = ResidualsDataset(koopman_model.transform(dataset.states[:, 0]), dataset.actions[:, 0], residuals)
     #     residuals_loader = DataLoader(residuals_dataset, batch_size=128, shuffle=False, num_workers=1)
 
-    #     trainer = pl.Trainer(max_epochs=0, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
+    #     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
     #     trainer.fit(koopman_model.eps_net, residuals_loader)
 
-    #     eps0 = (koopman_model.transform(torch.zeros_like(dataset.states[0, 0])) - koopman_model.get_next_state(torch.zeros_like(dataset.states[0, 0]), torch.zeros_like(dataset.actions[0, 0])))**2
-    #     koopman_model.eps0 = eps0.mean().item()
-    #     koopman_model.z0 = koopman_model.transform(torch.zeros_like(dataset.states[0, 0]))
-    #     koopman_model.lip_const = koopman_model.eps_net.lip_const
 
     torch.cuda.empty_cache()
 

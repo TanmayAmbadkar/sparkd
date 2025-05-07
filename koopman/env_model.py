@@ -18,8 +18,8 @@ class MarsE2cModel:
     A model that uses the KoopmanLightning to obtain A, B, and c matrices
     and provides a similar interface to MARSModel.
     """
-    def __init__(self, e2c_predictor: KoopmanLightning, s_dim=None, original_s_dim = None):
-        self.e2c_predictor = e2c_predictor
+    def __init__(self, koopman_model: KoopmanLightning, s_dim=None, original_s_dim = None):
+        self.koopman_model = koopman_model
         self.s_dim = s_dim
         self.original_s_dim = original_s_dim
         self.error = 0
@@ -37,7 +37,7 @@ class MarsE2cModel:
 
         # print(x_tensor.shape, u_tensor.shape)
         # Use KoopmanLightning to predict next state
-        z_t_next = self.e2c_predictor(x_tensor, u_tensor)
+        z_t_next = self.koopman_model(x_tensor, u_tensor)
 
         # Predict next latent state
         
@@ -77,7 +77,7 @@ class MarsE2cModel:
         #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)
 
         with torch.no_grad():
-            z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t = self.e2c_predictor.transition(
+            z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t = self.koopman_model.transition(
                 x_tensor, x_tensor, u_tensor
             )
 
@@ -95,7 +95,8 @@ class MarsE2cModel:
         #    That yields a 1D array of length s_dim.
         # eps = np.diag(A_tA_tT) # shape [s_dim]
         # eps = np.zeros_like(c_t)
-        # eps = self.e2c_predictor.get_eps(x_tensor, u_tensor).squeeze(0).detach().cpu().numpy()
+        # eps = self.koopman_model.get_eps(x_tensor, u_tensor).squeeze(0).detach().cpu().numpy()
+        # print("Eps:", eps)
         eps = self.error
         return M, eps
 
@@ -180,7 +181,7 @@ def get_environment_model(     # noqa: C901
         data_stddev: float = 0.01,
         latent_dim: int = 4,
         horizon: int = 5,
-        e2c_predictor = None,
+        koopman_model = None,
         epochs: int = 50) -> EnvModel:
 
     
@@ -194,25 +195,25 @@ def get_environment_model(     # noqa: C901
     means = np.zeros(domain.lower.shape[1])
     stds = np.ones(domain.lower.shape[1])
     
-    # if e2c_predictor is not None:
-    #     means = e2c_predictor.mean + 0.001 * (means - e2c_predictor.mean)
-    #     stds = e2c_predictor.std + 0.001 * (means - e2c_predictor.mean)
+    # if koopman_model is not None:
+    #     means = koopman_model.mean + 0.001 * (means - koopman_model.mean)
+    #     stds = koopman_model.std + 0.001 * (means - koopman_model.mean)
     
     # domain.lower = (domain.lower - means) / stds
     # domain.upper = (domain.upper - means) / stds
     # print("Input states:", input_states)
     
-    if e2c_predictor is None:
-        e2c_predictor = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
+    if koopman_model is None:
+        koopman_model = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
         
-    fit_koopman(input_states, actions, output_states, e2c_predictor, horizon, epochs=epochs)
+    fit_koopman(input_states, actions, output_states, koopman_model, horizon, epochs=epochs)
 
-    e2c_predictor.mean = means
-    e2c_predictor.std = stds
+    koopman_model.mean = means
+    koopman_model.std = stds
 
     
     # print(input_states.shape, actions.shape, output_states.shape)
-    # parsed_mars = MarsE2cModel(e2c_predictor, latent_dim, input_states.shape[-1])
+    # parsed_mars = MarsE2cModel(koopman_model, latent_dim, input_states.shape[-1])
     # X = np.concatenate((input_states.reshape(-1, input_states.shape[-1]), actions.reshape(-1, actions.shape[-1])), axis=1)
     # print(X.shape)
     # Yh = np.array([parsed_mars(state, normalized=True) for state in X]).reshape(-1, input_states.shape[-1])
@@ -224,10 +225,10 @@ def get_environment_model(     # noqa: C901
 
     
     print(input_states.shape, actions.shape, output_states.shape)
-    parsed_mars = MarsE2cModel(e2c_predictor, latent_dim, input_states.shape[-1])
+    parsed_mars = MarsE2cModel(koopman_model, latent_dim, input_states.shape[-1])
     Yh = parsed_mars(input_states, actions, normalized=True)
 
-    output_states = parsed_mars.e2c_predictor.transform(output_states)
+    output_states = parsed_mars.koopman_model.transform(output_states)
     # output_states = output_states.reshape(-1, input_states.shape[-1])
 
     print(np.min(Yh[:,0], axis = 0), np.max(Yh[:,0], axis = 0))
@@ -259,6 +260,7 @@ def get_environment_model(     # noqa: C901
 
     # 2) Flatten over samples & time
     res_flat = res.reshape(-1, n_out)             # shape: (N*T, n_out))
+    print(res_flat.shape)
 
     # 3) Empirical max
 

@@ -4,9 +4,9 @@ import numpy as np
 from abstract_interpretation import domains, verification
 import sys
 
-class HopperEnv(gym.Env):
+class WalkerEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Hopper-v5")
+        self.env = gym.make("Walker2d-v5")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
@@ -48,8 +48,8 @@ class HopperEnv(gym.Env):
         # for i in range(12, 28):
         #     lower_bounds[i] = 0
         #     upper_bounds[i] = 1
-        lower_bounds[5] = -0.37315
-        upper_bounds[5] = 0.37315
+        lower_bounds[8] = -1.7075
+        upper_bounds[8] = 1.7075
             
         # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))

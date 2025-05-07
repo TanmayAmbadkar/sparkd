@@ -24,7 +24,7 @@ parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--mini_batch_size', type=int, default=64)
 parser.add_argument('--num_steps', type=int, default=200000)
 parser.add_argument('--hidden_size', type=int, default=64)
-parser.add_argument('--replay_size', type=int, default=1000000)
+parser.add_argument('--replay_size', type=int, default=200000)
 parser.add_argument('--start_steps', type=int, default=5000)
 parser.add_argument('--cuda', action="store_true")
 parser.add_argument('--horizon', type=int, default=20)
@@ -91,9 +91,12 @@ while True:
         tmp_buffer = []
         real_buffer = []
         
+        flags = []
+        
         while not done and not trunc:
             if safe_agent is not None:
                 action, shielded = safe_agent(state)
+                flags.append(shielded[0])
             else:
                 action = agent(state)
                 shielded = None
@@ -106,6 +109,7 @@ while True:
             
 
             cost = 0
+            
             if env.unsafe(next_state, False):
 
                 real_unsafe_episodes += 1 * (not unsafe_flag)
@@ -144,7 +148,7 @@ while True:
             state = next_state
 
             
-        
+        print("Sequence", "".join(flags))
         if safe_agent is not None:
             try:
                 s, a, b, t = safe_agent.report()
@@ -172,27 +176,27 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.e2c_predictor.lr = 0.00001
-            e2c_predictor = env_model.mars.e2c_predictor
+            env_model.mars.koopman_model.lr = 0.0001
+            koopman_model = env_model.mars.koopman_model
             epochs = 80
         else:
-            e2c_predictor = None
-            epochs = 200
+            koopman_model = None
+            epochs = 150
     
         env_model, ev_score, r2_score = get_environment_model(
                 states, actions, next_states, rewards,
                 domains.DeepPoly(env.observation_space.low, env.observation_space.high),
-                seed=args.seed, e2c_predictor = e2c_predictor, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
+                seed=args.seed, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
         
         writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
         writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)   
             
-        # new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
+        # new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.koopman_model.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
         
         
         # safety_domain = domains.DeepPoly(env.safety.lower, env.safety.upper)
         
-        # safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.e2c_predictor.embedding_net.embed_net, safety_domain))
+        # safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.koopman_model.embedding_net.embed_net, safety_domain))
         
         
         
@@ -201,20 +205,21 @@ while True:
 
         
 
-        new_obs_space = gym.spaces.Box(low=np.concatenate([env.observation_space.low, -np.ones(args.red_dim, )]), high=np.concatenate([env.observation_space.high, np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
+        new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
+        
         polys = safety.to_hyperplanes(new_obs_space)
         print("LATENT OBS SPACE", new_obs_space)
         
         unsafe_domains = safety.invert_polytope(new_obs_space)
         env.transformed_safe_polys = polys
-        # env.state_processor = env_model.mars.e2c_predictor.transform
+        # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
         
         print("LATENT SAFETY", safety, len(polys[0]))
         print("LATENT UNSAFETY",  len(env.transformed_polys))
         shield = ProjectionPolicy(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
-            env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.e2c_predictor.transform)
+            env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
         safe_agent = Shield(shield, agent)
         
         
@@ -245,10 +250,7 @@ while True:
             
             # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
             
-            while True:
-                state, info = env.reset()
-                if not env.unsafe(state, False):
-                    break
+            state, info = env.reset()
             episode_reward = 0
             done = False
             trunc = False

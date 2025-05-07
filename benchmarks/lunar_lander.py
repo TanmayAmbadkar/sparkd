@@ -37,14 +37,14 @@ class LunarLanderEnv(gym.Env):
         lower_bounds = np.copy(obs_space_lower)
         upper_bounds = np.copy(obs_space_upper)
 
-        # Horizontal position constraint (x) - relaxed
-        lower_bounds[0] = -1  # Increased from 0.75 to 1.0
-        upper_bounds[0] = 1
+        # # Horizontal position constraint (x) - relaxed
+        # lower_bounds[0] = -1  # Increased from 0.75 to 1.0
+        # upper_bounds[0] = 1
 
-        # Vertical position constraint (y) - relaxed
+        # # Vertical position constraint (y) - relaxed
         
-        lower_bounds[1] = -0.1
-        upper_bounds[1] = 2
+        # lower_bounds[1] = -0.1
+        # upper_bounds[1] = 2
 
         # Horizontal velocity constraint (vx) - relaxed
         lower_bounds[2] = -1 # Increased from 0.5 to 0.75
@@ -52,7 +52,7 @@ class LunarLanderEnv(gym.Env):
 
         # Vertical velocity constraint (vy) - relaxed
         lower_bounds[3] = -1.5 # Increased from 0.5 to 0.75
-        upper_bounds[3] = 0.5
+        upper_bounds[3] = -1.5
 
                    
         input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)

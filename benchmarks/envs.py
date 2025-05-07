@@ -45,6 +45,12 @@ def get_env_from_name(name):
     if name == 'hopper':
         from .hopper import HopperEnv
         return HopperEnv()
+    if name == 'walker':
+        from .walker import WalkerEnv
+        return WalkerEnv()
+    if name == 'cheetah':
+        from .cheetah import CheetahEnv
+        return CheetahEnv()
     if name == 'safety_point':
         from .safety_gym import SafetyPointGoalEnv
         return SafetyPointGoalEnv()
