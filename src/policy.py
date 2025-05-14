@@ -110,6 +110,11 @@ class ProjectionPolicy:
         minimum‐norm u that pushes you out of each unsafe poly, then picking
         the smallest among those.
         """
+        with torch.no_grad():
+            z = self.transform(state.reshape(1, -1)).reshape(-1,)
+        u_dim = self.action_space.shape[0]
+
+        
         s_dim = self.state_space.shape[0]
         # lift & flatten
         with torch.no_grad():
@@ -149,7 +154,7 @@ class ProjectionPolicy:
                 best_proj = u_star
 
         # normalize direction
-        best_proj /= np.linalg.norm(best_proj)
+        best_proj /= (np.linalg.norm(best_proj) + 1e-6)
 
         # now compute the full‐horizon m vector and call linprog as before
         u_dim = self.action_space.shape[0]
@@ -276,7 +281,6 @@ class ProjectionPolicy:
                                 )
             res_fixed = fixed_solver.solve()
             fixed_feasible = (res_fixed.info.status == 'solved')
-            fixed_feasible = False
 
             if fixed_feasible:
                 candidate_u0 = action.copy()
@@ -287,8 +291,9 @@ class ProjectionPolicy:
                 total_vars = self.horizon * u_dim
                 P_full = 1e-6 * np.eye(total_vars)
                 # keep u0 near policy
-                P_full[:u_dim, :u_dim] = np.eye(u_dim)
-                q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
+                # P_full[:u_dim, :u_dim] = np.eye(u_dim)
+                q_full = np.zeros((self.horizon)*u_dim)
+                # q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
                 A_full = sp.csc_matrix(M)
                 l_full = -np.inf * np.ones_like(bias)
                 u_full = -bias

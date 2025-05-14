@@ -178,10 +178,10 @@ while True:
         if env_model is not None:
             env_model.mars.koopman_model.lr = 0.0001
             koopman_model = env_model.mars.koopman_model
-            epochs = 80
+            epochs = 50
         else:
             koopman_model = None
-            epochs = 150
+            epochs = 200
     
         env_model, ev_score, r2_score = get_environment_model(
                 states, actions, next_states, rewards,

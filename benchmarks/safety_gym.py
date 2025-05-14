@@ -73,7 +73,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
             
         for i in range(28, 60):
             lower_bounds[i] = 0
-            upper_bounds[i] = 0.8
+            upper_bounds[i] = 0.9
             
         # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))

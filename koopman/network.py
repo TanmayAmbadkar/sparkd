@@ -93,7 +93,7 @@ class StateEmbedding(nn.Module):
             LinearLayer(256, 256),
             ReLULayer(), 
             LinearLayer(256, embed_dim),
-            TanhLayer()
+            # TanhLayer()
         ])
         self.state_dim = state_dim
 
@@ -199,7 +199,7 @@ class KoopmanLightning(pl.LightningModule):
     The training objective is to match the multi-step latent trajectory with the encoder outputs
     from the corresponding ground truth future states.
     """
-    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=1e-3):
+    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.0001):
         """
         Args:
             state_dim (int): Dimensionality of the original state.
@@ -282,6 +282,7 @@ class KoopmanLightning(pl.LightningModule):
         loss = (pred_latents - target_latents) ** 2
         for i in range(self.horizon):
             loss[:, i] = loss[:, i] * 0.99**i
+        # loss = loss.mean() + pred_latents[:, :, self.state_dim:].pow(2).mean() * 1e-3
         loss = loss.mean()
          
         # # sparsity on Koopman weights

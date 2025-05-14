@@ -265,7 +265,7 @@ def get_environment_model(     # noqa: C901
     # 3) Empirical max
 
     # 4) Empirical 95%-quantile (or whatever α you choose)
-    quantile = np.percentile(res_flat, 99, axis=0)   # shape: (n_out,)
+    quantile = np.percentile(res_flat, 80, axis=0)   # shape: (n_out,)
 
     q1 = np.percentile(res_flat, 25, axis=0)   # shape: (n_out,)
     q3 = np.percentile(res_flat, 75, axis=0)   # shape: (n_out,)
@@ -280,10 +280,24 @@ def get_environment_model(     # noqa: C901
     print("Max error:", upper_bound)
 
     # 5) still store the full vector
-    parsed_mars.error = upper_bound
+    # parsed_mars.error = upper_bound
+    
+    #  Get the maximum distance between a predction and a datapoint
+    diff = np.amax(np.abs( Yh[:, 0] 
+        - output_states[:, 0, :]))
+
+    # Get a confidence interval based on the quantile of the chi-squared
+    # distribution
+    conf = np.sqrt(scipy.stats.chi2.ppf(
+        0.9, output_states[:, 0, :].shape[1]))
+    err = diff + conf
+    print("Computed error:", err, "(", diff, conf, ")")
+    err = err * np.zeros(output_states[:, 0, :].shape[1])
+    error = np.minimum(err, upper_bound, quantile)
+    parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
 
 
 
-    print(parsed_mars)
+    print(parsed_mars.error)
 
     return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2
