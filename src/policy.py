@@ -10,6 +10,8 @@ from .env_model import MARSModel
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from scipy.optimize import linprog
+import osqp
+import scipy.sparse as sp
 
 
 
@@ -227,71 +229,30 @@ class ProjectionPolicy:
                 ind += u_dim
                 ind2 += u_dim
 
-            # === First attempt: fix u0 to the given action and optimize over u1,...,u_{H-1} ===
-            fixed_total = (self.horizon - 1) * u_dim  # dimension for u1,...,u_{H-1}
-            # Partition the full variable: columns [0:u_dim] correspond to u0, [u_dim:] correspond to future actions.
-            M_first = M[:, :u_dim]
-            M_rest = M[:, u_dim:]
-            # Adjust the bias: since u0 is fixed to "action", add M_first * action to the bias.
-            new_bias = bias + np.dot(M_first, action)
-            # Now, the constraints become: M_rest * x + new_bias <= 0, where x represents [u1; ...; u_{H-1}].
-            
-            # Set up a simple quadratic objective for the future actions (e.g. minimize ||x||^2).
-            P_fixed = 1e-4 * np.eye(fixed_total)
-            q_fixed = np.zeros((fixed_total,))
-            
-            # Also set up bounds for the future actions.
-            act_bounds = np.stack((self.action_space.low, self.action_space.high), axis=1)
-            # Replicate the bounds for (horizon-1) steps.
-            bounds_fixed = np.concatenate([act_bounds] * (self.horizon - 1), axis=0)
-            
-            # Build inequality constraints for the fixed-QP:
-            # The safety constraints: M_rest * x <= -new_bias.
-            G_fixed = M_rest
-            h_fixed = -new_bias
-            
-            # Additionally, enforce the variable bounds: x_i >= lower and x_i <= upper.
-            I_fixed = np.eye(fixed_total)
-            G_bounds = np.concatenate((-I_fixed, I_fixed), axis=0)
-            h_bounds = np.concatenate((-bounds_fixed[:, 0], bounds_fixed[:, 1]), axis=0)
-            
-            # Combine the constraints.
-            G_total = np.vstack((G_fixed, G_bounds))
-            h_total = np.hstack((h_fixed, h_bounds))
-            
-            # Convert to cvxopt matrices.
-            try:
-                sol_fixed = cvxopt.solvers.qp(cvxopt.matrix(P_fixed),
-                                            cvxopt.matrix(q_fixed),
-                                            cvxopt.matrix(G_total),
-                                            cvxopt.matrix(h_total))
-            except Exception as e:
-                sol_fixed = {'status': 'infeasible'}
-            fixed_feasible = (sol_fixed['status'] == 'optimal')
-            
-            if fixed_feasible:
-                # The fixed-QP is feasible: the original policy action u0 is safe.
-                candidate_u0 = action.copy()
-                candidate_score = 0  # no deviation from the policy action.
-                shielded = False
-            else:
-                # Fixed-QP failed: fall back to solving the full QP where u0 is free.
-                P_full = 1e-4 * np.eye(total_vars)
-                # Add extra weight on the first block so the solution stays close to the policy action.
-                P_full[:u_dim, :u_dim] += np.eye(u_dim)
-                q_full = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))
-                try:
-                    sol_full = cvxopt.solvers.qp(cvxopt.matrix(P_full),
-                                                cvxopt.matrix(q_full),
-                                                cvxopt.matrix(M),
-                                                cvxopt.matrix(-bias))
-                except Exception as e:
-                    sol_full = {'status': 'infeasible'}
-                if sol_full['status'] != 'optimal':
-                    continue  # try the next safe polytope
-                full_sol = np.asarray(sol_full['x']).squeeze()
-                candidate_u0 = full_sol[:u_dim]
-                candidate_score = np.linalg.norm(candidate_u0 - action)
+        
+            # Fixed-QP failed: fall back to solving the full QP where u0 is free.
+            P_full = 1e-4 * np.eye(total_vars)
+            # Add extra weight on the first block so the solution stays close to the policy action.
+            P_full[:u_dim, :u_dim] += np.eye(u_dim)
+            q_full = -np.concatenate((action, np.zeros((self.horizon - 1) * u_dim)))
+            A_full = sp.csc_matrix(M)
+            l_full = -np.inf * np.ones_like(bias)
+            u_full = -bias
+            full_solver = osqp.OSQP()
+            full_solver.setup(P=sp.csc_matrix(P_full),
+                                    q=q_full,
+                                    A=A_full,
+                                    l=l_full,
+                                    u=u_full,
+                                    warm_start=False,
+                                    verbose=False)
+            res_full = full_solver.solve()
+            if res_full.info.status != 'solved':
+                continue
+            full_sol = res_full.x
+            candidate_u0 = full_sol[:u_dim]
+            candidate_score = np.linalg.norm(candidate_u0 - action)
+
             
             # Record the best candidate u0 (the one closest to the original action).
             if candidate_score < best_score:

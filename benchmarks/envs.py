@@ -33,5 +33,14 @@ def get_env_from_name(name):
     if name == 'lunar_lander':
         from .lunar_lander import LunarLanderEnv
         return LunarLanderEnv()
+    if name == 'hopper':
+        from .hopper import HopperEnv
+        return HopperEnv()
+    if name == 'walker':
+        from .walker import WalkerEnv
+        return WalkerEnv()
+    if name == 'cheetah':
+        from .cheetah import CheetahEnv
+        return CheetahEnv()
     else:
         raise RuntimeError("Unkonwn environment: " + name)

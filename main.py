@@ -81,6 +81,7 @@ total_numsteps = 0
 updates = 0
 
 total_unsafe_episodes = 0
+total_unsafe_episodes_test = 0
 total_episodes = 0
 
 cost_model = None
@@ -251,12 +252,12 @@ for i_episode in itertools.count(1):
     if total_numsteps > args.num_steps:
         break
 
-    writer.add_scalar('reward/train', episode_reward, i_episode)
+    writer.add_scalar('reward/train', episode_reward, total_numsteps)
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
 
-    if (i_episode - 99) % 1 == 0 and args.eval is True and \
+    if i_episode % 1 == 0 and args.eval is True and \
             safe_agent is not None:
         print("starting testing...")
         avg_reward = 0.
@@ -285,7 +286,7 @@ for i_episode in itertools.count(1):
                 if env.unsafe(next_state):
                     print("UNSAFE")
                     print(state, action, next_state)
-                    unsafe_episodes += 1
+                    total_unsafe_episodes_test += 1
                     done = True
                 if done:
                     try:
@@ -315,10 +316,10 @@ for i_episode in itertools.count(1):
             writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
             writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
 
-            writer.add_scalar('avg_reward/test', avg_reward, i_episode)
-            writer.add_scalar('agent/unsafe_episodes', total_unsafe_episodes, i_episode)
-            writer.add_scalar('agent/shield', s, i_episode)
-            writer.add_scalar('agent/neural', a, i_episode)
+            writer.add_scalar('avg_reward/test', avg_reward, total_numsteps)
+            writer.add_scalar('agent/unsafe_episodes', total_unsafe_episodes_test, total_numsteps)
+            # writer.add_scalar('agent/shield', s, i_episode)
+            # writer.add_scalar('agent/neural', a, i_episode)
 
         print("----------------------------------------")
         print("Test Episodes: {}, Unsafe: {}, Avg. Length: {}, Avg. Reward: {}"
