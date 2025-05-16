@@ -260,7 +260,7 @@ class ProjectionPolicy:
             M_rest  = M[:, u_dim:]
             new_bias = bias + M_first @ action
 
-            P_fixed = (1e-6 * np.eye(fixed_total))
+            P_fixed = (1e-4 * np.eye(fixed_total))
             q_fixed = np.zeros(fixed_total)
             G_fixed = sp.csc_matrix(M_rest)
             h_fixed = -new_bias
@@ -289,11 +289,11 @@ class ProjectionPolicy:
             else:
                 # --- Full-QP: optimize [u0; u1..] ---
                 total_vars = self.horizon * u_dim
-                P_full = 1e-6 * np.eye(total_vars)
+                P_full = 1e-4 * np.eye(total_vars)
                 # keep u0 near policy
-                # P_full[:u_dim, :u_dim] = np.eye(u_dim)
-                q_full = np.zeros((self.horizon)*u_dim)
-                # q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
+                P_full[:u_dim, :u_dim] = np.eye(u_dim)
+                # q_full = np.zeros((self.horizon)*u_dim)
+                q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
                 A_full = sp.csc_matrix(M)
                 l_full = -np.inf * np.ones_like(bias)
                 u_full = -bias

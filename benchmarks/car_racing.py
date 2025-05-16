@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
-
+from abstract_interpretation import domains
 
 class CarRacingEnv(gym.Env):
 
@@ -29,6 +29,7 @@ class CarRacingEnv(gym.Env):
             np.array([[0.0, 1.0, 0.0, 0.0, -0.99]]),
             np.array([[0.0, -1.0, 0.0, 0.0, 2.01]])
         ]
+        self.safety = domains.DeepPoly(lower_bounds=[1, 1, -5, -5], upper_bounds=[2, 2, 5, 5])
         self.state_processor = None
     def reset(self) -> np.ndarray:
         self.state = self.init_space.sample()

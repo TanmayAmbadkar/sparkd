@@ -87,14 +87,15 @@ class StateEmbedding(nn.Module):
     def __init__(self, state_dim, embed_dim):
         super(StateEmbedding, self).__init__()
         # Using the abstract_interpretation library's NeuralNetwork module.
-        self.embed_net = NeuralNetwork([
-            LinearLayer(state_dim, 256), 
-            ReLULayer(), 
-            LinearLayer(256, 256),
-            ReLULayer(), 
-            LinearLayer(256, embed_dim),
+        self.embed_net = nn.Sequential(
+            nn.Linear(state_dim, 256), 
+            nn.ReLU(), 
+            nn.Linear(256, 256),
+            nn.ReLU(), 
+            nn.Linear(256, embed_dim),
+            # nn.Tanh()
             # TanhLayer()
-        ])
+        )
         self.state_dim = state_dim
 
     def forward(self, s):
@@ -161,7 +162,7 @@ class UncertaintyNet(pl.LightningModule):
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, state_dim),
-            nn.ReLU()
+            # nn.ReLU()
         )
         
     def forward(self, z, u):
@@ -406,6 +407,9 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
 
     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1, check_val_every_n_epoch=5)
     trainer.fit(koopman_model, train_loader, val_loader)
+    
+    print(koopman_model.koopman_operator.A.weight)
+    print(koopman_model.koopman_operator.B.weight)
 
     # with torch.no_grad():
         

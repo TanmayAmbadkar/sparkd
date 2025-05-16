@@ -25,7 +25,7 @@ parser.add_argument('--mini_batch_size', type=int, default=64)
 parser.add_argument('--num_steps', type=int, default=200000)
 parser.add_argument('--hidden_size', type=int, default=64)
 parser.add_argument('--replay_size', type=int, default=200000)
-parser.add_argument('--start_steps', type=int, default=5000)
+parser.add_argument('--start_steps', type=int, default=10000)
 parser.add_argument('--cuda', action="store_true")
 parser.add_argument('--horizon', type=int, default=20)
 parser.add_argument('--red_dim', type=int, default = 20)
@@ -41,9 +41,9 @@ np.random.seed(args.seed)
 hyperparams = vars(args)
 
 # Tensorboard
-if not os.path.exists("runs_ppo"):
-    os.makedirs("runs_ppo")
-writer = SummaryWriter('runs_ppo/{}_PPO_{}_H{}_D{}'.format(
+if not os.path.exists("runs_final"):
+    os.makedirs("runs_final")
+writer = SummaryWriter('runs_final/{}_PPO_{}_H{}_D{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim))
 
@@ -51,7 +51,7 @@ print(hyperparams)
 if not os.path.exists("logs_ppo"):
     os.makedirs("logs_ppo")
 
-file = open('runs_ppo/{}_PPO_{}_H{}_D{}/log.txt'.format(
+file = open('runs_final/{}_PPO_{}_H{}_D{}/log.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim), "w+")
 
@@ -176,12 +176,12 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.koopman_model.lr = 0.0001
+            env_model.mars.koopman_model.lr = 0.00008
             koopman_model = env_model.mars.koopman_model
             epochs = 50
         else:
             koopman_model = None
-            epochs = 200
+            epochs = 150
     
         env_model, ev_score, r2_score = get_environment_model(
                 states, actions, next_states, rewards,
@@ -208,6 +208,7 @@ while True:
         new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
         
         polys = safety.to_hyperplanes(new_obs_space)
+        print(polys)
         print("LATENT OBS SPACE", new_obs_space)
         
         unsafe_domains = safety.invert_polytope(new_obs_space)

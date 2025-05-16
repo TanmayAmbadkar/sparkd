@@ -6,7 +6,7 @@ import sys
 
 class HopperEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Hopper-v5")
+        self.env = gym.make("Hopper-v4")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))

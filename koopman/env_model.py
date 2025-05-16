@@ -254,12 +254,12 @@ def get_environment_model(     # noqa: C901
             
         # 1) Compute the absolute residuals for every (sample, step, feature)
     res = np.abs(
-        Yh[:, 0] 
-        - output_states[:, 0, :]
+        Yh[:, 0, :input_states.shape[-1]] 
+        - output_states[:, 0, :input_states.shape[-1]]
     )           # shape: (N, T, n_out)
 
     # 2) Flatten over samples & time
-    res_flat = res.reshape(-1, n_out)             # shape: (N*T, n_out))
+    res_flat = res.reshape(-1, input_states.shape[-1])             # shape: (N*T, n_out))
     print(res_flat.shape)
 
     # 3) Empirical max
@@ -293,11 +293,13 @@ def get_environment_model(     # noqa: C901
     err = diff + conf
     print("Computed error:", err, "(", diff, conf, ")")
     err = err * np.zeros(output_states[:, 0, :].shape[1])
-    error = np.minimum(err, upper_bound, quantile)
+    error = np.minimum(upper_bound, quantile)
+    
+    
     parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
 
 
 
-    print(parsed_mars.error)
+    print("Final Error", parsed_mars.error)
 
     return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2
