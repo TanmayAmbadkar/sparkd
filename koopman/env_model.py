@@ -10,7 +10,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import explained_variance_score, r2_score
 from typing import Union
-
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 
 class MarsE2cModel:
@@ -205,6 +206,12 @@ def get_environment_model(     # noqa: C901
     
     if koopman_model is None:
         koopman_model = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
+        koopman_model_copy = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
+    else:
+        koopman_model_copy = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
+        koopman_model_copy.load_state_dict(koopman_model.state_dict())
+        koopman_model_copy.eval()
+        
         
     fit_koopman(input_states, actions, output_states, koopman_model, horizon, epochs=epochs)
 
@@ -226,26 +233,39 @@ def get_environment_model(     # noqa: C901
     
     print(input_states.shape, actions.shape, output_states.shape)
     parsed_mars = MarsE2cModel(koopman_model, latent_dim, input_states.shape[-1])
+    parsed_mars_copy = MarsE2cModel(koopman_model_copy, latent_dim, input_states.shape[-1])
+    koopman_model.horizon = horizon
     Yh = parsed_mars(input_states, actions, normalized=True)
+    Yh_copy = parsed_mars_copy(input_states, actions, normalized=True)
 
     output_states = parsed_mars.koopman_model.transform(output_states)
+    output_states_copy = parsed_mars_copy.koopman_model.transform(output_states[:, :, :input_states.shape[-1]])
     # output_states = output_states.reshape(-1, input_states.shape[-1])
 
     print(np.min(Yh[:,0], axis = 0), np.max(Yh[:,0], axis = 0))
     print(np.min(output_states[:,0], axis = 0), np.max(output_states[:,0], axis = 0))
     ev_score = None
     r2 = None
+    ev_score_old = None
+    r2_old = None
     for i in range(horizon):
-        print(f"Model estimation error, horizon {i}:", np.mean((Yh[:,i] - (output_states[:, i]))**2))
+        print(f"Model estimation error, horizon {i}:", np.mean((Yh[:,i, :input_states.shape[-1]] - (output_states[:, i, :input_states.shape[-1]]))**2)) 
+        print(f"Model estimation error old, horizon {i}:", np.mean((Yh_copy[:,i, :input_states.shape[-1]] - (output_states_copy[:, i, :input_states.shape[-1]]))**2)) 
+        
         ev_score = explained_variance_score(
-            output_states[:,i].reshape(-1), Yh[:,i,].reshape(-1))
+            output_states[:,i, :input_states.shape[-1]].reshape(-1), Yh[:,i, :input_states.shape[-1]].reshape(-1))
         r2 = r2_score(
-            output_states[:,i].reshape(-1), Yh[:,i,].reshape(-1))
+            output_states[:,i,  :input_states.shape[-1]].reshape(-1), Yh[:,i, :input_states.shape[-1]].reshape(-1))
         print(f"Explained Variance Score, horizon {i}:", ev_score)
         print(f"R2 Score, horizon {i}:", r2)
+        ev_score_old = explained_variance_score(
+            output_states_copy[:,i, :input_states.shape[-1]].reshape(-1), Yh_copy[:,i, :input_states.shape[-1]].reshape(-1))
+        r2_old = r2_score(
+            output_states_copy[:,i,  :input_states.shape[-1]].reshape(-1), Yh_copy[:,i, :input_states.shape[-1]].reshape(-1))
+        print(f"Old Explained Variance Score, horizon {i}:", ev_score)
+        print(f"Old R2 Score, horizon {i}:", r2)
                 
             # number of output dims
-    n_out = output_states.shape[-1]
 
     # 1) compute dimension‑wise maximum abs‑error over all samples & timesteps
     #    (broadcast output_states across the middle axis of Yh)
@@ -253,25 +273,39 @@ def get_environment_model(     # noqa: C901
     #    output_states: (n_samples, n_out)
             
         # 1) Compute the absolute residuals for every (sample, step, feature)
+        
+    if ev_score_old > ev_score:
+        Yh = Yh_copy
+        output_states = output_states_copy
+        parsed_mars = parsed_mars_copy
+        print("Using old model")
+        
     res = np.abs(
-        Yh[:, 0, :input_states.shape[-1]] 
-        - output_states[:, 0, :input_states.shape[-1]]
+        Yh[:, 0] 
+        - output_states[:, 0]
     )           # shape: (N, T, n_out)
 
+    sns.boxplot(data=res.reshape(-1, output_states.shape[-1]))
+    plt.savefig("boxplot.png")
+    plt.close()
     # 2) Flatten over samples & time
-    res_flat = res.reshape(-1, input_states.shape[-1])             # shape: (N*T, n_out))
-    print(res_flat.shape)
+    res_flat = res.reshape(-1, output_states.shape[-1])             # shape: (N*T, n_out))
+    print("Flattened res", res_flat.shape)
 
     # 3) Empirical max
 
     # 4) Empirical 95%-quantile (or whatever α you choose)
-    quantile = np.percentile(res_flat, 80, axis=0)   # shape: (n_out,)
+    quantile = np.percentile(res_flat, 99, axis=0)   # shape: (n_out,)
 
     q1 = np.percentile(res_flat, 25, axis=0)   # shape: (n_out,)
     q3 = np.percentile(res_flat, 75, axis=0)   # shape: (n_out,)
+    print("Q1", q1)
+    print("Q3", q3)
     iqr = q3 - q1
     lower_bound = q1 - 1.5 * iqr
     upper_bound = q3 + 1.5 * iqr
+    print("lower_bound", lower_bound)
+    print("upper_bound", upper_bound)
     print("Below LB", res_flat[res_flat < lower_bound].shape)
     print("Above UB", res_flat[res_flat > upper_bound].shape)
     print(quantile)
@@ -288,6 +322,10 @@ def get_environment_model(     # noqa: C901
 
     # Get a confidence interval based on the quantile of the chi-squared
     # distribution
+    from sklearn.linear_model import LinearRegression
+    lr = LinearRegression().fit(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat)
+    print("R² of residual vs (z,u):", lr.score(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat))
+       
     conf = np.sqrt(scipy.stats.chi2.ppf(
         0.9, output_states[:, 0, :].shape[1]))
     err = diff + conf
@@ -297,9 +335,10 @@ def get_environment_model(     # noqa: C901
     
     
     parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
+    # parsed_mars.error =  error
 
 
 
-    print("Final Error", parsed_mars.error)
+    print("Final Error", parsed_mars.error, error)
 
     return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2

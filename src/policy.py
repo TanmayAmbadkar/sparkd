@@ -260,11 +260,11 @@ class ProjectionPolicy:
             M_rest  = M[:, u_dim:]
             new_bias = bias + M_first @ action
 
-            P_fixed = (1e-4 * np.eye(fixed_total))
+            P_fixed = (1e-6 * np.eye(fixed_total))
             q_fixed = np.zeros(fixed_total)
             G_fixed = sp.csc_matrix(M_rest)
             h_fixed = -new_bias
-            l_fixed = -np.inf * np.ones_like(h_fixed)
+            l_fixed = -np.inf * np.ones_like(h_fixed) 
             u_fixed = h_fixed
 
             # Solve fixed-QP with OSQP
@@ -281,19 +281,21 @@ class ProjectionPolicy:
                                 )
             res_fixed = fixed_solver.solve()
             fixed_feasible = (res_fixed.info.status == 'solved')
+            # fixed_feasible = False
 
             if fixed_feasible:
                 candidate_u0 = action.copy()
                 candidate_score = 0.0
                 shielded = False
             else:
+                
                 # --- Full-QP: optimize [u0; u1..] ---
                 total_vars = self.horizon * u_dim
-                P_full = 1e-4 * np.eye(total_vars)
+                P_full = 1e-6 * np.eye(total_vars)
                 # keep u0 near policy
-                P_full[:u_dim, :u_dim] = np.eye(u_dim)
-                # q_full = np.zeros((self.horizon)*u_dim)
-                q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
+                # P_full[:u_dim, :u_dim] = np.eye(u_dim)
+                q_full = np.zeros((self.horizon)*u_dim)
+                # q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
                 A_full = sp.csc_matrix(M)
                 l_full = -np.inf * np.ones_like(bias)
                 u_full = -bias
@@ -305,10 +307,28 @@ class ProjectionPolicy:
                                         u=u_full,
                                         warm_start=False,
                                         verbose=False)
+                #  # tiny identity to make P positive‐definite
+                # P = 0 * sp.eye(total_vars, format='csc')
+                # q = np.zeros(total_vars)
+                
+                # # constraints:  A x <= b
+                # A_full = sp.csc_matrix(M)
+                # l = -np.inf * np.ones_like(bias)
+                # u = -bias
+                
+                # # box bounds can be stacked as extra rows:
+                # # [ I ; -I ] @ U <= [ u_max; -u_min ]
+                # I = sp.eye(total_vars, format='csc')
+                # A_full = sp.vstack([A_full, I, -I], format='csc')
+                # l = np.hstack([l, -np.inf*np.ones(total_vars), -np.inf*np.ones(total_vars)])
+                # u = np.hstack([u, np.tile(self.action_space.low, self.horizon), -np.tile(self.action_space.high, self.horizon)])
+                # full_solver = osqp.OSQP()
+                # full_solver.setup(P=P, q=q, A=A_full, l=l, u=u, verbose=False)
+                
                 res_full = full_solver.solve()
                 if res_full.info.status != 'solved':
+                    # print(res_full.info.status_val, res_full.info.status)
                     continue
-
                 full_sol = res_full.x
                 candidate_u0 = full_sol[:u_dim]
                 candidate_score = np.linalg.norm(candidate_u0 - action)
@@ -319,6 +339,8 @@ class ProjectionPolicy:
 
         if best_u0 is None:
             best_u0 = self.backup(original_state)
+            if np.allclose(best_u0, action):
+                print("backup equal")
             shielded = False
 
         self.saved_state = original_state

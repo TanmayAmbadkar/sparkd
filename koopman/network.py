@@ -42,37 +42,7 @@ class KoopmanDataset(Dataset):
             'actions': self.actions[idx],       # shape: (horizon, action_dim)
             'next_states': self.next_states[idx]  # shape: (horizon, state_dim)
         }
-
-
-class ResidualsDataset(Dataset):
-    """
-    A simple dataset for Koopman training.
-    Each sample consists of a sequence of states, a sequence of actions,
-    and a corresponding sequence of next states.
-    
-    Assumptions:
-       - states: np.ndarray or torch.Tensor of shape (N, horizon+1, state_dim)
-       - actions: np.ndarray or torch.Tensor of shape (N, horizon, action_dim)
-       - next_states: np.ndarray or torch.Tensor of shape (N, horizon+1, state_dim)
-         (Typically, next_states will be identical to states, or this can be viewed as the ground truth future trajectory.)
-    """
-    def __init__(self, states, actions, residuals):
-        self.states = (torch.tensor(states, dtype=torch.float32) 
-                       if not isinstance(states, torch.Tensor) else states)
-        self.actions = (torch.tensor(actions, dtype=torch.float32) 
-                        if not isinstance(actions, torch.Tensor) else actions)
-        self.residuals = (torch.tensor(residuals, dtype=torch.float32) 
-                       if not isinstance(residuals, torch.Tensor) else residuals)
-    def __len__(self):
-        return self.residuals.shape[0]
-
-    def __getitem__(self, idx):
-        return {
-            'states': self.states[idx],         # shape: ( state_dim)
-            'actions': self.actions[idx],   
-            'residuals': self.residuals[idx],         # shape: (embed_total_dim)
-        }
-
+ 
 ###################################################
 # 2. Network Modules for the Koopman Model (Multi-Step) #
 ###################################################
@@ -88,12 +58,14 @@ class StateEmbedding(nn.Module):
         super(StateEmbedding, self).__init__()
         # Using the abstract_interpretation library's NeuralNetwork module.
         self.embed_net = nn.Sequential(
-            nn.Linear(state_dim, 256), 
-            nn.ReLU(), 
-            nn.Linear(256, 256),
-            nn.ReLU(), 
-            nn.Linear(256, embed_dim),
-            # nn.Tanh()
+            nn.Linear(state_dim, 512), 
+            nn.SiLU(), 
+            nn.Linear(512, 512),
+            nn.SiLU(), 
+            nn.Linear(512, 512),
+            nn.SiLU(),
+            nn.Linear(512, embed_dim),
+            nn.Tanh()
             # TanhLayer()
         )
         self.state_dim = state_dim
@@ -116,13 +88,6 @@ class KoopmanOperator(nn.Module):
         self.A = nn.Linear(embed_total_dim, embed_total_dim, bias=False)
         self.B = nn.Linear(control_dim, embed_total_dim, bias=False)
         # Explicit constant offset
-        self.c = nn.Sequential(
-            nn.Linear(embed_total_dim + control_dim, 256), 
-            nn.ReLU(), 
-            nn.Linear(256, 128),
-            nn.ReLU(), 
-            nn.Linear(128, embed_total_dim),
-        )
         self.embed_total_dim = embed_total_dim
         # self.c.weight.data.fill_(0.0)  # Initialize c to zero
         # self.c.bias.data.fill_(0.0)    # Initialize c to zero
@@ -148,47 +113,6 @@ class KoopmanOperator(nn.Module):
         # return A_w, B_w, self.c( torch.cat([z, u], dim=-1)).data.clone()
 
 
-class UncertaintyNet(pl.LightningModule):
-    
-    def __init__(self, state_dim, control_dim, quantile: float = 0.95, lr: float = 1e-3):
-        super(UncertaintyNet, self).__init__()
-        self.state_dim = state_dim
-        self.control_dim = control_dim
-        self.quantile = quantile
-        self.lr = lr
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + control_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, state_dim),
-            # nn.ReLU()
-        )
-        
-    def forward(self, z, u):
-        return self.net(torch.cat([z, u], dim=-1))
-    
-    def training_step(self, batch, batch_idx):
-        z = batch['states']       # (B, state_dim)
-        u = batch['actions']      # (B, control_dim)
-        r_true = torch.abs(batch['residuals'])  # (B, state_dim+control_dim)
-        
-        r_pred = self(z, u)
-        error = (r_true - r_pred)**2  # shape (B, state_dim+control_dim)
-        
-        # Pinball (quantile) loss
-        # q = self.quantile
-        # loss_matrix = torch.maximum(q * error, (q - 1) * error)**2
-        loss = error.mean()
-        
-        self.log('loss', loss, prog_bar=True, on_epoch=True, on_step=True)
-        self.log("ev", explained_variance(r_pred.flatten(), r_true.flatten() , multioutput='uniform_average'), prog_bar=True, on_step=False, on_epoch=True)
-        return loss
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.lr)
-
-
 ##########################################################
 # 3. PyTorch Lightning Module for Multi-Step Koopman Learning #
 ##########################################################
@@ -200,7 +124,7 @@ class KoopmanLightning(pl.LightningModule):
     The training objective is to match the multi-step latent trajectory with the encoder outputs
     from the corresponding ground truth future states.
     """
-    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.0001):
+    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001):
         """
         Args:
             state_dim (int): Dimensionality of the original state.
@@ -246,96 +170,105 @@ class KoopmanLightning(pl.LightningModule):
         z = self.embedding_net(s0)   # shape: (B, embed_total_dim)
         pred_latents = []
         for t in range(self.horizon):
-            a_t = actions[:, t, :]   # shape: (B, control_dim
+            a_t = actions[:, t, :]   # shape: (B, control_dim)
             z = self.koopman_operator(z, a_t)  # shape: (B, embed_total_dim)
             pred_latents.append(z.unsqueeze(1))
         pred_latents = torch.cat(pred_latents, dim=1)  # shape: (B, horizon, embed_total_dim)
         return pred_latents
 
     def training_step(self, batch, batch_idx):
-        # Expected shapes:
-        # batch['states']: (B, horizon+1, state_dim)
-        # batch['actions']: (B, horizon, action_dim)
-        # batch['next_states']: (B, horizon+1, state_dim)
         states = batch['states']
         actions = batch['actions']
         next_states = batch['next_states']
-        
-        # Corrected target calculation:
-        # Target states are s_1, s_2, ..., s_horizon from the ground truth
-        target_s = next_states # Shape: (B, horizon, state_dim)
-        B, H, S_dim = target_s.shape
 
-        # Reshape to (B*H, state_dim) for the embedding network
-        target_s_flat = target_s.reshape(B * H, -1)
-        
+        # 1. Multi-step prediction: pred_latents, shape (B, horizon, embed_total_dim)
+        pred_latents = self.forward(states, actions)
 
+        # 2. Ground truth latents: embedding of next_states (B, horizon, state_dim)
+        B, H, S_dim = next_states.shape
+        target_s_flat = next_states.reshape(B * H, -1)
         with torch.no_grad():
-            # Ensure embedding net is in eval mode if it has dropout/batchnorm, though yours doesn't seem to
-            # self.embedding_net.eval() # Optional here as training_step implies train mode
-            target_latents_flat = self.embedding_net(target_s_flat) # Use .float() assuming float32
-            # self.embedding_net.train() # Optional: switch back if needed
-
-            # Reshape back to (B, horizon, embed_total_dim)
+            target_latents_flat = self.embedding_net(target_s_flat)
             target_latents = target_latents_flat.reshape(B, H, -1)
 
-        pred_latents = self.forward(states, actions)
-        loss = (pred_latents - target_latents) ** 2
-        for i in range(self.horizon):
-            loss[:, i] = loss[:, i] * 0.99**i
-        # loss = loss.mean() + pred_latents[:, :, self.state_dim:].pow(2).mean() * 1e-3
-        loss = loss.mean()
-         
-        # # sparsity on Koopman weights
-        # lam_A = 1e-4
-        # loss += lam_A * (self.koopman_operator.A.weight.abs().sum() + self.koopman_operator.B.weight.abs().sum())
+        # 3. Main prediction loss (MSE in latent space)
+        pred_loss = (pred_latents - target_latents).pow(2).mean()
 
-        # # sparsity on embedding net weights
-        # lam_emb = 1e-5
-        # for w in self.embedding_net.parameters():
-        #     loss += lam_emb * w.abs().sum()
-        
-        self.log('train_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('ev_score', explained_variance(pred_latents.flatten(), target_latents.flatten(), multioutput='uniform_average'), prog_bar=True, on_step=False, on_epoch=True)
-        return loss
+        # 4. Consistency loss (autoencoding regularizer):
+        #    For each pred_latent, decode and re-encode. Decoding: just [:, :, :state_dim]
+        decoded = pred_latents[:, :, :S_dim]  # (B, horizon, state_dim)
+        decoded_flat = decoded.reshape(B * H, -1)
+        with torch.no_grad():
+            reencoded_flat = self.embedding_net(decoded_flat)
+            reencoded = reencoded_flat.reshape(B, H, -1)
+        consistency_loss = (reencoded - pred_latents).pow(2).mean()
+
+        # 5. Eigenvalue penalty (already in your code)
+        A_w = self.koopman_operator.A.weight
+        eigs = torch.linalg.eigvals(A_w)
+        mags = torch.abs(eigs)
+        excess = torch.clamp(mags - 1.0, min=0.0)
+        eig_penalty = torch.sum(excess ** 2)
+
+        # 6. Total loss (tune weights as needed)
+        consistency_weight = 0.5
+        eig_penalty_weight = 0.1
+        zeros = self.embedding_net(torch.zeros(1, self.state_dim))
+        zero_loss = torch.sum(zeros ** 2)
+        total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty + zero_loss
+
+        self.log('pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('eig', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('ev_score', explained_variance(
+            pred_latents[:, :, :S_dim].flatten(), target_latents[:, :, :S_dim].flatten(), multioutput='uniform_average'),
+            prog_bar=True, on_step=False, on_epoch=True)
+        return total_loss
+
 
     def validation_step(self, batch, batch_idx):
-        # Expected shapes:
-        # batch['states']: (B, horizon+1, state_dim)
-        # batch['actions']: (B, horizon, action_dim)
-        # batch['next_states']: (B, horizon+1, state_dim)
         states = batch['states']
         actions = batch['actions']
         next_states = batch['next_states']
-        
-        # Corrected target calculation:
-        # Target states are s_1, s_2, ..., s_horizon from the ground truth
-        target_s = next_states # Shape: (B, horizon, state_dim)
-        B, H, S_dim = target_s.shape
-        embed_total_dim = self.state_dim + self.embed_dim
-
-        # Reshape to (B*H, state_dim) for the embedding network
-        target_s_flat = target_s.reshape(B * H, -1)
-
-        with torch.no_grad():
-            # Ensure embedding net is in eval mode if it has dropout/batchnorm, though yours doesn't seem to
-            # self.embedding_net.eval() # Optional here as training_step implies train mode
-            target_latents_flat = self.embedding_net(target_s_flat) # Use .float() assuming float32
-            # self.embedding_net.train() # Optional: switch back if needed
-
-            # Reshape back to (B, horizon, embed_total_dim)
-            target_latents = target_latents_flat.reshape(B, H, -1)
 
         pred_latents = self.forward(states, actions)
-        loss = (pred_latents - target_latents) ** 2
-        for i in range(self.horizon):
-            loss[:, i] = loss[:, i] * 0.9**i
-        loss = loss.mean()
-        
-               
-        self.log('val_train_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('val_ev_score', explained_variance(pred_latents.flatten(), target_latents.flatten() , multioutput='uniform_average'), prog_bar=True, on_step=False, on_epoch=True)
-        return loss
+        B, H, S_dim = next_states.shape
+        target_s_flat = next_states.reshape(B * H, -1)
+        with torch.no_grad():
+            target_latents_flat = self.embedding_net(target_s_flat)
+            target_latents = target_latents_flat.reshape(B, H, -1)
+
+        pred_loss = (pred_latents - target_latents).pow(2).mean()
+
+        # Consistency (autoencoding) loss
+        decoded = pred_latents[:, :, :S_dim]
+        decoded_flat = decoded.reshape(B * H, -1)
+        with torch.no_grad():
+            reencoded_flat = self.embedding_net(decoded_flat)
+            reencoded = reencoded_flat.reshape(B, H, -1)
+        consistency_loss = (reencoded - pred_latents).pow(2).mean()
+
+        # Eigenvalue penalty
+        A_w = self.koopman_operator.A.weight
+        eigs = torch.linalg.eigvals(A_w)
+        mags = torch.abs(eigs)
+        excess = torch.clamp(mags - 1.0, min=0.0)
+        eig_penalty = torch.sum(excess ** 2)
+
+        consistency_weight = 0.5
+        eig_penalty_weight = 0.1
+        total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty
+
+        self.log('val_pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val_con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
+        # self.log('val_eig', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val_ev', explained_variance(
+            pred_latents[:, :, :S_dim].flatten(), target_latents[:, :, :S_dim].flatten(), multioutput='uniform_average'),
+            prog_bar=True, on_step=False, on_epoch=True)
+        return total_loss
+
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -402,15 +335,24 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     train_len = total_size - val_len
     train_dataset, val_dataset = random_split(dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=1)
-    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, num_workers=1)
+    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=13)
+    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, num_workers=13)
 
-    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1, check_val_every_n_epoch=5)
+    trainer = pl.Trainer(max_epochs=epochs, accelerator="cpu", devices=1, check_val_every_n_epoch=5)
     trainer.fit(koopman_model, train_loader, val_loader)
     
-    print(koopman_model.koopman_operator.A.weight)
-    print(koopman_model.koopman_operator.B.weight)
-
+    A_w = koopman_model.koopman_operator.A.weight
+    eigs = torch.linalg.eigvals(A_w)
+    mags = torch.abs(eigs)
+    print(mags)
+    
+    # for parameter in koopman_model.koopman_operator.parameters():
+    #     if parameter.grad is not None:
+    #         parameter.grad = None
+    
+    # trainer = pl.Trainer(max_epochs=epochs, accelerator="cpu", devices=1, check_val_every_n_epoch=5)
+    # trainer.fit(koopman_model, train_loader, val_loader)
+    
     # with torch.no_grad():
         
     #     koopman_model.eps_net = UncertaintyNet(koopman_model.state_dim + koopman_model.embed_dim, koopman_model.control_dim) if koopman_model.eps_net is None else koopman_model.eps_net

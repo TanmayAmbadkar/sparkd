@@ -12,6 +12,7 @@ from abstract_interpretation import domains, verification
 from benchmarks import envs
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 import gymnasium as gym 
+import matplotlib.pyplot as plt
 
 import traceback
 
@@ -41,9 +42,9 @@ np.random.seed(args.seed)
 hyperparams = vars(args)
 
 # Tensorboard
-if not os.path.exists("runs_final"):
-    os.makedirs("runs_final")
-writer = SummaryWriter('runs_final/{}_PPO_{}_H{}_D{}'.format(
+if not os.path.exists("runs_analysis"):
+    os.makedirs("runs_analysis")
+writer = SummaryWriter('runs_analysis/{}_PPO_{}_H{}_D{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim))
 
@@ -51,7 +52,7 @@ print(hyperparams)
 if not os.path.exists("logs_ppo"):
     os.makedirs("logs_ppo")
 
-file = open('runs_final/{}_PPO_{}_H{}_D{}/log.txt'.format(
+file = open('runs_analysis/{}_PPO_{}_H{}_D{}/log.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim), "w+")
 
@@ -85,6 +86,7 @@ while True:
     trunc = False
     state, info = env.reset()
     unsafe_flag = False
+    trajectory = [state]
     if True:
 
         print(i_episode, ": Real data")
@@ -109,6 +111,8 @@ while True:
             
 
             cost = 0
+            
+            trajectory.append(next_state)
             
             if env.unsafe(next_state, False):
 
@@ -160,6 +164,8 @@ while True:
         
         total_real_episodes += 1 
 
+    
+    
     if total_numsteps >= args.start_steps * train_steps:
     # if False:
         train_steps*=2
@@ -176,13 +182,13 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.koopman_model.lr = 0.00008
+            env_model.mars.koopman_model.lr = 0.001
             koopman_model = env_model.mars.koopman_model
             epochs = 50
         else:
             koopman_model = None
-            epochs = 150
-    
+            epochs = 200
+
         env_model, ev_score, r2_score = get_environment_model(
                 states, actions, next_states, rewards,
                 domains.DeepPoly(env.observation_space.low, env.observation_space.high),
@@ -200,8 +206,8 @@ while True:
         
         
         
-            
-        safety = domains.DeepPoly(torch.cat([env.safety.lower[0], -torch.ones(args.red_dim, )]), torch.cat([env.safety.upper[0], torch.ones(args.red_dim, )]))
+        
+        safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
 
         
 
@@ -212,6 +218,7 @@ while True:
         print("LATENT OBS SPACE", new_obs_space)
         
         unsafe_domains = safety.invert_polytope(new_obs_space)
+        print("LATENT UNSAFETY", unsafe_domains)
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
@@ -222,7 +229,6 @@ while True:
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
         safe_agent = Shield(shield, agent)
-        
         
 
     # Test the agent periodically
