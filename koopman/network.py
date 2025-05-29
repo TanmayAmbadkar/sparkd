@@ -146,11 +146,7 @@ class KoopmanLightning(pl.LightningModule):
         
         self.embedding_net = StateEmbedding(state_dim, embed_dim)
         self.koopman_operator = KoopmanOperator(embed_total_dim, control_dim)
-        self.eps_net = None
         self.criterion = nn.MSELoss()
-        self.z0 = None
-        self.lip_const = None
-        self.eps0 = None
 
     def forward(self, states, actions):
         """

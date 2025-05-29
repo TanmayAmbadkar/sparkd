@@ -8,6 +8,7 @@ import time
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from ppo import PPO
+from cpo import CPO, PCRPO, CUP, P3O
 from koopman.env_model import MarsE2cModel
 import osqp
 import scipy.sparse as sp
@@ -56,6 +57,139 @@ class PPOPolicy:
                  batch_size: int,
                  args):
         self.agent = PPO(gym_env.observation_space.shape[0],
+                         gym_env.action_space, args)
+        self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
+        self.updates = 0
+        self.minibatch_size = args.mini_batch_size
+        self.batch_size = batch_size
+
+    def __call__(self, state: np.ndarray, evaluate: bool = False):
+        return self.agent.select_action(state)[0]
+
+    def add(self, state, action, reward, next_state, done, cost):
+        self.memory.push(state, action, reward, next_state, done, cost)
+
+    def train(self):
+        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 10)
+        self.updates += 1
+        return ret
+
+    def report(self):
+        return 0, 0
+
+    def load_checkpoint(self, path):
+        self.agent.load_checkpoint(path)
+
+
+class CPOPolicy:
+
+    def __init__(self,
+                 gym_env: gym.Env,
+                 replay_size: int,
+                 seed: int,
+                 batch_size: int,
+                 args):
+        self.agent = CPO(gym_env.observation_space.shape[0],
+                         gym_env.action_space, args)
+        self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
+        self.updates = 0
+        self.minibatch_size = args.mini_batch_size
+        self.batch_size = batch_size
+
+    def __call__(self, state: np.ndarray, evaluate: bool = False):
+        return self.agent.select_action(state)[0]
+
+    def add(self, state, action, reward, next_state, done, cost):
+        self.memory.push(state, action, reward, next_state, done, cost)
+
+    def train(self):
+        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 10)
+        self.updates += 1
+        return ret
+
+    def report(self):
+        return 0, 0
+
+    def load_checkpoint(self, path):
+        self.agent.load_checkpoint(path)
+
+
+class P3OPolicy:
+
+    def __init__(self,
+                 gym_env: gym.Env,
+                 replay_size: int,
+                 seed: int,
+                 batch_size: int,
+                 args):
+        self.agent = P3O(gym_env.observation_space.shape[0],
+                         gym_env.action_space, args)
+        self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
+        self.updates = 0
+        self.minibatch_size = args.mini_batch_size
+        self.batch_size = batch_size
+
+    def __call__(self, state: np.ndarray, evaluate: bool = False):
+        return self.agent.select_action(state)[0]
+
+    def add(self, state, action, reward, next_state, done, cost):
+        self.memory.push(state, action, reward, next_state, done, cost)
+
+    def train(self):
+        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 10)
+        self.updates += 1
+        return ret
+
+    def report(self):
+        return 0, 0
+
+    def load_checkpoint(self, path):
+        self.agent.load_checkpoint(path)
+
+
+class CUPPolicy:
+
+    def __init__(self,
+                 gym_env: gym.Env,
+                 replay_size: int,
+                 seed: int,
+                 batch_size: int,
+                 args):
+        self.agent = CUP(gym_env.observation_space.shape[0],
+                         gym_env.action_space, args)
+        self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
+        self.updates = 0
+        self.minibatch_size = args.mini_batch_size
+        self.batch_size = batch_size
+
+    def __call__(self, state: np.ndarray, evaluate: bool = False):
+        return self.agent.select_action(state)[0]
+
+    def add(self, state, action, reward, next_state, done, cost):
+        self.memory.push(state, action, reward, next_state, done, cost)
+
+    def train(self):
+        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 10)
+        self.updates += 1
+        return ret
+
+    def report(self):
+        return 0, 0
+
+    def load_checkpoint(self, path):
+        self.agent.load_checkpoint(path)
+
+
+
+class PCRPOPolicy:
+
+    def __init__(self,
+                 gym_env: gym.Env,
+                 replay_size: int,
+                 seed: int,
+                 batch_size: int,
+                 args):
+        self.agent = PCRPO(gym_env.observation_space.shape[0],
                          gym_env.action_space, args)
         self.memory = ReplayMemory(replay_size, gym_env.observation_space, gym_env.action_space.shape[0], seed)
         self.updates = 0
@@ -175,11 +309,10 @@ class ProjectionPolicy:
         # linprog minimizes, so pass -m
         sol = scipy.optimize.linprog(-m, bounds=bounds)
         return sol.x[:u_dim]
-
-
+    
     def solve(self, state: np.ndarray,
-              action: Optional[np.ndarray] = None,
-              debug: bool = False) -> Tuple[np.ndarray, bool]:
+          action: Optional[np.ndarray] = None,
+          debug: bool = False) -> Tuple[np.ndarray, bool]:
         original_state = state.copy()
         shielded = True
         s_dim = self.state_space.shape[0]
@@ -197,17 +330,15 @@ class ProjectionPolicy:
         best_score = np.inf
         best_u0 = None
 
+        lambda_slack = 1e-4  # slack penalty (tune as needed)
+
         for poly in self.safe_polys:
             P_poly = poly[:, :-1]
             b_poly = poly[:, -1]
-            # print()
-            # Skip if the current state is not in the safe polytope.
             if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
                 continue
-                # pass
-            
+
             # === Build safety constraints over the horizon ===
-            # We create arrays F, G, and h that capture the propagation of the safe constraints.
             F = []
             G = []
             h = []
@@ -221,24 +352,19 @@ class ProjectionPolicy:
                 for t in range(j - 1, -1, -1):
                     F[j-1][t] = np.dot(F[j-1][t+1], A)
                     G[j-1][t] = np.dot(F[j-1][t+1], B)
-                    # eps is an interval; we take the maximum possible deviation.
-                    # epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
                     epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
                     h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1] + epsmax
-                    # h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1]
 
-            # === Assemble the full QP constraints ===
-            # Total number of constraints: safety constraints plus action bounds.
-            n_constraints = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim
-            total_vars = self.horizon * u_dim  # full decision vector: [u0; u1; ...; u_{H-1}]
-            M = np.zeros((n_constraints, total_vars))
-            bias = np.zeros(n_constraints)
+            n_con = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim  # total constraints
+            total_vars = self.horizon * u_dim  # action variables
+
+            # === Assemble constraint matrices ===
+            M = np.zeros((n_con, total_vars))
+            bias = np.zeros(n_con)
             ind = 0
             step = P_poly.shape[0]
             for j in range(self.horizon):
-                # Extend G[j] with zeros so that its length is self.horizon.
                 G[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
-                # Concatenate the matrices for time step j (excluding the final entry)
                 M[ind:ind+step, :] = np.concatenate(G[j][:-1], axis=1)
                 bias[ind:ind+step] = h[j][0] + np.dot(F[j][0], state)
                 ind += step
@@ -254,80 +380,91 @@ class ProjectionPolicy:
                 ind += u_dim
                 ind2 += u_dim
 
-            # --- Fixed-QP: u1..u_{H-1} ---
+            # ----------- SLACK QP LOGIC BELOW --------------------
+            # Add slack variable s >= 0 for each constraint
+            slack_size = n_con
+
+            # ========== FIXED QP (u1,...u_{H-1}, s) ==========
             fixed_total = (self.horizon - 1) * u_dim
             M_first = M[:, :u_dim]
             M_rest  = M[:, u_dim:]
             new_bias = bias + M_first @ action
 
-            P_fixed = (1e-6 * np.eye(fixed_total))
-            q_fixed = np.zeros(fixed_total)
-            G_fixed = sp.csc_matrix(M_rest)
-            h_fixed = -new_bias
-            l_fixed = -np.inf * np.ones_like(h_fixed) 
-            u_fixed = h_fixed
+            # QP variables: [u_rest; slack]
+            n_fixed = fixed_total
+            n_var_fixed = n_fixed + slack_size
 
-            # Solve fixed-QP with OSQP
-            
+            # Objective: tiny penalty on action, larger penalty on slack
+            P_fixed = np.eye(n_var_fixed) * 1e-6
+            q_fixed = np.zeros(n_var_fixed)
+            q_fixed[n_fixed:] = lambda_slack
+
+            # Constraints: G_fixed @ u_rest - s <= h_fixed, s >= 0
+            # [M_rest | -I] @ [u_rest; slack] <= h_fixed
+            G_fixed_qp = sp.hstack([sp.csc_matrix(M_rest), -sp.eye(slack_size)], format='csc')
+            l_fixed = -np.inf * np.ones(slack_size)
+            u_fixed = -new_bias
+
+            # Slack bounds: s >= 0
+            G_slack_identity = sp.hstack([sp.csc_matrix((slack_size, n_fixed)), sp.eye(slack_size)], format='csc')
+            l_slack = np.zeros(slack_size)
+            u_slack = np.inf * np.ones(slack_size)
+
+            # Stack all constraints
+            A_fixed_total = sp.vstack([G_fixed_qp, G_slack_identity], format='csc')
+            l_fixed_total = np.hstack([l_fixed, l_slack])
+            u_fixed_total = np.hstack([u_fixed, u_slack])
+
             fixed_solver = osqp.OSQP()
             fixed_solver.setup(P=sp.csc_matrix(P_fixed),
-                                     q=q_fixed,
-                                     A=G_fixed,
-                                     l=l_fixed,
-                                     u=u_fixed,
-                                     warm_start=False,
-                                     verbose=False,
-                                    #  max_iter = 8000,
-                                )
+                            q=q_fixed,
+                            A=A_fixed_total,
+                            l=l_fixed_total,
+                            u=u_fixed_total,
+                            warm_start=False,
+                            verbose=False)
             res_fixed = fixed_solver.solve()
             fixed_feasible = (res_fixed.info.status == 'solved')
-            # fixed_feasible = False
 
             if fixed_feasible:
                 candidate_u0 = action.copy()
                 candidate_score = 0.0
                 shielded = False
             else:
-                
-                # --- Full-QP: optimize [u0; u1..] ---
-                total_vars = self.horizon * u_dim
-                P_full = 1e-6 * np.eye(total_vars)
-                # keep u0 near policy
-                # P_full[:u_dim, :u_dim] = np.eye(u_dim)
-                q_full = np.zeros((self.horizon)*u_dim)
-                # q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
-                A_full = sp.csc_matrix(M)
-                l_full = -np.inf * np.ones_like(bias)
+                # ========== FULL QP (u0,...,u_{H-1}, s) ==========
+                n_full = total_vars
+                n_var_full = n_full + slack_size
+
+                # Objective: tiny penalty on action, larger penalty on slack
+                P_full = np.eye(n_var_full) * 1e-6
+                q_full = np.zeros(n_var_full)
+                q_full[n_full:] = lambda_slack
+
+                # Constraints: [M | -I] @ [u_all; slack] <= -bias
+                G_full_qp = sp.hstack([sp.csc_matrix(M), -sp.eye(slack_size)], format='csc')
+                l_full = -np.inf * np.ones(slack_size)
                 u_full = -bias
+
+                # Slack bounds: s >= 0
+                G_slack_identity = sp.hstack([sp.csc_matrix((slack_size, n_full)), sp.eye(slack_size)], format='csc')
+                l_slack = np.zeros(slack_size)
+                u_slack = np.inf * np.ones(slack_size)
+
+                # Stack all constraints
+                A_full_total = sp.vstack([G_full_qp, G_slack_identity], format='csc')
+                l_full_total = np.hstack([l_full, l_slack])
+                u_full_total = np.hstack([u_full, u_slack])
+
                 full_solver = osqp.OSQP()
                 full_solver.setup(P=sp.csc_matrix(P_full),
-                                        q=q_full,
-                                        A=A_full,
-                                        l=l_full,
-                                        u=u_full,
-                                        warm_start=False,
-                                        verbose=False)
-                #  # tiny identity to make P positive‐definite
-                # P = 0 * sp.eye(total_vars, format='csc')
-                # q = np.zeros(total_vars)
-                
-                # # constraints:  A x <= b
-                # A_full = sp.csc_matrix(M)
-                # l = -np.inf * np.ones_like(bias)
-                # u = -bias
-                
-                # # box bounds can be stacked as extra rows:
-                # # [ I ; -I ] @ U <= [ u_max; -u_min ]
-                # I = sp.eye(total_vars, format='csc')
-                # A_full = sp.vstack([A_full, I, -I], format='csc')
-                # l = np.hstack([l, -np.inf*np.ones(total_vars), -np.inf*np.ones(total_vars)])
-                # u = np.hstack([u, np.tile(self.action_space.low, self.horizon), -np.tile(self.action_space.high, self.horizon)])
-                # full_solver = osqp.OSQP()
-                # full_solver.setup(P=P, q=q, A=A_full, l=l, u=u, verbose=False)
-                
+                                q=q_full,
+                                A=A_full_total,
+                                l=l_full_total,
+                                u=u_full_total,
+                                warm_start=False,
+                                verbose=False)
                 res_full = full_solver.solve()
                 if res_full.info.status != 'solved':
-                    # print(res_full.info.status_val, res_full.info.status)
                     continue
                 full_sol = res_full.x
                 candidate_u0 = full_sol[:u_dim]
@@ -347,6 +484,8 @@ class ProjectionPolicy:
         self.saved_action = best_u0
         self.shielded = shielded
         return best_u0, shielded
+
+
 
     def __call__(self, state: np.ndarray) -> np.ndarray:
         if self.saved_state is not None and np.allclose(state, self.saved_state):
