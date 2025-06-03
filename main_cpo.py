@@ -41,7 +41,7 @@ parser.add_argument('--log_std_min', type=float, default=-20)
 parser.add_argument('--log_std_max', type=float, default=2)
 
 # --- OPTIMIZATION/LOSS ---
-parser.add_argument('--lr', type=float, default=0.0001)
+parser.add_argument('--lr', type=float, default=0.00001)
 parser.add_argument('--max_grad_norm', type=float, default=0.5, help="Gradient clipping max norm")
 parser.add_argument('--value_coeff', type=float, default=0.5, help="Coefficient for value loss")
 parser.add_argument('--entropy_coeff', type=float, default=0.01, help="Coefficient for entropy loss")
@@ -57,7 +57,7 @@ parser.add_argument('--eps_clip', type=float, default=0.2, help="Clipping parame
 
 # --- CONSTRAINTS (Multi-constraint support) ---
 parser.add_argument('--num_costs', type=int, default=1, help="Number of cost constraints")
-parser.add_argument('--cost_limit', type=float, default=2.0, help="Cost constraint (max cost per episode)")
+parser.add_argument('--cost_limit', type=float, default=0.1, help="Cost constraint (max cost per episode)")
 parser.add_argument('--lagrange_init', type=float, default=1.0,
                     help="Initial values for Lagrange multipliers (list or single value)")
 parser.add_argument('--lagrange_lr', type=float, default=0.01, help="Learning rate for Lagrange multiplier update")
@@ -68,10 +68,10 @@ parser.add_argument('--switching_temp', type=float, default=1.0, help="Switching
 parser.add_argument('--slack_coef', type=float, default=1.0, help="Slack coefficient (PCRPO, if using slacks)")
 
 # --- CUP-specific ---
-parser.add_argument('--cup_trust_region', type=float, default=0.01, help="Trust region size (KL bound) for CUP")
-parser.add_argument('--cup_bias_corrected_gae', action='store_true', help="Enable bias-corrected GAE in CUP")
-parser.add_argument('--cup_lagrangian', action='store_true', help="Enable primal-dual Lagrange (CUP), else use penalty")
-parser.add_argument('--cup_penalty', action='store_true', help="Enable penalty method for CUP constraint (not primal-dual)")
+parser.add_argument('--cup_trust_region', type=float, default=0.1, help="Trust region size (KL bound) for CUP")
+parser.add_argument('--cup_bias_corrected_gae', action='store_true', default=True, help="Enable bias-corrected GAE in CUP")
+parser.add_argument('--cup_lagrangian', action='store_true', default=True, help="Enable primal-dual Lagrange (CUP), else use penalty")
+parser.add_argument('--cup_penalty', action='store_true', default=True, help="Enable penalty method for CUP constraint (not primal-dual)")
 
 # --- P3O-specific arguments ---
 
@@ -202,15 +202,17 @@ while True:
             
             if len(agent.memory) >= args.batch_size:
                 losses = agent.train()
+                for key, value in losses.items():
+                    writer.add_scalar(f'loss/{key[4:]}', value, total_numsteps)
 
-                writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
-                writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
-                writer.add_scalar(f'loss/cost_value_loss', losses['avg_cost_value_loss'], total_numsteps)
-                writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
-                writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
-                writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
-                writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
-                writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
+                # writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
+                # writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
+                # writer.add_scalar(f'loss/cost_value_loss', losses['avg_cost_value_loss'], total_numsteps)
+                # writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
+                # writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
+                # writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
+                # writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
+                # writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
 
 
             state = next_state

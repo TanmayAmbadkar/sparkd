@@ -46,7 +46,7 @@ class CostFunction:
         B = mat_dyn[:, s_dim:-1]
         c = mat_dyn[:, -1]
 
-        best_score = np.inf
+        best_score = 0
 
         lambda_slack = 1e-4  # slack penalty (tune as needed)
         
@@ -55,6 +55,7 @@ class CostFunction:
             P_poly = poly[:, :-1]
             b_poly = poly[:, -1]
             if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
+                print("State is not in the safe polytope, skipping...")
                 continue
 
             # === Build safety constraints over the horizon ===
@@ -145,11 +146,14 @@ class CostFunction:
             res_fixed = fixed_solver.solve()
             slacks = res_fixed.x[-slack_size:]
             
-            if sum(slacks) <= best_score:
+            if sum(slacks) >= best_score:
+                
                 # No slack needed, so we can use the action directly
-                best_score = sum(slacks)
+                best_score = sum(slacks) if sum(slacks) > 0 else 0.0
 
 
+        if best_score == np.inf:
+            best_score = 0.0
         
         return best_score
 

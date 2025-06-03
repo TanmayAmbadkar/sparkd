@@ -54,39 +54,39 @@ class BipedalWalkerEnv(gym.Env):
         lower_bounds[3] = -1
         upper_bounds[3] = 1
 
-        #Joint Position
-        lower_bounds[4] = -2
-        upper_bounds[4] = 2
+        # #Joint Position
+        # lower_bounds[4] = -2
+        # upper_bounds[4] = 2
         
-        lower_bounds[5] = -2
-        upper_bounds[5] = 2
+        # lower_bounds[5] = -2
+        # upper_bounds[5] = 2
         
         
-        #Joint Position
-        lower_bounds[6] = -2
-        upper_bounds[6] = 2
+        # #Joint Position
+        # lower_bounds[6] = -2
+        # upper_bounds[6] = 2
 
-        lower_bounds[7] = -2
-        upper_bounds[7] = 2
+        # lower_bounds[7] = -2
+        # upper_bounds[7] = 2
         
         
-        # lower_bounds[8] = 0
-        # upper_bounds[8] = 5
+        # # lower_bounds[8] = 0
+        # # upper_bounds[8] = 5
         
-        #Joint Position
-        lower_bounds[9] = -2
-        upper_bounds[9] = 2
+        # #Joint Position
+        # lower_bounds[9] = -2
+        # upper_bounds[9] = 2
 
-        lower_bounds[10] = -2
-        upper_bounds[10] = 2
+        # lower_bounds[10] = -2
+        # upper_bounds[10] = 2
         
         
-        #Joint Position
-        lower_bounds[11] = -2
-        upper_bounds[11] = 2
+        # #Joint Position
+        # lower_bounds[11] = -2
+        # upper_bounds[11] = 2
         
-        lower_bounds[12] = -2
-        upper_bounds[12] = 2
+        # lower_bounds[12] = -2
+        # upper_bounds[12] = 2
         
         #legs contact with ground
         # lower_bounds[13] = -0.01
@@ -99,23 +99,20 @@ class BipedalWalkerEnv(gym.Env):
         input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
         polys = input_deeppoly_domain.to_hyperplanes(self.env.observation_space)
         
-        print("NUMBER OF SAFE POLYS", len(polys[0]))
-
         # Set the safety constraints using the DeepPolyDomain and the polys
         self.safety = input_deeppoly_domain
         self.original_safety = input_deeppoly_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
-      
+        print(self.original_safety)
+        # print(self.observation_space)
+        
     def unsafe_constraints(self):
         
-        # unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
-        # self.polys = []
-        # self.unsafe_domains = unsafe_deeppolys
-        # self.polys = self.safety.invert_polytope()
         self.polys = self.safety.invert_polytope(self.env.observation_space)
-        
-        print("NUMBER OF UNSAFE POLYS", len(self.polys))
+        print(len(self.polys))
+            
+
 
 
     def step(self, action):

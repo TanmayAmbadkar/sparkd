@@ -8,7 +8,7 @@ from benchmarks.utils import *
 
 class SafetyPointGoalEnv(gymnasium.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("SafetyPointGoal1-v0", render_mode = "rgb_array")
+        self.env = gym.make("SafetyPointCircle2-v0", render_mode = "rgb_array")
         self.action_space = self.env.action_space
         
         self.observation_space = gymnasium.spaces.Box(
@@ -16,6 +16,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
             high=np.nan_to_num(self.env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333),
             dtype=np.float32
         )
+        
 
 #[-5,   -19,  -9.82, -0.8, -0.2,  -0.1, -0.1, 0.1, -3.,  -0.5, -0.52, -0.1, ]
 #[-2.69 -2.73  9.81  -0.06 -0.04  0.    0.    0.    2.23  0.5  -0.04  0.
@@ -30,15 +31,6 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.safe_polys = []
         self.polys = []
         
-        self.MIN = np.array([-100, -100, -100, -100, -100, -100, -100, -100, -100, -100,
-                -100, -0.1, 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
-
-        self.MAX = np.concatenate((np.array([5, 19, 9.82, 0.8, 0.2, 0.1, 0.1, 0.1, 3., 0.5,
-                0.52, 0.1, ]), np.ones(48)))
 
         self.safety_constraints()
         self.unsafe_constraints()
@@ -71,9 +63,9 @@ class SafetyPointGoalEnv(gymnasium.Env):
         #     lower_bounds[i] = 0
         #     upper_bounds[i] = 1
             
-        for i in range(28, 60):
+        for i in range(16, 28):
             lower_bounds[i] = 0
-            upper_bounds[i] = 0.9
+            upper_bounds[i] = 0.99
             
         # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
@@ -131,26 +123,21 @@ class SafetyPointGoalEnv(gymnasium.Env):
     def unsafe(self, state: np.ndarray, simulated:bool = False) -> bool:
         
         if simulated:
-            
-            truth = []
             for polys in self.safe_polys:
                 
                 A = polys[:,:-1]
                 b = -polys[:,-1]
-                
-                truth.append(not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1)))
-            return all(truth)
+                return not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
         else:
-            truth = []
             for polys in self.original_safe_polys:
                 
                 A = polys[:,:-1]
                 b = -polys[:,-1]
                 # print(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
-                temp_indices = list(range(12,60)) + (list(range(72,120)))
-                truth.append(not np.all((A @ state.reshape(-1, 1) <= b.reshape(-1, 1))[temp_indices]))
-            
-            return all(truth)
+                return not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
+    
+
+
     
 
 
