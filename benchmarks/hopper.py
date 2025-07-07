@@ -3,15 +3,16 @@ import torch
 import numpy as np
 from abstract_interpretation import domains, verification
 import sys
-
+from gymnasium.wrappers import NormalizeObservation
 class HopperEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Hopper-v4")
+        self.env = gym.make("Hopper-v5")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
         self.safety = safety
+        print(self.action_space.low, self.action_space.high)
 
         self._max_episode_steps = 1000
        

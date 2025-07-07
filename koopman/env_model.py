@@ -186,22 +186,29 @@ def get_environment_model(     # noqa: C901
         epochs: int = 50) -> EnvModel:
 
     
-    # means = np.mean(input_states, axis=0)
-    # stds = np.std(input_states, axis=0)
-    # stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
-
-    # print("Means:", means)
-    # print("Stds:", stds)
+    means = np.mean(input_states.reshape(-1, input_states.shape[-1]), axis=0)
+    stds = np.std(input_states.reshape(-1, input_states.shape[-1]), axis=0)
+    print("Input states mean:", means.shape)
+    print("Input states std:", stds.shape)
+    stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
     
-    means = np.zeros(domain.lower.shape[1])
-    stds = np.ones(domain.lower.shape[1])
+    # means = np.zeros_like(means)
+    # stds = np.ones_like(stds)
+
+    print("Means:", means)
+    print("Stds:", stds)
+    
+    # means = np.zeros(domain.lower.shape[1])
+    # stds = np.ones(domain.lower.shape[1])
     
     # if koopman_model is not None:
     #     means = koopman_model.mean + 0.001 * (means - koopman_model.mean)
     #     stds = koopman_model.std + 0.001 * (means - koopman_model.mean)
     
-    # domain.lower = (domain.lower - means) / stds
-    # domain.upper = (domain.upper - means) / stds
+    domain.lower = (domain.lower - means) / stds
+    domain.upper = (domain.upper - means) / stds
+    input_states = (input_states - means) / stds
+    output_states = (output_states - means) / stds
     # print("Input states:", input_states)
     
     if koopman_model is None:
@@ -215,20 +222,7 @@ def get_environment_model(     # noqa: C901
         
     fit_koopman(input_states, actions, output_states, koopman_model, horizon, epochs=epochs)
 
-    koopman_model.mean = means
-    koopman_model.std = stds
-
-    
-    # print(input_states.shape, actions.shape, output_states.shape)
-    # parsed_mars = MarsE2cModel(koopman_model, latent_dim, input_states.shape[-1])
-    # X = np.concatenate((input_states.reshape(-1, input_states.shape[-1]), actions.reshape(-1, actions.shape[-1])), axis=1)
-    # print(X.shape)
-    # Yh = np.array([parsed_mars(state, normalized=True) for state in X]).reshape(-1, input_states.shape[-1])
-    # output_states = output_states.reshape(-1, input_states.shape[-1])
-    # print("Model estimation error:", np.mean((Yh - (output_states).reshape(-1, input_states.shape[-1]))**2))
-    # print("Explained Variance Score:", explained_variance_score(
-    #     output_states, Yh))
-    
+    koopman_model.update_stats(means, stds)
 
     
     print(input_states.shape, actions.shape, output_states.shape)
@@ -262,8 +256,8 @@ def get_environment_model(     # noqa: C901
             output_states_copy[:,i, :input_states.shape[-1]].reshape(-1), Yh_copy[:,i, :input_states.shape[-1]].reshape(-1))
         r2_old = r2_score(
             output_states_copy[:,i,  :input_states.shape[-1]].reshape(-1), Yh_copy[:,i, :input_states.shape[-1]].reshape(-1))
-        print(f"Old Explained Variance Score, horizon {i}:", ev_score)
-        print(f"Old R2 Score, horizon {i}:", r2)
+        print(f"Old Explained Variance Score, horizon {i}:", ev_score_old)
+        print(f"Old R2 Score, horizon {i}:", r2_old)
                 
             # number of output dims
 
@@ -274,7 +268,7 @@ def get_environment_model(     # noqa: C901
             
         # 1) Compute the absolute residuals for every (sample, step, feature)
         
-    if ev_score_old > ev_score:
+    if ev_score_old >= ev_score:
         Yh = Yh_copy
         output_states = output_states_copy
         parsed_mars = parsed_mars_copy
@@ -322,16 +316,17 @@ def get_environment_model(     # noqa: C901
 
     # Get a confidence interval based on the quantile of the chi-squared
     # distribution
-    from sklearn.linear_model import LinearRegression
-    lr = LinearRegression().fit(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat)
-    print("R² of residual vs (z,u):", lr.score(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat))
+    # from sklearn.linear_model import LinearRegression
+    # lr = LinearRegression().fit(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat)
+    # print("R² of residual vs (z,u):", lr.score(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat))
        
     conf = np.sqrt(scipy.stats.chi2.ppf(
         0.9, output_states[:, 0, :].shape[1]))
     err = diff + conf
     print("Computed error:", err, "(", diff, conf, ")")
-    err = err * np.zeros(output_states[:, 0, :].shape[1])
-    error = np.minimum(upper_bound, quantile)
+    # err = err
+    error = quantile
+    # error = np.minimum(np.minimum(upper_bound, quantile), err)
     
     
     parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
@@ -339,6 +334,7 @@ def get_environment_model(     # noqa: C901
 
 
 
-    print("Final Error", parsed_mars.error, error)
+    print("Final Error", parsed_mars.error)
 
-    return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2
+    return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2, means, stds
+ 

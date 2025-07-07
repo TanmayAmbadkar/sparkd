@@ -99,87 +99,106 @@ class ProjectionPolicy:
         self.safe_polys = safe_polys
         self.transform = transform
 
-        # OSQP solvers for warm-starting
-        # self._fixed_solver = osqp.OSQP()
-        # self._full_solver = osqp.OSQP()
-        self._backup_qp = osqp.OSQP()
+    
+    def backup(self, state: np.ndarray, epsilon: float = 0.1) -> np.ndarray:
+        """
+        Chooses a backup action by finding a smooth control sequence that pushes
+        the system away from the nearest unsafe polygon.
 
-    def backup(self, state: np.ndarray) -> np.ndarray:
+        This is a two-stage process:
+        1. A QP finds the geometric "escape vector" from the current state.
+        2. A second QP finds a smooth, full-horizon action sequence that
+        aligns with this escape vector, avoiding "bang-bang" control.
+
+        Args:
+            state: The current original system state.
+            epsilon: Regularization weight. Higher values lead to smoother,
+                    smaller-norm actions.
+
+        Returns:
+            The first action (u_0) of the optimal safe sequence.
         """
-        Choose a backup action if the projection fails, by finding the
-        minimum‐norm u that pushes you out of each unsafe poly, then picking
-        the smallest among those.
-        """
+        # --- Stage 1: Find Geometric Escape Vector (Identical to your original code) ---
         with torch.no_grad():
             z = self.transform(state.reshape(1, -1)).reshape(-1,)
-        u_dim = self.action_space.shape[0]
-
         
         s_dim = self.state_space.shape[0]
-        # lift & flatten
-        with torch.no_grad():
-            z = self.transform(state.reshape(1, -1)).reshape(-1,)
-        
-        # build Hessian = I  (minimize ½‖u‖²)
-        P = sp.eye(s_dim, format='csc')
-        q = np.zeros(s_dim)
-
+        P_stage1 = sp.eye(s_dim, format='csc')
+        q_stage1 = np.zeros(s_dim)
         best_val = np.inf
         best_proj = np.zeros(s_dim)
 
         for unsafe_mat in self.unsafe_polys:
-            A_ineq = unsafe_mat[:, :-1]         # shape (m, s_dim)
+            A_ineq = unsafe_mat[:, :-1]
             b_ineq = -unsafe_mat[:, -1] - (A_ineq @ z)
             
-            # OSQP wants:  l ≤ A_ineq u ≤ u,  so we set l = -∞, u = b_ineq
-            A_qp = sp.csc_matrix(A_ineq)
-            l_qp = -np.inf * np.ones_like(b_ineq)
-            u_qp = b_ineq
+            # This setup is inefficient; ideally the solver is initialized once.
+            # But keeping it for consistency with your original code.
+            backup_qp_stage1 = osqp.OSQP()
+            backup_qp_stage1.setup(P=P_stage1, q=q_stage1, A=sp.csc_matrix(A_ineq),
+                                l=-np.inf * np.ones_like(b_ineq), u=b_ineq,
+                                verbose=False)
+            res = backup_qp_stage1.solve()
+            
+            if res.info.status == 'solved' and np.linalg.norm(res.x) < best_val:
+                best_val = np.linalg.norm(res.x)
+                best_proj = res.x
 
-            # (re)setup & solve
-            backup_qp = osqp.OSQP()
-            backup_qp.setup(P=P, q=q, A=A_qp,
-                                  l=l_qp, u=u_qp,
-                                  warm_start=True,
-                                  verbose=False)
-            res = backup_qp.solve()
-            if res.info.status != 'solved':
-                print("unsolved")
-                continue
+        if np.linalg.norm(best_proj) < 1e-6:
+            # Could not find a valid escape direction
+            return np.zeros(self.action_space.shape[0])
+            
+        best_proj /= np.linalg.norm(best_proj)
 
-            u_star = res.x
-            val = np.linalg.norm(u_star)
-            if val < best_val:
-                best_val = val
-                best_proj = u_star
-
-        # normalize direction
-        best_proj /= (np.linalg.norm(best_proj) + 1e-6)
-
-        # now compute the full‐horizon m vector and call linprog as before
+        # --- Stage 2: Solve for a Smooth Action Sequence (QP instead of LP) ---
         u_dim = self.action_space.shape[0]
+        total_control_dim = self.horizon * u_dim
+
+        # Get linearization and compute the linear part of the cost vector `m`
+        # (Identical to your original code)
         point = np.concatenate((z, np.zeros(u_dim)))
         mat, _ = self.env.get_matrix_at_point(point, s_dim)
         A_lin = mat[:, :s_dim]
         B_lin = mat[:, s_dim:-1]
-
-        m = np.zeros(self.horizon * u_dim)
+        
+        m = np.zeros(total_control_dim)
         for i in range(self.horizon):
             A_pow = np.linalg.matrix_power(A_lin, self.horizon - i - 1)
             m[i*u_dim:(i+1)*u_dim] = (B_lin.T @ A_pow.T @ (-best_proj)).T
 
-        act_bounds = np.stack((self.action_space.low,
-                                self.action_space.high), axis=1)
-        bounds = np.tile(act_bounds, (self.horizon, 1))
-
-        # linprog minimizes, so pass -m
-        sol = scipy.optimize.linprog(-m, bounds=bounds)
-        return sol.x[:u_dim]
-
+        # --- QP Formulation ---
+        # Objective: min -m^T * U + epsilon * ||U||^2
+        # Standard form: min 0.5 * U^T * P * U + q^T * U
+        
+        # Quadratic part: P = 2 * epsilon * I
+        P_stage2 = sp.csc_matrix(2 * epsilon * sp.eye(total_control_dim))
+        
+        # Linear part: q = -m
+        q_stage2 = -m
+        
+        # Constraints are just the action bounds
+        A_stage2 = sp.csc_matrix(sp.eye(total_control_dim))
+        l_stage2 = np.tile(self.action_space.low, self.horizon)
+        u_stage2 = np.tile(self.action_space.high, self.horizon)
+        
+        # Setup and solve the QP
+        backup_qp_stage2 = osqp.OSQP()
+        backup_qp_stage2.setup(P=P_stage2, q=q_stage2, A=A_stage2, 
+                            l=l_stage2, u=u_stage2, verbose=False)
+        
+        res_final = backup_qp_stage2.solve()
+        
+        if res_final.info.status == 'solved':
+            full_action_sequence = res_final.x
+            return full_action_sequence[:u_dim]
+        else:
+            print("WARN: Backup QP failed to find a smooth action. Returning zero action.")
+            return np.zeros(u_dim)
+    
 
     def solve(self, state: np.ndarray,
-              action: Optional[np.ndarray] = None,
-              debug: bool = False) -> Tuple[np.ndarray, bool]:
+          action: Optional[np.ndarray] = None,
+          debug: bool = False) -> Tuple[np.ndarray, bool]:
         original_state = state.copy()
         shielded = True
         s_dim = self.state_space.shape[0]
@@ -200,14 +219,13 @@ class ProjectionPolicy:
         for poly in self.safe_polys:
             P_poly = poly[:, :-1]
             b_poly = poly[:, -1]
-            # print()
+            
             # Skip if the current state is not in the safe polytope.
             if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
                 continue
-                # pass
-            
+                
             # === Build safety constraints over the horizon ===
-            # We create arrays F, G, and h that capture the propagation of the safe constraints.
+            # ... (This part of the code remains identical) ...
             F = []
             G = []
             h = []
@@ -221,29 +239,23 @@ class ProjectionPolicy:
                 for t in range(j - 1, -1, -1):
                     F[j-1][t] = np.dot(F[j-1][t+1], A)
                     G[j-1][t] = np.dot(F[j-1][t+1], B)
-                    # eps is an interval; we take the maximum possible deviation.
-                    # epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
                     epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
                     h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1] + epsmax
-                    # h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1]
+            
 
             # === Assemble the full QP constraints ===
-            # Total number of constraints: safety constraints plus action bounds.
+            # ... (This part of the code also remains identical) ...
             n_constraints = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim
-            total_vars = self.horizon * u_dim  # full decision vector: [u0; u1; ...; u_{H-1}]
+            total_vars = self.horizon * u_dim
             M = np.zeros((n_constraints, total_vars))
             bias = np.zeros(n_constraints)
             ind = 0
             step = P_poly.shape[0]
             for j in range(self.horizon):
-                # Extend G[j] with zeros so that its length is self.horizon.
                 G[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
-                # Concatenate the matrices for time step j (excluding the final entry)
                 M[ind:ind+step, :] = np.concatenate(G[j][:-1], axis=1)
                 bias[ind:ind+step] = h[j][0] + np.dot(F[j][0], state)
                 ind += step
-
-            # Add action bound constraints.
             ind2 = 0
             for j in range(self.horizon):
                 M[ind:ind+u_dim, ind2:ind2+u_dim] = np.eye(u_dim)
@@ -254,80 +266,58 @@ class ProjectionPolicy:
                 ind += u_dim
                 ind2 += u_dim
 
-            # --- Fixed-QP: u1..u_{H-1} ---
+            ### START OF REPLACEMENT ###
+            # --- LP Feasibility Check: u1..u_{H-1} ---
+            # We replace the Fixed-QP with a more efficient LP feasibility check.
             fixed_total = (self.horizon - 1) * u_dim
             M_first = M[:, :u_dim]
-            M_rest  = M[:, u_dim:]
+            M_rest = M[:, u_dim:]
+            # The constraints are M_rest @ u_rest + (bias + M_first @ u0) <= 0
+            # which is M_rest @ u_rest <= - (bias + M_first @ u0)
             new_bias = bias + M_first @ action
 
-            P_fixed = (1e-6 * np.eye(fixed_total))
-            q_fixed = np.zeros(fixed_total)
-            G_fixed = sp.csc_matrix(M_rest)
-            h_fixed = -new_bias
-            l_fixed = -np.inf * np.ones_like(h_fixed) 
-            u_fixed = h_fixed
-
-            # Solve fixed-QP with OSQP
+            # For a feasibility LP, the cost vector 'c' is all zeros.
+            c_lp = np.zeros(fixed_total)
             
-            fixed_solver = osqp.OSQP()
-            fixed_solver.setup(P=sp.csc_matrix(P_fixed),
-                                     q=q_fixed,
-                                     A=G_fixed,
-                                     l=l_fixed,
-                                     u=u_fixed,
-                                     warm_start=False,
-                                     verbose=False,
-                                    #  max_iter = 8000,
-                                )
-            res_fixed = fixed_solver.solve()
-            fixed_feasible = (res_fixed.info.status == 'solved')
-            # fixed_feasible = False
+            # The constraints are A_ub @ x <= b_ub
+            A_ub_lp = M_rest
+            b_ub_lp = -new_bias
+
+            # Solve the LP. We only care if it terminated successfully, which
+            # indicates that a feasible solution was found.
+            # The 'highs' method is the current default and is very efficient.
+            res_lp = scipy.optimize.linprog(c=c_lp, A_ub=A_ub_lp, b_ub=b_ub_lp, method='highs', bounds = (self.action_space.low[0], self.action_space.high[0]))
+
+            # The 'success' attribute is True if a feasible solution was found.
+            fixed_feasible = res_lp.success
+            ### END OF REPLACEMENT ###
 
             if fixed_feasible:
                 candidate_u0 = action.copy()
                 candidate_score = 0.0
                 shielded = False
             else:
-                
                 # --- Full-QP: optimize [u0; u1..] ---
+                # This part remains the same, as it's a true QP.
                 total_vars = self.horizon * u_dim
                 P_full = 1e-6 * np.eye(total_vars)
-                # keep u0 near policy
-                # P_full[:u_dim, :u_dim] = np.eye(u_dim)
+                P_full[:u_dim, :u_dim] = np.eye(u_dim)  # Hessian for u0
                 q_full = np.zeros((self.horizon)*u_dim)
-                # q_full = -np.concatenate((action, np.zeros((self.horizon - 1)*u_dim)))
+                q_full[:u_dim] = -action
                 A_full = sp.csc_matrix(M)
                 l_full = -np.inf * np.ones_like(bias)
                 u_full = -bias
                 full_solver = osqp.OSQP()
                 full_solver.setup(P=sp.csc_matrix(P_full),
-                                        q=q_full,
-                                        A=A_full,
-                                        l=l_full,
-                                        u=u_full,
-                                        warm_start=False,
-                                        verbose=False)
-                #  # tiny identity to make P positive‐definite
-                # P = 0 * sp.eye(total_vars, format='csc')
-                # q = np.zeros(total_vars)
-                
-                # # constraints:  A x <= b
-                # A_full = sp.csc_matrix(M)
-                # l = -np.inf * np.ones_like(bias)
-                # u = -bias
-                
-                # # box bounds can be stacked as extra rows:
-                # # [ I ; -I ] @ U <= [ u_max; -u_min ]
-                # I = sp.eye(total_vars, format='csc')
-                # A_full = sp.vstack([A_full, I, -I], format='csc')
-                # l = np.hstack([l, -np.inf*np.ones(total_vars), -np.inf*np.ones(total_vars)])
-                # u = np.hstack([u, np.tile(self.action_space.low, self.horizon), -np.tile(self.action_space.high, self.horizon)])
-                # full_solver = osqp.OSQP()
-                # full_solver.setup(P=P, q=q, A=A_full, l=l, u=u, verbose=False)
+                                    q=q_full,
+                                    A=A_full,
+                                    l=l_full,
+                                    u=u_full,
+                                    warm_start=False,
+                                    verbose=False)
                 
                 res_full = full_solver.solve()
                 if res_full.info.status != 'solved':
-                    # print(res_full.info.status_val, res_full.info.status)
                     continue
                 full_sol = res_full.x
                 candidate_u0 = full_sol[:u_dim]
@@ -368,13 +358,17 @@ class Shield:
     def __init__(
             self,
             shield_policy: ProjectionPolicy,
-            unsafe_policy = None):
+            unsafe_policy = None,
+            means: np.ndarray = None, 
+            stds: np.ndarray = None):
         self.shield = shield_policy
         self.agent = unsafe_policy
         self.shield_times = 0
         self.backup_times = 0
         self.agent_times = 0
         self.total_time = 0.
+        self.means = means
+        self.stds = stds
 
     def __call__(self, state: np.ndarray, action: np.ndarray = None, **kwargs) -> np.ndarray:
         start = time.time()
@@ -382,6 +376,9 @@ class Shield:
             proposed_action = action
         else:
             proposed_action = self.agent(state, **kwargs)
+            
+        if self.means is not None:
+            state = (state - self.means) / self.stds
 
         
         if self.shield.unsafe(state, proposed_action):

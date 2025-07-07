@@ -59,10 +59,13 @@ class StateEmbedding(nn.Module):
         # Using the abstract_interpretation library's NeuralNetwork module.
         self.embed_net = nn.Sequential(
             nn.Linear(state_dim, 512), 
+            # nn.BatchNorm1d(512),
             nn.SiLU(), 
             nn.Linear(512, 512),
+            # nn.BatchNorm1d(512),
             nn.SiLU(), 
             nn.Linear(512, 512),
+            # nn.BatchNorm1d(512),
             nn.SiLU(),
             nn.Linear(512, embed_dim),
             nn.Tanh()
@@ -146,11 +149,9 @@ class KoopmanLightning(pl.LightningModule):
         
         self.embedding_net = StateEmbedding(state_dim, embed_dim)
         self.koopman_operator = KoopmanOperator(embed_total_dim, control_dim)
-        self.eps_net = None
         self.criterion = nn.MSELoss()
-        self.z0 = None
-        self.lip_const = None
-        self.eps0 = None
+        self.mean = None
+        self.std = None
 
     def forward(self, states, actions):
         """
@@ -213,9 +214,9 @@ class KoopmanLightning(pl.LightningModule):
         # 6. Total loss (tune weights as needed)
         consistency_weight = 0.5
         eig_penalty_weight = 0.1
-        zeros = self.embedding_net(torch.zeros(1, self.state_dim))
-        zero_loss = torch.sum(zeros ** 2)
-        total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty + zero_loss
+        # zeros = self.embedding_net(torch.zeros(1, self.state_dim))
+        # zero_loss = torch.sum(zeros ** 2)
+        total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty
 
         self.log('pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
@@ -316,6 +317,9 @@ class KoopmanLightning(pl.LightningModule):
         
         return z.detach().cpu().numpy()
 
+    def update_stats(self, mean, std):
+        self.mean = mean
+        self.std = std
 def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100, val_size=0.3):
     """
     Fit the Koopman model on multi-step trajectory data, splitting into train and validation sets.
@@ -346,23 +350,6 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     mags = torch.abs(eigs)
     print(mags)
     
-    # for parameter in koopman_model.koopman_operator.parameters():
-    #     if parameter.grad is not None:
-    #         parameter.grad = None
-    
-    # trainer = pl.Trainer(max_epochs=epochs, accelerator="cpu", devices=1, check_val_every_n_epoch=5)
-    # trainer.fit(koopman_model, train_loader, val_loader)
-    
-    # with torch.no_grad():
-        
-    #     koopman_model.eps_net = UncertaintyNet(koopman_model.state_dim + koopman_model.embed_dim, koopman_model.control_dim) if koopman_model.eps_net is None else koopman_model.eps_net
-    #     residuals = koopman_model.transform(dataset.next_states[:, 0]) - koopman_model.get_next_state(dataset.states[:, 0], dataset.actions[:, 0])
-    #     residuals_dataset = ResidualsDataset(koopman_model.transform(dataset.states[:, 0]), dataset.actions[:, 0], residuals)
-    #     residuals_loader = DataLoader(residuals_dataset, batch_size=128, shuffle=False, num_workers=1)
-
-    #     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1)
-    #     trainer.fit(koopman_model.eps_net, residuals_loader)
-
 
     torch.cuda.empty_cache()
 

@@ -18,13 +18,13 @@ import traceback
 
 parser = argparse.ArgumentParser(description='Safe PPO Args')
 parser.add_argument('--env_name', default="lunar_lander")
-parser.add_argument('--gamma', type=float, default=0.99)
+parser.add_argument('--gamma', type=float, default=0.995)
 parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--seed', type=int, default=123456)
 parser.add_argument('--batch_size', type=int, default=2048)
-parser.add_argument('--mini_batch_size', type=int, default=64)
+parser.add_argument('--mini_batch_size', type=int, default=128)
 parser.add_argument('--num_steps', type=int, default=200000)
-parser.add_argument('--hidden_size', type=int, default=64)
+parser.add_argument('--hidden_size', type=int, default=128)
 parser.add_argument('--replay_size', type=int, default=200000)
 parser.add_argument('--start_steps', type=int, default=10000)
 parser.add_argument('--cuda', action="store_true")
@@ -42,9 +42,9 @@ np.random.seed(args.seed)
 hyperparams = vars(args)
 
 # Tensorboard
-if not os.path.exists("runs_analysis"):
-    os.makedirs("runs_analysis")
-writer = SummaryWriter('runs_analysis/{}_PPO_{}_H{}_D{}'.format(
+if not os.path.exists("runs_new"):
+    os.makedirs("runs_new")
+writer = SummaryWriter('runs_new/{}_PPO_{}_H{}_D{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim))
 
@@ -52,7 +52,7 @@ print(hyperparams)
 if not os.path.exists("logs_ppo"):
     os.makedirs("logs_ppo")
 
-file = open('runs_analysis/{}_PPO_{}_H{}_D{}/log.txt'.format(
+file = open('runs_new/{}_PPO_{}_H{}_D{}/log.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim), "w+")
 
@@ -117,8 +117,8 @@ while True:
             if env.unsafe(next_state, False):
 
                 real_unsafe_episodes += 1 * (not unsafe_flag)
-                episode_reward -= 100 * (not unsafe_flag)
-                reward = -100
+                # episode_reward -= 100 * (not unsafe_flag)
+                # reward = -100
                 print("UNSAFE (outside testing)", shielded)
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = done or (True if safe_agent is not None else False)
@@ -189,7 +189,7 @@ while True:
             koopman_model = None
             epochs = 200
 
-        env_model, ev_score, r2_score = get_environment_model(
+        env_model, ev_score, r2_score, mean, std = get_environment_model(
                 states, actions, next_states, rewards,
                 domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                 seed=args.seed, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
@@ -209,16 +209,19 @@ while True:
         
         safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
 
-        
+        safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
+        safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
 
         new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
         
+        new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
+        new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
+        print("New observation space", new_obs_space)
+        print("Safety domain", safety)
+        
         polys = safety.to_hyperplanes(new_obs_space)
         print(polys)
-        print("LATENT OBS SPACE", new_obs_space)
-        
         unsafe_domains = safety.invert_polytope(new_obs_space)
-        print("LATENT UNSAFETY", unsafe_domains)
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
@@ -228,7 +231,7 @@ while True:
         shield = ProjectionPolicy(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
-        safe_agent = Shield(shield, agent)
+        safe_agent = Shield(shield, agent, mean, std)
         
 
     # Test the agent periodically
@@ -282,7 +285,7 @@ while True:
                     done = True
                 if env.unsafe(next_state, False):
                     print("UNSAFE Inside testing", shielded)
-                    episode_reward += -100
+                    # episode_reward += -100
                     print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                     unsafe_episodes += 1
                     done = True
