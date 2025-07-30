@@ -123,16 +123,19 @@ class P3O:
                 # Penalty (either fixed or learnable)
                 penalty = self.penalty_tensor if self.penalty_learn else self.penalty
 
-                actor_loss = -reward_obj + penalty * F.relu(cost_violation)
+                actor_loss = -reward_obj + penalty * cost_violation
 
                 self.actor_optimizer.zero_grad()
+                
                 actor_loss.backward()
+                
+                torch.nn.utils.clip_grad_norm_(self.actor_params, max_norm=0.5)
                 self.actor_optimizer.step()
 
                 # Penalty optimizer (dual ascent) - update penalty to enforce constraint
                 if self.penalty_learn:
                     self.penalty_optimizer.zero_grad()
-                    penalty_loss = -penalty * F.relu(cost_violation.detach())
+                    penalty_loss = -penalty * cost_violation.detach()
                     penalty_loss.backward()
                     self.penalty_optimizer.step()
                     # Clamp penalty to be >= 0
@@ -145,12 +148,14 @@ class P3O:
                 self.critic_optimizer.zero_grad()
                 value_loss = F.mse_loss(values, returns[batch_slice].reshape(-1, 1))
                 value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.critic_params, max_norm=0.5)
                 self.critic_optimizer.step()
 
                 # --- Cost Critic update ---
                 self.cost_critic_optimizer.zero_grad()
                 cost_value_loss = F.mse_loss(cost_values, cost_returns[batch_slice].reshape(-1, 1))
                 cost_value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.cost_critic_params, max_norm=0.5)
                 self.cost_critic_optimizer.step()
 
                 # Logging

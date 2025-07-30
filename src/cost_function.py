@@ -20,7 +20,9 @@ class CostFunction:
                  horizon: int,
                  unsafe_polys: List[np.ndarray],
                  safe_polys: List[np.ndarray], 
-                 transform=lambda x: x):
+                 transform=lambda x: x,
+                 mean: np.ndarray = None,
+                 std: np.ndarray = None):
         self.env = env
         self.horizon = horizon
         self.state_space = state_space
@@ -29,6 +31,8 @@ class CostFunction:
         self.unsafe_polys = unsafe_polys
         self.safe_polys = safe_polys
         self.transform = transform
+        self.mean = mean
+        self.std = std
 
     
     def __call__(self, state: np.ndarray,
@@ -36,6 +40,8 @@ class CostFunction:
           debug: bool = False) -> Tuple[np.ndarray, bool]:
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
+        
+        state = (state - self.mean) / self.std
         state = self.transform(state.reshape(1, -1)).reshape(-1,)
         if action is None:
             action = np.zeros(u_dim)

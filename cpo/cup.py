@@ -83,32 +83,45 @@ class CUP:
             cost_advantages -= cost_advantages.mean()
 
         return (state_tensor, actions, self.actor_critic.get_log_prob(state_tensor, actions),
-                returns, advantages, cost_returns, cost_advantages)
+                returns, advantages, cost_returns, cost_advantages, self.actor_critic.get_value(state_tensor).squeeze().detach(),
+                self.actor_critic.get_cost_value(state_tensor).squeeze().detach())
 
     def cup_surrogate(self, ratios, advantages, kl, delta):
         c = (advantages.abs() / delta).detach()
         surrogate = ratios * advantages - c * kl
         return surrogate.mean()
-
+    
     def update_parameters(self, memory, epochs, batch_size):
+        # --- INITIAL SETUP ---
         (states, actions, log_probs_old, returns, advantages,
-         cost_returns, cost_advantages) = self.log_prob_advantage_estimation(memory)
+         cost_returns, cost_advantages, values_old, cost_values_old) = self.log_prob_advantage_estimation(memory)
 
         # Normalize advantages for stability
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+        # We don't normalize cost advantages in this approach, as their magnitude is meaningful for the multiplier
+        
+        # --- LAGRANGE MULTIPLIER UPDATE (Once per rollout) ---
+        if self.use_lagrangian:
+            # Calculate average cost from the completed rollout
+            avg_cost = torch.mean(cost_values_old) 
+            with torch.no_grad():
+                self.multiplier = max(
+                    0.0,
+                    # Note: You might need a separate, smaller learning rate for this style of update
+                    self.multiplier + self.lagrange_lr * (avg_cost - self.cost_limit) 
+                )
 
-        total_policy_loss = 0.0
+        # Logging variables
+        num_updates = 0
+        total_reward_policy_loss = 0.0
+        total_cost_policy_loss = 0.0
         total_value_loss = 0.0
         total_cost_value_loss = 0.0
-        total_entropy_loss = 0.0
-        total_loss = 0.0
-        total_clip_frac = 0.0
-        total_kl_div = 0.0
-        total_explained_var = 0.0
-        num_updates = 0
 
-        for _ in range(epochs):
+        # ========================================================================================
+        # --- STAGE 1: REWARD MAXIMIZATION (PPO-Clip Update) & CRITIC UPDATES ---
+        # ========================================================================================
+        for epoch in range(epochs):
             for idx in range(0, len(states), batch_size):
                 batch_slice = slice(idx, idx + batch_size)
 
@@ -116,70 +129,123 @@ class CUP:
                 log_probs, entropy, values, cost_values = self.actor_critic.evaluate(
                     states[batch_slice], actions[batch_slice]
                 )
+
+                # --- Policy Update (PPO-Clip for Reward) ---
                 ratios = torch.exp(log_probs - log_probs_old[batch_slice])
-                kl = (log_probs_old[batch_slice] - log_probs).detach()
-
-                norm_advantages = (advantages[batch_slice] - advantages[batch_slice].mean()) / (advantages[batch_slice].std() + 1e-8)
-                norm_cost_advantages = (cost_advantages[batch_slice] - cost_advantages[batch_slice].mean()) / (cost_advantages[batch_slice].std() + 1e-8)
-
-                # --- Conservative surrogates ---
-                reward_surrogate = self.cup_surrogate(ratios, norm_advantages.reshape(-1, 1), kl, self.trust_region_delta)
-                cost_surrogate = self.cup_surrogate(ratios, norm_cost_advantages.reshape(-1, 1), kl, self.trust_region_delta)
-
-                # Constraint handling
-                constraint_violation = cost_surrogate - self.cost_limit
-                if self.use_lagrangian:
-                    lagrange_penalty = self.multiplier * F.relu(constraint_violation)
-                    actor_loss = -reward_surrogate + lagrange_penalty
-                else:
-                    penalty = F.relu(constraint_violation)
-                    actor_loss = -reward_surrogate + penalty
-
+                
+                # Unclipped reward objective
+                pi_loss_unclipped = ratios * advantages[batch_slice]
+                
+                # Clipped reward objective
+                pi_loss_clipped = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages[batch_slice]
+                
+                # Final PPO policy loss for rewards
+                # We add the entropy bonus to encourage exploration
+                reward_policy_loss = -torch.min(pi_loss_unclipped, pi_loss_clipped).mean() - self.entropy_coeff * entropy.mean()
+                
                 self.actor_optimizer.zero_grad()
-                actor_loss.backward()
+                reward_policy_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor_params, 0.5)
                 self.actor_optimizer.step()
 
-                # Primal-dual update for Lagrange multiplier
-                if self.use_lagrangian:
-                    with torch.no_grad():
-                        self.multiplier = max(
-                            0.0,
-                            self.multiplier + self.lagrange_lr * (cost_surrogate.item() - self.cost_limit)
-                        )
-
-                # --- Value Critic update ---
+                # --- Critic Updates (with Clipped Value Loss) ---
+                # Reward Critic
                 self.critic_optimizer.zero_grad()
-                value_loss = F.mse_loss(values, returns[batch_slice].reshape(-1, 1))
+                loss_v_unclipped = (values - returns[batch_slice].reshape(-1, 1)) ** 2
+                values_clipped = values_old[batch_slice].reshape(-1, 1) + torch.clamp(
+                    values - values_old[batch_slice].reshape(-1, 1), -0.2, 0.2
+                )
+                loss_v_clipped = (values_clipped - returns[batch_slice].reshape(-1, 1)) ** 2
+                value_loss = 0.5 * torch.mean(torch.max(loss_v_unclipped, loss_v_clipped))
                 value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.critic_params, 0.5)
                 self.critic_optimizer.step()
 
-                # --- Cost Critic update ---
+                # Cost Critic
                 self.cost_critic_optimizer.zero_grad()
-                cost_value_loss = F.mse_loss(cost_values, cost_returns[batch_slice].reshape(-1, 1))
+                loss_c_unclipped = (cost_values - cost_returns[batch_slice].reshape(-1, 1)) ** 2
+                cost_values_clipped = cost_values_old[batch_slice].reshape(-1, 1) + torch.clamp(
+                    cost_values - cost_values_old[batch_slice].reshape(-1, 1), -0.2, 0.2
+                )
+                loss_c_clipped = (cost_values_clipped - cost_returns[batch_slice].reshape(-1, 1)) ** 2
+                cost_value_loss = 0.5 * torch.mean(torch.max(loss_c_unclipped, loss_c_clipped))
                 cost_value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.cost_critic_params, 0.5)
                 self.cost_critic_optimizer.step()
 
                 # Logging
-                entropy_loss = entropy.mean()
-                clipped_mask = (ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))
-                clip_fraction = torch.mean(clipped_mask.float()).item()
-                total_clip_frac += clip_fraction
-
-                kl_div = torch.mean(log_probs_old[batch_slice] - log_probs).item()
-                total_kl_div += kl_div
-
-                explained_variance = explained_variance_score(
-                    returns[batch_slice].detach().cpu().numpy(),
-                    values.detach().cpu().numpy(),
-                )
-                total_explained_var += explained_variance
-
-                total_policy_loss += actor_loss.item()
+                total_reward_policy_loss += reward_policy_loss.item()
                 total_value_loss += value_loss.item()
                 total_cost_value_loss += cost_value_loss.item()
-                total_entropy_loss += entropy_loss.item()
-                total_loss += (actor_loss + value_loss + cost_value_loss).item()
                 num_updates += 1
+
+            # KL-based early stopping for Stage 1
+            with torch.no_grad():
+                log_probs_new, _, _, _ = self.actor_critic.evaluate(states, actions)
+                kl_div = torch.mean(log_probs_old - log_probs_new).item()
+                if kl_div > self.trust_region_delta * 1.5:
+                    # print(f"Stopping Stage 1 early at epoch {epoch+1}, KL: {kl_div:.4f}")
+                    break
+        
+        # ========================================================================================
+        # --- STAGE 2: COST CORRECTION (KL-Penalized Cost Minimization) ---
+        # ========================================================================================
+        
+        # Get the log_probs from the policy at the end of Stage 1
+        with torch.no_grad():
+            log_probs_stage1_end, _, _, _ = self.actor_critic.evaluate(states, actions)
+            
+        for epoch in range(epochs): # A separate set of epochs for the cost update
+            for idx in range(0, len(states), batch_size):
+                batch_slice = slice(idx, idx + batch_size)
+
+                # Policy evaluation
+                log_probs, _, _, _ = self.actor_critic.evaluate(
+                    states[batch_slice], actions[batch_slice]
+                )
+                
+                # --- Policy Update (KL-Penalized Cost Correction) ---
+                ratios = torch.exp(log_probs - log_probs_stage1_end[batch_slice])
+
+                # The KL divergence is between the current policy and the policy from the end of Stage 1
+                kl_new_old_stage2 = torch.mean(log_probs_stage1_end[batch_slice] - log_probs)
+                
+                # Cost advantage objective
+                cost_objective = (ratios * cost_advantages[batch_slice]).mean()
+                
+                # Combined loss for cost correction
+                cost_policy_loss = self.multiplier * cost_objective + kl_new_old_stage2
+                
+                self.actor_optimizer.zero_grad()
+                cost_policy_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor_params, 0.5)
+                self.actor_optimizer.step()
+
+                total_cost_policy_loss += cost_policy_loss.item()
+            
+            # KL-based early stopping for Stage 2
+            with torch.no_grad():
+                log_probs_new, _, _, _ = self.actor_critic.evaluate(states, actions)
+                kl_div = torch.mean(log_probs_stage1_end - log_probs_new).item()
+                if kl_div > self.trust_region_delta * 1.5:
+                    # print(f"Stopping Stage 2 early at epoch {epoch+1}, KL: {kl_div:.4f}")
+                    break
+
+        memory.clear_memory()
+
+        # Update and return average losses for logging
+        avg_reward_policy_loss = total_reward_policy_loss / num_updates if num_updates > 0 else 0
+        avg_cost_policy_loss = total_cost_policy_loss / num_updates if num_updates > 0 else 0
+        avg_value_loss = total_value_loss / num_updates if num_updates > 0 else 0
+        avg_cost_value_loss = total_cost_value_loss / num_updates if num_updates > 0 else 0
+
+        return {
+            "avg_reward_policy_loss": avg_reward_policy_loss,
+            "avg_cost_policy_loss": avg_cost_policy_loss,
+            "avg_value_loss": avg_value_loss,
+            "avg_cost_value_loss": avg_cost_value_loss,
+            "multiplier": self.multiplier,
+        }
 
         memory.clear_memory()
 

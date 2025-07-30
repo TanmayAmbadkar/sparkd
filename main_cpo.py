@@ -205,16 +205,6 @@ while True:
                 for key, value in losses.items():
                     writer.add_scalar(f'loss/{key[4:]}', value, total_numsteps)
 
-                # writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
-                # writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
-                # writer.add_scalar(f'loss/cost_value_loss', losses['avg_cost_value_loss'], total_numsteps)
-                # writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
-                # writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
-                # writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
-                # writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
-                # writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
-
-
             state = next_state
         total_real_episodes += 1 
 
@@ -243,7 +233,8 @@ while True:
             koopman_model = None
             epochs = 200
 
-        env_model, ev_score, r2_score = get_environment_model(
+        
+        env_model, ev_score, r2_score, mean, std = get_environment_model(
                 states, actions, next_states, rewards,
                 domains.DeepPoly(env.observation_space.low, env.observation_space.high),
                 seed=args.seed, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
@@ -263,16 +254,19 @@ while True:
         
         safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
 
-        
+        safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
+        safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
 
         new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
         
+        new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
+        new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
+        print("New observation space", new_obs_space)
+        print("Safety domain", safety)
+        
         polys = safety.to_hyperplanes(new_obs_space)
         print(polys)
-        print("LATENT OBS SPACE", new_obs_space)
-        
         unsafe_domains = safety.invert_polytope(new_obs_space)
-        print("LATENT UNSAFETY", unsafe_domains)
         env.transformed_safe_polys = polys
         # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
@@ -281,7 +275,8 @@ while True:
         print("LATENT UNSAFETY",  len(env.transformed_polys))
         cost_function = CostFunction(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
-            env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
+            env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform,
+            mean, std)
         
 
     # Test the agent periodically
