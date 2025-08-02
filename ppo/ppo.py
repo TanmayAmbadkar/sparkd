@@ -4,21 +4,25 @@ from torch.optim import Adam
 from ppo.model import ActorCritic
 import numpy as np
 from sklearn.metrics import explained_variance_score
+from ppo.utils import RunningMeanStd
 
 class PPO:
     def __init__(self, obs_dim, action_space, args):
-        self.gamma = 0.99
+        self.gamma = 0.995
         
         self.lam = 0.95  # GAE lambda
         self.eps_clip = 0.2
         self.value_coeff = 0.5
-        self.entropy_coeff = 0.01
+        self.entropy_coeff = 0.0
         self.device = torch.device("cuda" if args.cuda else "cpu")
         self.actor_critic = ActorCritic(obs_dim, action_space, args.hidden_size).to(self.device)
         self.optimizer = Adam(self.actor_critic.parameters(), lr=args.lr)
         self.action_space = action_space
+        self.reward_rms = RunningMeanStd(reward_size=1)  # Initialize running mean/std for rewards
+        self.state_rms = RunningMeanStd(reward_size=obs_dim)  # Initialize running mean/std for states
 
     def select_action(self, state):
+        state = self.state_rms.normalize(state)  # Normalize state
         state = torch.Tensor(state).to(self.device).unsqueeze(0)
         action, log_prob = self.actor_critic.act(state)
 
@@ -34,9 +38,14 @@ class PPO:
         """
         # Convert stored lists to arrays
         states = memory.states[:memory.size]
+        self.state_rms.update(states)  # Update running mean/std
+        states = self.state_rms.normalize(states)  # Normalize states
         rewards = memory.rewards[:memory.size]
+        self.reward_rms.update(rewards)  # Update running mean/std
+        rewards = self.reward_rms.normalize(rewards)  # Normalize rewards
         dones = memory.dones[:memory.size]
         next_states = memory.next_states[:memory.size]
+        next_states = self.state_rms.normalize(next_states)  # Normalize next states
         actions = memory.actions[:memory.size]
 
         # Compute value estimates for current and next states using the critic
@@ -143,7 +152,12 @@ class PPO:
 
                 self.optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), max_norm=0.5) # Add this line
                 self.optimizer.step()
+                
+                #Check if logstd is nan, make it 0
+                if self.actor_critic.actor_logstd is None or torch.isnan(self.actor_critic.actor_logstd).any():
+                    self.actor_critic.actor_logstd = torch.nn.Parameter(torch.zeros_like(self.actor_critic.actor_logstd))
 
         memory.clear_memory()
 

@@ -192,8 +192,8 @@ def get_environment_model(     # noqa: C901
     print("Input states std:", stds.shape)
     stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
     
-    # means = np.zeros_like(means)
-    # stds = np.ones_like(stds)
+    means = np.zeros_like(means)
+    stds = np.ones_like(stds)
 
     print("Means:", means)
     print("Stds:", stds)
@@ -206,6 +206,8 @@ def get_environment_model(     # noqa: C901
     #     stds = koopman_model.std + 0.001 * (means - koopman_model.mean)
     
     domain.lower = (domain.lower - means) / stds
+    
+    
     domain.upper = (domain.upper - means) / stds
     input_states = (input_states - means) / stds
     output_states = (output_states - means) / stds
@@ -325,8 +327,8 @@ def get_environment_model(     # noqa: C901
     err = diff + conf
     print("Computed error:", err, "(", diff, conf, ")")
     # err = err
-    error = quantile
-    # error = np.minimum(np.minimum(upper_bound, quantile), err)
+    # error = quantile
+    error = np.minimum(np.minimum(upper_bound, quantile), err)
     
     
     parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)

@@ -19,10 +19,10 @@ import traceback
 parser = argparse.ArgumentParser(description='Safe PPO Args')
 parser.add_argument('--env_name', default="lunar_lander")
 parser.add_argument('--gamma', type=float, default=0.995)
-parser.add_argument('--lr', type=float, default=0.0001)
+parser.add_argument('--lr', type=float, default=0.0003)
 parser.add_argument('--seed', type=int, default=123456)
-parser.add_argument('--batch_size', type=int, default=2048)
-parser.add_argument('--mini_batch_size', type=int, default=128)
+parser.add_argument('--batch_size', type=int, default=4096)
+parser.add_argument('--mini_batch_size', type=int, default=256)
 parser.add_argument('--num_steps', type=int, default=200000)
 parser.add_argument('--hidden_size', type=int, default=128)
 parser.add_argument('--replay_size', type=int, default=200000)
@@ -78,6 +78,7 @@ total_test_episodes = 0
 unsafe_sim_episodes = 0
 total_sim_episodes = 0
 train_steps = 1
+
 while True:
     i_episode = next(iterator_loop)
     episode_reward = 0
@@ -101,7 +102,7 @@ while True:
                 flags.append(shielded[0])
             else:
                 action = agent(state)
-                shielded = None
+                shielded = "N"
 
             next_state, reward, done, trunc, info = env.step(action)
                 
@@ -117,8 +118,8 @@ while True:
             if env.unsafe(next_state, False):
 
                 real_unsafe_episodes += 1 * (not unsafe_flag)
-                # episode_reward -= 100 * (not unsafe_flag)
-                # reward = -100
+                episode_reward -= 100 * (not unsafe_flag)
+                reward -= -100
                 print("UNSAFE (outside testing)", shielded)
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = done or (True if safe_agent is not None else False)
@@ -130,10 +131,10 @@ while True:
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
             if cost > 0:
-                agent.add(state, action, reward, next_state, done or trunc, 1)
-                real_data.push(state, action, reward, next_state, done or trunc, 1)
+                agent.add(state, action, reward, next_state, done or trunc or (shielded != "N"), 1)
+                real_data.push(state, action, reward, next_state, done or trunc or (shielded != "N"), 1)
             else:
-                agent.add(state, action, reward, next_state, done or trunc, 0)
+                agent.add(state, action, reward, next_state, done or trunc  or (shielded != "N"), 0)
                 real_data.push(state, action, reward, next_state, done or trunc, 0)
             
             
@@ -166,7 +167,7 @@ while True:
 
     
     
-    if total_numsteps >= args.start_steps * train_steps:
+    if total_numsteps >= args.start_steps * train_steps and args.no_safety is False:
     # if False:
         train_steps*=2
         try:

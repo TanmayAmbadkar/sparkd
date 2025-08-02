@@ -29,7 +29,7 @@ parser.add_argument('--policy', default="Gaussian",
                     help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
 parser.add_argument('--eval', type=bool, default=True,
                     help='Evaluates a policy a policy every few episodes (default: True)')
-parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
+parser.add_argument('--gamma', type=float, default=0.995, metavar='G',
                     help='discount factor for reward (default: 0.99)')
 parser.add_argument('--tau', type=float, default=0.005, metavar='G',
                     help='target smoothing coefficient (tau) (default: 0.005)')
@@ -42,21 +42,21 @@ parser.add_argument('--automatic_entropy_tuning', default=False, action='store_t
                     help='Automaically adjust alpha (default: False)')
 parser.add_argument('--seed', type=int, default=123456, metavar='N',
                     help='random seed (default: 123456)')
-parser.add_argument('--batch_size', type=int, default=4096, metavar='N',
+parser.add_argument('--batch_size', type=int, default=512, metavar='N',
                     help='batch size (default: 1024)')
 parser.add_argument('--num_steps', type=int, default=10000000, metavar='N',
                     help='maximum number of steps (default: 10000000)')
 parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
                     help='hidden size (default: 256)')
-parser.add_argument('--updates_per_step', type=int, default=40, metavar='N',
+parser.add_argument('--updates_per_step', type=int, default=10, metavar='N',
                     help='model updates per simulator step (default: 1)')
 parser.add_argument('--start_steps', type=int, default=10000, metavar='N',
                     help='Steps sampling random actions (default: 10000)')
 parser.add_argument('--target_update_interval', type=int, default=1, metavar='N',
                     help='Value target update per no. of updates per step (default: 1)')
-parser.add_argument('--replay_size', type=int, default=10000, metavar='N',
+parser.add_argument('--replay_size', type=int, default=100000, metavar='N',
                     help='size of replay buffer (default: 10000000)')
-parser.add_argument('--cuda', action="store_true",
+parser.add_argument('--cuda', action="store_true", default=False, 
                     help='run on CUDA (default: False)')
 parser.add_argument('--horizon', type=int, default=5,
                     help='The safety horizon')
