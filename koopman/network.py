@@ -59,25 +59,38 @@ class StateEmbedding(nn.Module):
         # Using the abstract_interpretation library's NeuralNetwork module.
         self.embed_net = nn.Sequential(
             nn.Linear(state_dim, 512), 
-            # nn.BatchNorm1d(512),
             nn.SiLU(), 
             nn.Linear(512, 512),
-            # nn.BatchNorm1d(512),
-            # nn.SiLU(), 
-            # nn.Linear(512, 512),
-            # nn.BatchNorm1d(512),
             nn.SiLU(),
             nn.Linear(512, embed_dim),
             nn.Tanh()
             # TanhLayer()
         )
         self.state_dim = state_dim
+        
+        self.decode_net = nn.Sequential(
+            nn.Linear(embed_dim, 512),
+            nn.SiLU(),
+            nn.Linear(512, 512),
+            nn.SiLU(),
+            nn.Linear(512, state_dim)
+        )
 
     def forward(self, s):
         # s shape: (batch, state_dim)
         features = self.embed_net(s)  # shape: (batch, embed_dim)
         z = torch.cat([s, features], dim=-1)  # shape: (batch, state_dim + embed_dim)
         return z
+    
+    def decode(self, z):
+        # z shape: (batch, state_dim)
+        s_recon = self.decode_net(z)  # shape: (batch, state_dim)
+        return s_recon
+    
+    def encode(self, s):
+        features = self.embed_net(s)
+        return features
+    
     
 class KoopmanOperator(nn.Module):
     """
@@ -116,18 +129,11 @@ class KoopmanOperator(nn.Module):
         # return A_w, B_w, self.c( torch.cat([z, u], dim=-1)).data.clone()
 
 
-##########################################################
-# 3. PyTorch Lightning Module for Multi-Step Koopman Learning #
-##########################################################
-
 class KoopmanLightning(pl.LightningModule):
     """
     A Lightning Module that implements multi-step training of a Koopman model.
-    It takes a sequence of states and a sequence of actions, then predicts the future latent states.
-    The training objective is to match the multi-step latent trajectory with the encoder outputs
-    from the corresponding ground truth future states.
     """
-    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001):
+    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.0003, w_pred=1.0, w_recon=0.5, w_cons=0.5, w_eig=0.1):
         """
         Args:
             state_dim (int): Dimensionality of the original state.
@@ -135,203 +141,151 @@ class KoopmanLightning(pl.LightningModule):
             control_dim (int): Dimensionality of the control input.
             horizon (int): Prediction horizon (number of steps).
             lr (float): Learning rate.
+            w_pred, w_recon, w_cons, w_eig (float): Weights for the loss components.
         """
         super(KoopmanLightning, self).__init__()
         self.save_hyperparameters()
-        self.state_dim = state_dim
-        self.embed_dim = embed_dim
-        self.control_dim = control_dim
-        self.horizon = horizon
-        self.lr = lr
         
-        # Total embedding dimension, where z = [x; g_theta(x)]
         embed_total_dim = state_dim + embed_dim
         
         self.embedding_net = StateEmbedding(state_dim, embed_dim)
         self.koopman_operator = KoopmanOperator(embed_total_dim, control_dim)
         self.criterion = nn.MSELoss()
-        self.mean = None
-        self.std = None
 
     def forward(self, states, actions):
         """
         Forward pass for multi-step prediction.
-        
-        Args:
-            states: Tensor of shape (B, horizon+1, state_dim), where the first state is s_0.
-            actions: Tensor of shape (B, horizon, control_dim), corresponding to actions [u_0, ..., u_{horizon-1}].
-        
-        Returns:
-            pred_latents: Predicted latent states for the next horizon steps,
-                          a tensor of shape (B, horizon, embed_total_dim).
         """
-        
-        # Use the first state of each trajectory to initialize.
-        s0 = states[:, 0, :]         # shape: (B, state_dim)
-        z = self.embedding_net(s0)   # shape: (B, embed_total_dim)
+        s0 = states[:, 0, :]
+        z = self.embedding_net(s0)
         pred_latents = []
-        for t in range(self.horizon):
-            a_t = actions[:, t, :]   # shape: (B, control_dim)
-            z = self.koopman_operator(z, a_t)  # shape: (B, embed_total_dim)
+        for t in range(self.hparams.horizon):
+            a_t = actions[:, t, :]
+            z = self.koopman_operator(z, a_t)
             pred_latents.append(z.unsqueeze(1))
-        pred_latents = torch.cat(pred_latents, dim=1)  # shape: (B, horizon, embed_total_dim)
-        return pred_latents
+        return torch.cat(pred_latents, dim=1)
+
+    def _calculate_losses(self, batch):
+        """Helper function to compute all loss components."""
+        states = batch['states']
+        actions = batch['actions']
+        next_states = batch['next_states']
+        
+        B, H, S_dim = next_states.shape
+
+        # 1. Multi-step prediction
+        pred_latents = self.forward(states, actions)
+
+        # 2. Ground truth latents
+        # IMPORTANT FIX: Removed `with torch.no_grad()` to allow gradients to flow
+        # to the encoder from the prediction loss.
+        target_s_flat = next_states.reshape(B * H, -1)
+        target_latents_flat = self.embedding_net(target_s_flat)
+        target_latents = target_latents_flat.reshape(B, H, -1)
+
+        # 3. Prediction loss (MSE in latent space)
+        pred_loss = self.criterion(pred_latents, target_latents)
+
+        # 4. Consistency loss (as in original code)
+        decoded_states = pred_latents[:, :, :S_dim]
+        
+        reencoded_latents = self.embedding_net(decoded_states.reshape(B * H, -1)).reshape(B, H, -1)
+        consistency_loss = self.criterion(reencoded_latents, pred_latents)
+
+        # 5. Reconstruction loss (as in original code)
+        features = self.embedding_net.encode(states.reshape(B * H, -1))
+        recovered_states = self.embedding_net.decode(features)
+        recon_loss = self.criterion(recovered_states, states.reshape(B * H, -1))
+
+        # Explained variance for logging
+        ev_score = explained_variance(
+            pred_latents[:, :, :S_dim].flatten(), 
+            target_latents[:, :, :S_dim].flatten()
+        )
+
+        return {
+            "pred": pred_loss, "recon": recon_loss,
+            "cons": consistency_loss, "ev": ev_score
+        }
 
     def training_step(self, batch, batch_idx):
-        states = batch['states']
-        actions = batch['actions']
-        next_states = batch['next_states']
-
-        # 1. Multi-step prediction: pred_latents, shape (B, horizon, embed_total_dim)
-        pred_latents = self.forward(states, actions)
-
-        # 2. Ground truth latents: embedding of next_states (B, horizon, state_dim)
-        B, H, S_dim = next_states.shape
-        target_s_flat = next_states.reshape(B * H, -1)
-        with torch.no_grad():
-            target_latents_flat = self.embedding_net(target_s_flat)
-            target_latents = target_latents_flat.reshape(B, H, -1)
-
-        # 3. Main prediction loss (MSE in latent space)
-        pred_loss = (pred_latents - target_latents).pow(2).mean()
-
-        # 4. Consistency loss (autoencoding regularizer):
-        #    For each pred_latent, decode and re-encode. Decoding: just [:, :, :state_dim]
-        decoded = pred_latents[:, :, :S_dim]  # (B, horizon, state_dim)
-        decoded_flat = decoded.reshape(B * H, -1)
-        with torch.no_grad():
-            reencoded_flat = self.embedding_net(decoded_flat)
-            reencoded = reencoded_flat.reshape(B, H, -1)
-        consistency_loss = (reencoded - pred_latents).pow(2).mean()
-
-        # 5. Eigenvalue penalty (already in your code)
-        A_w = self.koopman_operator.A.weight
-        eigs = torch.linalg.eigvals(A_w)
-        mags = torch.abs(eigs)
-        excess = torch.clamp(mags - 1.0, min=0.0)
-        eig_penalty = torch.sum(excess ** 2)
-
-        # 6. Total loss (tune weights as needed)
-        consistency_weight = 0.5
-        eig_penalty_weight = 0.1
-        # zeros = self.embedding_net(torch.zeros(1, self.state_dim))
-        # zero_loss = torch.sum(zeros ** 2)
-        total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty
-
-        self.log('pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('eig', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('ev_score', explained_variance(
-            pred_latents[:, :, :S_dim].flatten(), target_latents[:, :, :S_dim].flatten(), multioutput='uniform_average'),
-            prog_bar=True, on_step=False, on_epoch=True)
+        losses = self._calculate_losses(batch)
+        
+        total_loss = (
+            self.hparams.w_pred * losses['pred'] + 
+            self.hparams.w_recon * losses['recon'] + 
+            self.hparams.w_cons * losses['cons']
+        )
+        
+        self.log('train_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('train_pred_loss', losses['pred'], prog_bar=True, on_step=False, on_epoch=True)
+        self.log('train_ev_score', losses['ev'], prog_bar=True, on_step=False, on_epoch=True)
         return total_loss
-
 
     def validation_step(self, batch, batch_idx):
-        states = batch['states']
-        actions = batch['actions']
-        next_states = batch['next_states']
+        losses = self._calculate_losses(batch)
 
-        pred_latents = self.forward(states, actions)
-        B, H, S_dim = next_states.shape
-        target_s_flat = next_states.reshape(B * H, -1)
-        with torch.no_grad():
-            target_latents_flat = self.embedding_net(target_s_flat)
-            target_latents = target_latents_flat.reshape(B, H, -1)
-
-        pred_loss = (pred_latents - target_latents).pow(2).mean()
-
-        # Consistency (autoencoding) loss
-        decoded = pred_latents[:, :, :S_dim]
-        decoded_flat = decoded.reshape(B * H, -1)
-        with torch.no_grad():
-            reencoded_flat = self.embedding_net(decoded_flat)
-            reencoded = reencoded_flat.reshape(B, H, -1)
-        consistency_loss = (reencoded - pred_latents).pow(2).mean()
-
-        # Eigenvalue penalty
+        # --- SPEEDUP: Calculate expensive eigenvalue penalty only on validation ---
         A_w = self.koopman_operator.A.weight
         eigs = torch.linalg.eigvals(A_w)
         mags = torch.abs(eigs)
         excess = torch.clamp(mags - 1.0, min=0.0)
-        eig_penalty = torch.sum(excess ** 2)
+        eig_penalty = torch.mean(excess ** 2)
 
-        consistency_weight = 0.5
-        eig_penalty_weight = 0.1
-        total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty
+        total_loss = (
+            self.hparams.w_pred * losses['pred'] + 
+            self.hparams.w_recon * losses['recon'] + 
+            self.hparams.w_cons * losses['cons'] +
+            self.hparams.w_eig * eig_penalty
+        )
 
-        self.log('val_pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('val_con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
-        # self.log('val_eig', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
         self.log('val_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('val_ev', explained_variance(
-            pred_latents[:, :, :S_dim].flatten(), target_latents[:, :, :S_dim].flatten(), multioutput='uniform_average'),
-            prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val_eig_penalty', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
         return total_loss
 
-
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-        return {
-            "optimizer": optimizer,
-        }
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        return optimizer
     
     def transition(self, z=None, z_1=None, u=None):
         A, B, c = self.koopman_operator.get_koopman_operators(z, u)
         return None, None, A, B, c, None, None
-        
     
     @torch.no_grad()
     def get_eps(self, z, u):
-        
-        return self.eps_net(z, u)
+        # Placeholder for error estimation
+        return 0.01
     
+    @torch.no_grad()
     def transform(self, x):
         """
         Transforms an input (or batch of inputs) using the embedding network.
-        Args:
-            x: Input array of shape (B, state_dim) or (state_dim,)
-        Returns:
-            A numpy array of the latent representation of shape (B, state_dim+embed_dim) or (state_dim+embed_dim,)
         """
-        x = torch.Tensor(x)
+        x = torch.tensor(x, dtype=torch.float32, device=self.device)
         if x.dim() == 1:
             x = x.unsqueeze(0)
-        return self.embedding_net(x).detach().cpu().numpy()
+        return self.embedding_net(x).cpu().numpy()
     
+    @torch.no_grad()
     def get_next_state(self, states, actions):
         """
-        Given a sequence of states and actions, predict the future latent sequence.
-        Args:
-            states: Array of shape (B, state_dim)
-            actions: Array of shape (B, action_dim)
-        Returns:
-            pred_latents: Predicted latent states of shape (B, horizon, state_dim+embed_dim)
+        Given a batch of states and actions, predict the next latent state.
         """
-        states = torch.Tensor(states)
-        actions = torch.Tensor(actions)
+        states = torch.tensor(states, dtype=torch.float32, device=self.device)
+        actions = torch.tensor(actions, dtype=torch.float32, device=self.device)
 
-        z = self.embedding_net(states)   # shape: (B, embed_total_dim)
-        z = self.koopman_operator(z, actions)   # shape: (B, embed_total_dim)
+        z = self.embedding_net(states)
+        z_next = self.koopman_operator(z, actions)
         
-        return z.detach().cpu().numpy()
+        return z_next.cpu().numpy()
 
     def update_stats(self, mean, std):
-        self.mean = mean
-        self.std = std
+        # This functionality is better handled outside the model, e.g., in the Dataset
+        pass
+
 def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100, val_size=0.3):
     """
-    Fit the Koopman model on multi-step trajectory data, splitting into train and validation sets.
-
-    Args:
-        states (np.ndarray): Array of shape (N, horizon+1, state_dim)
-        actions (np.ndarray): Array of shape (N, horizon, action_dim)
-        next_states (np.ndarray): Array of shape (N, horizon+1, state_dim)
-        koopman_model (KoopmanLightning): The Lightning module for Koopman learning.
-        horizon (int): The prediction horizon.
-        epochs (int): Number of training epochs.
-        val_size (float): Proportion of the dataset to use for validation (e.g., 0.3 for 30%).
+    Fit the Koopman model on multi-step trajectory data.
     """
     dataset = KoopmanDataset(states, actions, next_states)
     total_size = len(dataset)
@@ -342,18 +296,255 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=13)
     val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, num_workers=13)
 
-    trainer = pl.Trainer(max_epochs=epochs, accelerator="cpu", devices=1, check_val_every_n_epoch=5)
+    trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, check_val_every_n_epoch=5)
     trainer.fit(koopman_model, train_loader, val_loader)
     
-    A_w = koopman_model.koopman_operator.A.weight
-    eigs = torch.linalg.eigvals(A_w)
-    mags = torch.abs(eigs)
-    print(mags)
-    
-
     torch.cuda.empty_cache()
 
-    del trainer
-    del train_loader
-    del val_loader
-    # del residuals_loader
+
+# ##########################################################
+# # 3. PyTorch Lightning Module for Multi-Step Koopman Learning #
+# ##########################################################
+
+# class KoopmanLightning(pl.LightningModule):
+#     """
+#     A Lightning Module that implements multi-step training of a Koopman model.
+#     It takes a sequence of states and a sequence of actions, then predicts the future latent states.
+#     The training objective is to match the multi-step latent trajectory with the encoder outputs
+#     from the corresponding ground truth future states.
+#     """
+#     def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001):
+#         """
+#         Args:
+#             state_dim (int): Dimensionality of the original state.
+#             embed_dim (int): Dimensionality of the nonlinear features.
+#             control_dim (int): Dimensionality of the control input.
+#             horizon (int): Prediction horizon (number of steps).
+#             lr (float): Learning rate.
+#         """
+#         super(KoopmanLightning, self).__init__()
+#         self.save_hyperparameters()
+#         self.state_dim = state_dim
+#         self.embed_dim = embed_dim
+#         self.control_dim = control_dim
+#         self.horizon = horizon
+#         self.lr = lr
+        
+#         # Total embedding dimension, where z = [x; g_theta(x)]
+#         embed_total_dim = state_dim + embed_dim
+        
+#         self.embedding_net = StateEmbedding(state_dim, embed_dim)
+#         self.koopman_operator = KoopmanOperator(embed_total_dim, control_dim)
+#         self.criterion = nn.MSELoss()
+#         self.mean = None
+#         self.std = None
+
+#     def forward(self, states, actions):
+#         """
+#         Forward pass for multi-step prediction.
+        
+#         Args:
+#             states: Tensor of shape (B, horizon+1, state_dim), where the first state is s_0.
+#             actions: Tensor of shape (B, horizon, control_dim), corresponding to actions [u_0, ..., u_{horizon-1}].
+        
+#         Returns:
+#             pred_latents: Predicted latent states for the next horizon steps,
+#                           a tensor of shape (B, horizon, embed_total_dim).
+#         """
+        
+#         # Use the first state of each trajectory to initialize.
+#         s0 = states[:, 0, :]         # shape: (B, state_dim)
+#         z = self.embedding_net(s0)   # shape: (B, embed_total_dim)
+#         pred_latents = []
+#         for t in range(self.horizon):
+#             a_t = actions[:, t, :]   # shape: (B, control_dim)
+#             z = self.koopman_operator(z, a_t)  # shape: (B, embed_total_dim)
+#             pred_latents.append(z.unsqueeze(1))
+#         pred_latents = torch.cat(pred_latents, dim=1)  # shape: (B, horizon, embed_total_dim)
+#         return pred_latents
+
+#     def training_step(self, batch, batch_idx):
+#         states = batch['states']
+#         actions = batch['actions']
+#         next_states = batch['next_states']
+
+#         # 1. Multi-step prediction: pred_latents, shape (B, horizon, embed_total_dim)
+#         pred_latents = self.forward(states, actions)
+        
+
+#         # 2. Ground truth latents: embedding of next_states (B, horizon, state_dim)
+#         B, H, S_dim = next_states.shape
+#         target_s_flat = next_states.reshape(B * H, -1)
+#         with torch.no_grad():
+#             target_latents_flat = self.embedding_net(target_s_flat)
+#             target_latents = target_latents_flat.reshape(B, H, -1)
+
+#         # 3. Main prediction loss (MSE in latent space)
+#         pred_loss = (pred_latents - target_latents).pow(2).mean()
+
+#         # 4. Consistency loss (autoencoding regularizer):
+#         #    For each pred_latent, decode and re-encode. Decoding: just [:, :, :state_dim]
+#         decoded = pred_latents[:, :, :S_dim]  # (B, horizon, state_dim)
+#         decoded_flat = decoded.reshape(B * H, -1)
+#         with torch.no_grad():
+#             reencoded_flat = self.embedding_net(decoded_flat)
+#             reencoded = reencoded_flat.reshape(B, H, -1)
+#         consistency_loss = (reencoded - pred_latents).pow(2).mean()
+
+#         # 5. Eigenvalue penalty (already in your code)
+#         A_w = self.koopman_operator.A.weight
+#         eigs = torch.linalg.eigvals(A_w)
+#         mags = torch.abs(eigs)
+#         excess = torch.clamp(mags - 1.0, min=0.0)
+#         eig_penalty = torch.sum(excess ** 2)
+        
+#         # with torch.no_grad():
+#         features = self.embedding_net.encode(states.view(B*H, -1))  # shape: (B*H, embed_dim)
+            
+#         recovered_states = self.embedding_net.decode(features)
+#         recon_loss = self.criterion(recovered_states, states.view(B*H, -1))
+
+#         # 6. Total loss (tune weights as needed)
+#         consistency_weight = 0.5
+#         eig_penalty_weight = 0.1
+#         # zeros = self.embedding_net(torch.zeros(1, self.state_dim))
+#         # zero_loss = torch.sum(zeros ** 2)
+#         total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty + recon_loss
+
+#         self.log('pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('eig', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('ev_score', explained_variance(
+#             pred_latents[:, :, :S_dim].flatten(), target_latents[:, :, :S_dim].flatten(), multioutput='uniform_average'),
+#             prog_bar=True, on_step=False, on_epoch=True)
+#         return total_loss
+
+
+#     def validation_step(self, batch, batch_idx):
+#         states = batch['states']
+#         actions = batch['actions']
+#         next_states = batch['next_states']
+
+#         pred_latents = self.forward(states, actions)
+#         B, H, S_dim = next_states.shape
+#         target_s_flat = next_states.reshape(B * H, -1)
+#         with torch.no_grad():
+#             target_latents_flat = self.embedding_net(target_s_flat)
+#             target_latents = target_latents_flat.reshape(B, H, -1)
+
+#         pred_loss = (pred_latents - target_latents).pow(2).mean()
+
+#         # Consistency (autoencoding) loss
+#         decoded = pred_latents[:, :, :S_dim]
+#         decoded_flat = decoded.reshape(B * H, -1)
+#         with torch.no_grad():
+#             reencoded_flat = self.embedding_net(decoded_flat)
+#             reencoded = reencoded_flat.reshape(B, H, -1)
+#         consistency_loss = (reencoded - pred_latents).pow(2).mean()
+
+#         # Eigenvalue penalty
+#         A_w = self.koopman_operator.A.weight
+#         eigs = torch.linalg.eigvals(A_w)
+#         mags = torch.abs(eigs)
+#         excess = torch.clamp(mags - 1.0, min=0.0)
+#         eig_penalty = torch.sum(excess ** 2)
+
+#         consistency_weight = 0.5
+#         eig_penalty_weight = 0.1
+#         total_loss = pred_loss + consistency_weight * consistency_loss + eig_penalty_weight * eig_penalty
+
+#         self.log('val_pred', pred_loss, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('val_con', consistency_loss, prog_bar=True, on_step=False, on_epoch=True)
+#         # self.log('val_eig', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('val_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
+#         self.log('val_ev', explained_variance(
+#             pred_latents[:, :, :S_dim].flatten(), target_latents[:, :, :S_dim].flatten(), multioutput='uniform_average'),
+#             prog_bar=True, on_step=False, on_epoch=True)
+#         return total_loss
+
+
+#     def configure_optimizers(self):
+#         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+#         return {
+#             "optimizer": optimizer,
+#         }
+    
+#     def transition(self, z=None, z_1=None, u=None):
+#         A, B, c = self.koopman_operator.get_koopman_operators(z, u)
+#         return None, None, A, B, c, None, None
+        
+    
+#     @torch.no_grad()
+#     def get_eps(self, z, u):
+        
+#         return self.eps_net(z, u)
+    
+#     def transform(self, x):
+#         """
+#         Transforms an input (or batch of inputs) using the embedding network.
+#         Args:
+#             x: Input array of shape (B, state_dim) or (state_dim,)
+#         Returns:
+#             A numpy array of the latent representation of shape (B, state_dim+embed_dim) or (state_dim+embed_dim,)
+#         """
+#         x = torch.Tensor(x)
+#         if x.dim() == 1:
+#             x = x.unsqueeze(0)
+#         return self.embedding_net(x).detach().cpu().numpy()
+    
+#     def get_next_state(self, states, actions):
+#         """
+#         Given a sequence of states and actions, predict the future latent sequence.
+#         Args:
+#             states: Array of shape (B, state_dim)
+#             actions: Array of shape (B, action_dim)
+#         Returns:
+#             pred_latents: Predicted latent states of shape (B, horizon, state_dim+embed_dim)
+#         """
+#         states = torch.Tensor(states)
+#         actions = torch.Tensor(actions)
+
+#         z = self.embedding_net(states)   # shape: (B, embed_total_dim)
+#         z = self.koopman_operator(z, actions)   # shape: (B, embed_total_dim)
+        
+#         return z.detach().cpu().numpy()
+
+#     def update_stats(self, mean, std):
+#         self.mean = mean
+#         self.std = std
+# def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100, val_size=0.3):
+#     """
+#     Fit the Koopman model on multi-step trajectory data, splitting into train and validation sets.
+
+#     Args:
+#         states (np.ndarray): Array of shape (N, horizon+1, state_dim)
+#         actions (np.ndarray): Array of shape (N, horizon, action_dim)
+#         next_states (np.ndarray): Array of shape (N, horizon+1, state_dim)
+#         koopman_model (KoopmanLightning): The Lightning module for Koopman learning.
+#         horizon (int): The prediction horizon.
+#         epochs (int): Number of training epochs.
+#         val_size (float): Proportion of the dataset to use for validation (e.g., 0.3 for 30%).
+#     """
+#     dataset = KoopmanDataset(states, actions, next_states)
+#     total_size = len(dataset)
+#     val_len = int(total_size * val_size)
+#     train_len = total_size - val_len
+#     train_dataset, val_dataset = random_split(dataset, [train_len, val_len])
+
+#     train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=13)
+#     val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, num_workers=13)
+
+#     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, check_val_every_n_epoch=5)
+#     trainer.fit(koopman_model, train_loader, val_loader)
+    
+#     A_w = koopman_model.koopman_operator.A.weight
+#     eigs = torch.linalg.eigvals(A_w)
+#     mags = torch.abs(eigs)
+
+#     torch.cuda.empty_cache()
+
+#     del trainer
+#     del train_loader
+#     del val_loader
+#     # del residuals_loader

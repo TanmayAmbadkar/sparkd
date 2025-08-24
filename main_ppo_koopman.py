@@ -1,4 +1,5 @@
 import argparse
+import random
 import datetime
 import itertools
 import numpy as np
@@ -6,14 +7,14 @@ import torch
 import os
 from torch.utils.tensorboard import SummaryWriter
 from ppo import PPO, ActorCritic
-from src.policy import Shield, PPOPolicy, ProjectionPolicy
+from src.policy import Shield, PPOPolicy, ProjectionPolicy, CBFPolicy
 from koopman.env_model import get_environment_model
 from abstract_interpretation import domains, verification
 from benchmarks import envs
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 import gymnasium as gym 
 import matplotlib.pyplot as plt
-
+import imageio
 import traceback
 
 parser = argparse.ArgumentParser(description='Safe PPO Args')
@@ -21,7 +22,7 @@ parser.add_argument('--env_name', default="lunar_lander")
 parser.add_argument('--gamma', type=float, default=0.995)
 parser.add_argument('--lr', type=float, default=0.0003)
 parser.add_argument('--seed', type=int, default=123456)
-parser.add_argument('--batch_size', type=int, default=4096)
+parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--mini_batch_size', type=int, default=256)
 parser.add_argument('--num_steps', type=int, default=200000)
 parser.add_argument('--hidden_size', type=int, default=128)
@@ -35,26 +36,31 @@ args = parser.parse_args()
 
 # Setup environment
 env = envs.get_env_from_name(args.env_name)
-env.seed(args.seed)
-torch.manual_seed(args.seed)
+# env.seed(args.seed)
+# torch.manual_seed(args.seed)
+# np.random.seed(args.seed)
+
+random.seed(args.seed)
 np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+torch.backends.cudnn.deterministic = True
 
 hyperparams = vars(args)
 
 # Tensorboard
 if not os.path.exists("runs_new"):
     os.makedirs("runs_new")
-writer = SummaryWriter('runs_new/{}_PPO_{}_H{}_D{}'.format(
-    datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-    args.horizon, args.red_dim))
+    
+name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_PPO_{args.env_name}_H{args.horizon}_D{args.red_dim}"
+writer = SummaryWriter(f'runs_new/{name}')
 
 print(hyperparams)
 if not os.path.exists("logs_ppo"):
     os.makedirs("logs_ppo")
 
-file = open('runs_new/{}_PPO_{}_H{}_D{}/log.txt'.format(
-    datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-    args.horizon, args.red_dim), "w+")
+file = open(f'runs_new/{name}/log.txt', "w+")
+os.makedirs(f'runs_new/{name}/videos')
+# env = gym.wrappers.RecordVideo(env, f"runs_new/{name}/videos")
 
 # PPO agent setup
 
@@ -82,88 +88,98 @@ train_steps = 1
 while True:
     i_episode = next(iterator_loop)
     episode_reward = 0
+    episode_cost = 0
     episode_steps = 0
     done = False
     trunc = False
     state, info = env.reset()
     unsafe_flag = False
     trajectory = [state]
-    if True:
-
-        print(i_episode, ": Real data")
-        tmp_buffer = []
-        real_buffer = []
-        
-        flags = []
-        
-        while not done and not trunc:
-            if safe_agent is not None:
-                action, shielded = safe_agent(state)
-                flags.append(shielded[0])
-            else:
-                action = agent(state)
-                shielded = "N"
-
-            next_state, reward, done, trunc, info = env.step(action)
-                
-            episode_steps += 1
-            total_numsteps += 1
-            episode_reward += reward
-            
-
-            cost = 0
-            
-            trajectory.append(next_state)
-            
-            if env.unsafe(next_state, False):
-
-                real_unsafe_episodes += 1 * (not unsafe_flag)
-                episode_reward -= 100 * (not unsafe_flag)
-                reward -= -100
-                print("UNSAFE (outside testing)", shielded)
-                print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
-                done = done or (True if safe_agent is not None else False)
-                cost = 1
-
-                unsafe_flag = True or unsafe_flag
-            # Ignore the "done" signal if it comes from hitting the time
-            # horizon.
-            # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
-
-            if cost > 0:
-                agent.add(state, action, reward, next_state, done or trunc or (shielded != "N"), 1)
-                real_data.push(state, action, reward, next_state, done or trunc or (shielded != "N"), 1)
-            else:
-                agent.add(state, action, reward, next_state, done or trunc  or (shielded != "N"), 0)
-                real_data.push(state, action, reward, next_state, done or trunc, 0)
-            
-            
-            if len(agent.memory) >= args.batch_size:
-                losses = agent.train()
-
-                writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
-                writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
-                writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
-                writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
-                writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
-                writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
-                writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
-
-
-            state = next_state
-
-            
-        print("Sequence", "".join(flags))
+    print(i_episode, ": Real data")
+    tmp_buffer = []
+    real_buffer = []
+    
+    flags = []
+    
+    while not done and not trunc:
         if safe_agent is not None:
-            try:
-                s, a, b, t = safe_agent.report()
-                print("Shield steps:", s, "  Neural steps:", a, "  Backup steps:", b)
-                print("Average time:", t / (s + a + b))
-                safe_agent.reset_count()
-            except Exception:
-                pass
+            action, shielded = safe_agent(state)
+            flags.append(shielded[0])
+        else:
+            action = agent(state)
+            shielded = "N"
+
+        next_state, reward, done, trunc, info = env.step(action)
+            
+        episode_steps += 1
+        total_numsteps += 1
+        episode_reward += reward
         
-        total_real_episodes += 1 
+
+        cost = 0
+        
+        trajectory.append(next_state)
+        
+        if env.unsafe(next_state, False):
+
+            real_unsafe_episodes += 1
+            episode_reward -= 100
+            reward -= 100
+            print("UNSAFE (outside testing)", shielded)
+            print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
+            done = done or (True if safe_agent is not None else False)
+            cost = 1
+            episode_cost
+
+            unsafe_flag = True or unsafe_flag
+        # Ignore the "done" signal if it comes from hitting the time
+        # horizon.
+        # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
+
+        if cost > 0:
+            agent.add(state, action, reward, next_state, done or trunc, 1)
+            real_data.push(state, action, reward, next_state, done or trunc, 1)
+        else:
+            agent.add(state, action, reward, next_state, done or trunc, 0)
+            real_data.push(state, action, reward, next_state, done or trunc, 0)
+        
+        
+        if len(agent.memory) >= args.batch_size:
+            losses = agent.train()
+
+            writer.add_scalar(f'loss/policy_loss', losses['avg_policy_loss'], total_numsteps)
+            writer.add_scalar(f'loss/value_loss', losses['avg_value_loss'], total_numsteps)
+            writer.add_scalar(f'loss/entropy_loss', losses['avg_entropy_loss'], total_numsteps)
+            writer.add_scalar(f'loss/clip_fraction', losses['avg_clip_fraction'], total_numsteps)
+            writer.add_scalar(f'loss/kl_div', losses['avg_kl_divergence'], total_numsteps)
+            writer.add_scalar(f'loss/total_loss', losses['avg_total_loss'], total_numsteps)
+            writer.add_scalar(f'loss/explained_variance', losses['avg_explained_variance'], total_numsteps)
+
+
+        state = next_state
+        
+        # if safe_agent is not None:
+            
+        #     start_gamma = 0.1
+        #     end_gamma = 0.9
+        #     total_training_steps = 1_000_000
+
+        #     # Inside your training loop
+        #     progress = min(total_numsteps / total_training_steps, 1.0)
+        #     safe_agent.shield.cbf_gamma = start_gamma + progress * (end_gamma - start_gamma)
+
+        
+    print("Sequence", "".join(flags))
+    if safe_agent is not None:
+        try:
+            s, a, b, t = safe_agent.report()
+            print("Shield steps:", s, "  Neural steps:", a, "  Backup steps:", b)
+            print("Average time:", t / (s + a + b))
+            safe_agent.reset_count()
+        except Exception:
+            pass
+    
+    total_real_episodes += 1 
 
     
     
@@ -183,7 +199,7 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.koopman_model.lr = 0.001
+            env_model.mars.koopman_model.lr = 0.0003
             koopman_model = env_model.mars.koopman_model
             epochs = 50
         else:
@@ -197,15 +213,6 @@ while True:
         
         writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
         writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)   
-            
-        # new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.koopman_model.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
-        
-        
-        # safety_domain = domains.DeepPoly(env.safety.lower, env.safety.upper)
-        
-        # safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.koopman_model.embedding_net.embed_net, safety_domain))
-        
-        
         
         
         safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
@@ -217,8 +224,8 @@ while True:
         
         new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
         new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
-        print("New observation space", new_obs_space)
-        print("Safety domain", safety)
+        # print("New observation space", new_obs_space)
+        # print("Safety domain", safety)
         
         polys = safety.to_hyperplanes(new_obs_space)
         print(polys)
@@ -227,13 +234,14 @@ while True:
         # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
         
-        print("LATENT SAFETY", safety, len(polys[0]))
-        print("LATENT UNSAFETY",  len(env.transformed_polys))
-        shield = ProjectionPolicy(
+        # print("LATENT SAFETY", safety, len(polys[0]))
+        # print("LATENT UNSAFETY",  len(env.transformed_polys))
+        shield = CBFPolicy(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
         safe_agent = Shield(shield, agent, mean, std)
         
+        shield.update_model()
 
     # Test the agent periodically
     
@@ -256,9 +264,9 @@ while True:
         t = 0
 
         for episode_num in range(episodes):
-            # record_video = episode_num % 2 == 0  # Record every alternate episode (example condition)
-            custom_filename = f"videos/episode_{i_episode}.mp4"
-            
+            record_video = i_episode % 100 == 0  # Record every alternate episode (example condition)
+            custom_filename = f"runs_new/{name}/videos/episode_{i_episode}.mp4"
+
             # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
             
             state, info = env.reset()
@@ -309,7 +317,8 @@ while True:
                 trajectory.append(state)
                 # frames.append(env.render())
 
-            # imageio.mimsave(custom_filename, frames, fps=30)
+            # if record_video:
+                # imageio.mimsave(custom_filename, frames, fps=30)
             avg_reward += episode_reward
             avg_length += episode_steps
 

@@ -188,12 +188,11 @@ def get_environment_model(     # noqa: C901
     
     means = np.mean(input_states.reshape(-1, input_states.shape[-1]), axis=0)
     stds = np.std(input_states.reshape(-1, input_states.shape[-1]), axis=0)
-    print("Input states mean:", means.shape)
-    print("Input states std:", stds.shape)
+    
     stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
     
-    means = np.zeros_like(means)
-    stds = np.ones_like(stds)
+    # means = np.zeros_like(means)
+    # stds = np.ones_like(stds)
 
     print("Means:", means)
     print("Stds:", stds)
@@ -238,8 +237,6 @@ def get_environment_model(     # noqa: C901
     output_states_copy = parsed_mars_copy.koopman_model.transform(output_states[:, :, :input_states.shape[-1]])
     # output_states = output_states.reshape(-1, input_states.shape[-1])
 
-    print(np.min(Yh[:,0], axis = 0), np.max(Yh[:,0], axis = 0))
-    print(np.min(output_states[:,0], axis = 0), np.max(output_states[:,0], axis = 0))
     ev_score = None
     r2 = None
     ev_score_old = None
@@ -286,7 +283,6 @@ def get_environment_model(     # noqa: C901
     plt.close()
     # 2) Flatten over samples & time
     res_flat = res.reshape(-1, output_states.shape[-1])             # shape: (N*T, n_out))
-    print("Flattened res", res_flat.shape)
 
     # 3) Empirical max
 
@@ -295,19 +291,11 @@ def get_environment_model(     # noqa: C901
 
     q1 = np.percentile(res_flat, 25, axis=0)   # shape: (n_out,)
     q3 = np.percentile(res_flat, 75, axis=0)   # shape: (n_out,)
-    print("Q1", q1)
-    print("Q3", q3)
     iqr = q3 - q1
     lower_bound = q1 - 1.5 * iqr
     upper_bound = q3 + 1.5 * iqr
-    print("lower_bound", lower_bound)
     print("upper_bound", upper_bound)
-    print("Below LB", res_flat[res_flat < lower_bound].shape)
-    print("Above UB", res_flat[res_flat > upper_bound].shape)
     print(quantile)
-    print(upper_bound)
-    
-    print("Max error:", upper_bound)
 
     # 5) still store the full vector
     # parsed_mars.error = upper_bound
@@ -326,15 +314,16 @@ def get_environment_model(     # noqa: C901
         0.9, output_states[:, 0, :].shape[1]))
     err = diff + conf
     print("Computed error:", err, "(", diff, conf, ")")
-    # err = err
-    # error = quantile
-    error = np.minimum(np.minimum(upper_bound, quantile), err)
+    error = err
+    error = quantile
+    error = np.minimum(upper_bound, quantile)
+    
+    # error = np.max(res_flat, axis=0)
     
     
-    parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
-    # parsed_mars.error =  error
-
-
+    # parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
+    # parsed_mars.error = err * np.ones(output_states[:, 0, :].shape[1] )
+    parsed_mars.error = error
 
     print("Final Error", parsed_mars.error)
 

@@ -43,7 +43,7 @@ parser.add_argument('--alpha', type=float, default=0.2, metavar='G',
                             term against the reward (default: 0.2)')
 parser.add_argument('--automatic_entropy_tuning', default=False, action='store_true',
                     help='Automaically adjust alpha (default: False)')
-parser.add_argument('--updates_per_step', type=int, default=1, metavar='N',
+parser.add_argument('--updates_per_step', type=int, default=10, metavar='N',
                     help='model updates per simulator step (default: 1)')
 parser.add_argument('--target_update_interval', type=int, default=1, metavar='N',
                     help='Value target update per no. of updates per step (default: 1)')
@@ -121,6 +121,20 @@ while True:
             else:
                 action = agent(state)
                 shielded = "N"
+                
+            if len(agent.memory) > args.batch_size and total_numsteps % 100 == 0:
+                # Number of updates per step in environment
+                for i in range(args.updates_per_step):
+                    # Update parameters of all the networks
+                    critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
+                        agent.train()
+
+                    writer.add_scalar(f'loss/critic_1', critic_1_loss, total_numsteps)
+                    writer.add_scalar(f'loss/critic_2', critic_2_loss, total_numsteps)
+                    writer.add_scalar(f'loss/policy', policy_loss, total_numsteps)
+                    writer.add_scalar(f'loss/entropy_loss', ent_l, total_numsteps)
+                    writer.add_scalar(f'loss/alpha', alph, total_numsteps)
+
 
             next_state, reward, done, trunc, info = env.step(action)
                 
@@ -149,26 +163,14 @@ while True:
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
             if cost > 0:
-                agent.add(state, action, reward, next_state, done or trunc or (shielded != "N"), 1)
-                real_data.push(state, action, reward, next_state, done or trunc or (shielded != "N"), 1)
+                agent.add(state, action, reward, next_state, done or trunc, 1)
+                real_data.push(state, action, reward, next_state, done or trunc, 1)
             else:
-                agent.add(state, action, reward, next_state, done or trunc  or (shielded != "N"), 0)
+                agent.add(state, action, reward, next_state, done or trunc, 0)
                 real_data.push(state, action, reward, next_state, done or trunc, 0)
             
             
-            if len(agent.memory) > args.batch_size:
-                # Number of updates per step in environment
-                for i in range(args.updates_per_step):
-                    # Update parameters of all the networks
-                    critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
-                        agent.train()
-
-                    writer.add_scalar(f'loss/critic_1', critic_1_loss, total_numsteps)
-                    writer.add_scalar(f'loss/critic_2', critic_2_loss, total_numsteps)
-                    writer.add_scalar(f'loss/policy', policy_loss, total_numsteps)
-                    writer.add_scalar(f'loss/entropy_loss', ent_l, total_numsteps)
-                    writer.add_scalar(f'loss/alpha', alph, total_numsteps)
-
+            
 
             state = next_state
 

@@ -1,149 +1,144 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Normal
 import numpy as np
 
-LOG_STD_MIN = -20
-LOG_STD_MAX = 2
-
-def weights_init_(m):
-    if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight, gain=1)
-        nn.init.constant_(m.bias, 0)
-
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """
+    Initialize a linear layer with orthogonal initialization for weights
+    and a constant for biases.
+
+    Args:
+        layer (nn.Linear): The linear layer to initialize.
+        std (float): The standard deviation for the orthogonal initialization.
+        bias_const (float): The constant value for the bias.
+
+    Returns:
+        nn.Linear: The initialized layer.
+    """
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim, action_space, hidden_dim):
+    """
+    A standard Actor-Critic network that outputs actions for a continuous
+    action space using a Gaussian policy. This implementation does not use
+    action squashing (e.g., tanh), making it suitable for algorithms like PPO.
+    """
+    def __init__(self, obs_dim, action_space, hidden_dim=64):
+        """
+        Initializes the Actor and Critic networks.
+
+        Args:
+            obs_dim (int): The dimension of the observation space.
+            action_space: The environment's action space (e.g., from Gymnasium).
+            hidden_dim (int): The number of neurons in the hidden layers.
+        """
         super(ActorCritic, self).__init__()
-        # Actor Network
         self.action_space = action_space
+        action_dim = action_space.shape[0]
+
+        # Critic Network: Estimates the value of a state
         self.critic = nn.Sequential(
-            layer_init(
-                nn.Linear(obs_dim, 64)
-            ),
+            layer_init(nn.Linear(obs_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
-        )
-        self.actor = nn.Sequential(
-            layer_init(
-                nn.Linear(obs_dim, 64)
-            ),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, action_space.shape[0]), std=0.01),
+            layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
-        self.actor_logstd = nn.Parameter(
-            torch.zeros(1, action_space.shape[0])
+        # Actor Network: Outputs the mean of the action distribution
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, hidden_dim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_dim, action_dim), std=0.01),
         )
 
+        # A learnable parameter for the standard deviation of the action distribution
+        self.actor_logstd = nn.Parameter(-torch.ones(1, action_dim))
 
-    def forward(self):
-        raise NotImplementedError
+    def get_value(self, state):
+        """
+        Gets the value of a state from the critic network.
+
+        Args:
+            state (torch.Tensor): The input state.
+
+        Returns:
+            torch.Tensor: The estimated value of the state.
+        """
+        return self.critic(state)
+
+    def get_policy(self, state):
+        """
+        Gets the policy's action distribution for a given state.
+
+        Args:
+            state (torch.Tensor): The input state.
+
+        Returns:
+            torch.distributions.Normal: The action distribution.
+        """
+        action_mean = self.actor_mean(state)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        return Normal(action_mean, action_std)
 
     def act(self, state):
-        mean, log_std = self.get_policy(state)
-        std = log_std.exp()
-        normal = Normal(mean, std)
-        
-        # Sample from the Normal distribution (unbounded)
-        x_t = normal.rsample()  # Use rsample() for reparameterization trick
-        
-        # Squash the sample to [-1, 1] using tanh
-        y_t = torch.tanh(x_t)
-        
-        # Calculate the log probability, correcting for the tanh transformation
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(1 - y_t.pow(2) + 1e-6)
-        log_prob = log_prob.sum(-1, keepdim=True)
-        
-        # Rescale the squashed action to the environment's action space bounds
-        action = y_t * torch.tensor(self.action_space.high, dtype=torch.float32)
+        """
+        Samples an action from the policy for a given state.
 
+        Args:
+            state (torch.Tensor): The input state.
+
+        Returns:
+            tuple: A tuple containing the action, its log probability, and its entropy.
+        """
+        dist = self.get_policy(state)
+        action = dist.sample()
+        log_prob = dist.log_prob(action).sum(-1, keepdim=True)
+        entropy = dist.entropy().sum(-1, keepdim=True)
+
+        # Clip the action to the valid range of the environment's action space
+        # action = torch.clamp(
+        #     action,
+        #     torch.tensor(self.action_space.low, dtype=torch.float32, device=action.device),
+        #     torch.tensor(self.action_space.high, dtype=torch.float32, device=action.device)
+        # )
         return action, log_prob
 
     def evaluate(self, state, action):
-        # Get the policy distribution parameters
-        mean, log_std = self.get_policy(state)
-        std = log_std.exp()
-        normal = Normal(mean, std)
+        """
+        Evaluates a given state-action pair, returning the action's log probability,
+        the distribution's entropy, and the state's value.
 
-        # --- Start of Correction ---
-        # The 'action' from the buffer is squashed and rescaled.
-        # We need to reverse this process to find the original sample 'x_t'.
+        Args:
+            state (torch.Tensor): The state to evaluate.
+            action (torch.Tensor): The action to evaluate.
 
-        # 1. Un-scale the action from environment bounds back to the [-1, 1] range of tanh
-        #    (Assumes symmetric action space where low = -high)
-        y_t = action / torch.tensor(self.action_space.high, dtype=torch.float32)
-        
-        # To avoid instability at the boundaries of tanh, clip y_t
-        y_t = torch.clamp(y_t, -0.999, 0.999)
-
-        # 2. Apply the inverse of tanh (atanh) to get the pre-squashed action
-        x_t = torch.atanh(y_t)
-
-        # 3. Now, calculate the log-prob using the pre-squashed action 'x_t'
-        #    and apply the same correction for the tanh transformation.
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(1 - y_t.pow(2) + 1e-6)
-        log_prob = log_prob.sum(-1, keepdim=True)
-        
-        # --- End of Correction ---
-
-        # Entropy is calculated from the base distribution
-        entropy = normal.entropy().sum(-1, keepdim=True)
-        
-        # Value function is calculated as before
+        Returns:
+            tuple: A tuple containing the log probability of the action, the entropy
+                   of the distribution, and the estimated value of the state.
+        """
+        dist = self.get_policy(state)
+        log_prob = dist.log_prob(action).sum(-1, keepdim=True)
+        entropy = dist.entropy().sum(-1, keepdim=True)
         value = self.get_value(state)
-        
         return log_prob, entropy, value
 
-    def get_policy(self, state):
-        mean = self.actor(state)
-        
-        return mean, torch.clamp(self.actor_logstd, LOG_STD_MIN, LOG_STD_MAX)
-
-    def get_value(self, state):
-        
-        value = self.critic(state)
-        return value
-
     def get_log_prob(self, state, action):
-        # Get the base Normal distribution as before
-        mean, log_std = self.get_policy(state)
-        std = log_std.exp()
-        dist = Normal(mean, std)
+        """
+        Computes the log probability of an action given a state.
 
-        # --- Start of Correction ---
-        # The 'action' from the buffer is squashed and rescaled.
-        # We must reverse this process to find the log-probability.
+        Args:
+            state (torch.Tensor): The input state.
+            action (torch.Tensor): The action for which to compute the log probability.
 
-        # 1. Un-scale the action from the environment's bounds back to the [-1, 1] range.
-        #    (This assumes a symmetric action space, e.g., [-2, 2])
-        action_high = torch.tensor(self.action_space.high, device=action.device, dtype=torch.float32)
-        y_t = action / action_high
-
-        # 2. Clamp for numerical stability before applying the inverse of tanh.
-        y_t = torch.clamp(y_t, -0.9999, 0.9999)
-
-        # 3. Apply the inverse of tanh (atanh) to get the original, pre-squashed sample.
-        x_t = torch.atanh(y_t)
-
-        # 4. Calculate the log-prob of the pre-squashed sample and apply the
-        #    correction for the change of variables from the tanh transformation.
-        log_prob = dist.log_prob(x_t)
-        log_prob -= torch.log(1 - y_t.pow(2) + 1e-6)
-        
-        # 5. Sum across the action dimensions.
-        log_prob = log_prob.sum(1)
-        # --- End of Correction ---
-        
-        return log_prob
+        Returns:
+            torch.Tensor: The log probability of the action.
+        """
+        dist = self.get_policy(state)
+        return dist.log_prob(action).sum(-1, keepdim=True)

@@ -6,7 +6,7 @@ import sys
 
 class CheetahEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("HalfCheetah-v5")
+        self.env = gym.make("HalfCheetah-v5", render_mode="rgb_array")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
@@ -107,8 +107,8 @@ class CheetahEnv(gym.Env):
             # state = self.reduce_state(state)
         return state, {"state_original": original_state}
 
-    def render(self, mode='human'):
-        return self.env.render(mode=mode)
+    def render(self):
+        return self.env.render()
 
     def close(self):
         return self.env.close()
