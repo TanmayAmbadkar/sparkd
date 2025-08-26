@@ -24,7 +24,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.safety = safety
 
         self._max_episode_steps = 1000
-       
+        
         self.step_counter = 0
         self.done = False  
         self.safe_polys = []

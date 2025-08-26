@@ -126,6 +126,10 @@ class PPO:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), max_norm=0.5)
                 self.optimizer.step()
+                
+                # check if logstd has nans, replace with -10
+                if torch.isnan(self.actor_critic.actor_logstd).any():
+                    self.actor_critic.actor_logstd.data = torch.clamp(self.actor_critic.actor_logstd.data, min=-10, max=-1)
 
                 # --- Logging Metrics ---
                 clipped_mask = (ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))

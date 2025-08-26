@@ -369,8 +369,6 @@ class CBFPolicy:
         unsafe_polys: List[np.ndarray],
         safe_polys: List[np.ndarray], 
         transform=lambda x: x,
-
-        cbf_gamma: float = 0.7
     ):
         """
         Args:
@@ -381,7 +379,6 @@ class CBFPolicy:
                        the state is pushed away from the boundary.
             transform: A function to lift the state to the Koopman space.
         """
-        self.cbf_gamma = cbf_gamma
         
 
         self.env = env
@@ -399,7 +396,7 @@ class CBFPolicy:
         self.saved_state = None
         self.saved_action = None
         self.shielded = False
-        self.gamma = 0.5
+        self.gamma = 0.3
         
                 # --- Placeholders for the pre-computed model and solver ---
         self.solver= None
@@ -413,87 +410,85 @@ class CBFPolicy:
 
     def update_model(self):
         """
-        Updates the shield with a new dynamics model and performs all expensive,
-        state-independent pre-computations. This method should be called whenever
-        the fixed Koopman model (A, B, c) or the error bound (eps) changes.
+        Updates the shield with a new dynamics model. It pre-computes all
+        state-independent components for EACH safe polyhedron provided.
         """
         H_max = self.horizon
         
-        z_init = self.ori_state_space.sample()
+        # Get a single, fixed dynamics model for pre-computation
+        z_init = np.zeros(self.s_dim) # Use a zero state for linearization
         a_pi_init = np.zeros(self.u_dim)
         mat_dyn, eps = self.env.get_matrix_at_point(np.concatenate((z_init, a_pi_init)), self.s_dim)
         A, B, c = mat_dyn[:, :self.s_dim], mat_dyn[:, self.s_dim:-1], mat_dyn[:, -1]
         eps_vec = np.full(self.s_dim, float(eps)) if np.isscalar(eps) else np.asarray(eps, float).reshape(-1,)
-        # --- 1. Pre-compute matrix powers and affine terms ---
-        A_pows = [np.eye(self.s_dim)]
-        for _ in range(1, H_max + 1):
-            A_pows.append(A_pows[-1] @ A)
 
-        C_list = [np.zeros(self.s_dim)]
-        for j in range(1, H_max + 1):
-            C_list.append(C_list[-1] + A_pows[j - 1] @ c)
+        # --- Pre-compute for EACH polyhedron ---
+        self.solvers = []
+        self.precomputed_per_poly = []
 
-        # --- 2. Pre-compute face info (including relative degrees) ---
-        # NOTE: This implementation uses the first polyhedron for shielding.
-        poly = self.safe_polys[0]
-        P_sel, b_sel = poly[:, :-1].astype(float), poly[:, -1].astype(float)
-        faces = [(P_sel[i, :], float(b_sel[i])) for i in range(P_sel.shape[0])]
+        for poly in self.safe_polys:
+            # 1. Pre-compute powers and affine terms (same for all polys)
+            A_pows = [np.eye(self.s_dim)]
+            for _ in range(1, H_max + 1): A_pows.append(A_pows[-1] @ A)
+            C_list = [np.zeros(self.s_dim)]
+            for j in range(1, H_max + 1): C_list.append(C_list[-1] + A_pows[j - 1] @ c)
 
-        def rel_degree(p: np.ndarray) -> Optional[int]:
-            M = B.copy()
-            for r in range(1, H_max + 1):
-                if np.linalg.norm(p @ M, ord=np.inf) > 1e-10: return r
-                M = A @ M
-            return None
+            # 2. Pre-compute face info for the current polyhedron
+            P_sel, b_sel = poly[:, :-1].astype(float), poly[:, -1].astype(float)
+            faces = [(P_sel[i, :], float(b_sel[i])) for i in range(P_sel.shape[0])]
 
-        face_info = [(p, b, rel_degree(p)) for (p, b) in faces]
-        r_vals = [r for (_, _, r) in face_info if r is not None]
-        H_trap_all = max(r_vals) if r_vals else 1
+            def rel_degree(p: np.ndarray) -> Optional[int]:
+                M = B.copy()
+                for r in range(1, H_max + 1):
+                    if np.linalg.norm(p @ M, ord=np.inf) > 1e-10: return r
+                    M = A @ M
+                return None
 
-        # --- 3. Pre-compute tightening terms using prefix sums ---
-        tighten_pref = {}
-        for p, _, _ in face_info:
-            key = tuple(p)
-            vals = [np.abs(p @ A_pows[ell]) @ eps_vec for ell in range(H_max)]
-            tighten_pref[key] = np.cumsum(vals)
+            face_info = [(p, b, rel_degree(p)) for (p, b) in faces]
+            r_vals = [r for (_, _, r) in face_info if r is not None]
+            H_trap_all = max(r_vals) if r_vals else 1
 
-        # --- 4. Build the global, state-independent constraint matrices ---
-        G_rows, M_h_rows, v_h_rows = [], [], []
-        row_ptrs = [[] for _ in range(H_max)]
+            # 3. Pre-compute tightening terms
+            tighten_pref = {tuple(p): np.cumsum([np.abs(p @ A_pows[ell]) @ eps_vec for ell in range(H_max)]) for p, _, _ in face_info}
 
-        for j in range(1, H_max + 1):
-            blocks = [A_pows[j - 1 - t] @ B for t in range(j)]
-            phi_j = np.hstack(blocks + [np.zeros((self.s_dim, (H_max - j) * self.u_dim))])
-            for p, b, r in face_info:
-                if r is None or j < r: continue
-                G_rows.append(sp.csr_matrix(p @ phi_j))
-                M_h_rows.append(-p @ A_pows[j] + (self.gamma ** j) * p)
-                tighten = tighten_pref[tuple(p)][j - 1]
-                v_h_rows.append(-p @ C_list[j] - b - tighten + (self.gamma ** j) * b)
-                row_ptrs[j - 1].append(len(G_rows) - 1)
+            # 4. Build global constraint matrices for this polyhedron
+            G_rows, M_h_rows, v_h_rows, row_ptrs = [], [], [], [[] for _ in range(H_max)]
+            for j in range(1, H_max + 1):
+                blocks = [A_pows[j - 1 - t] @ B for t in range(j)]
+                phi_j = np.hstack(blocks + [np.zeros((self.s_dim, (H_max - j) * self.u_dim))])
+                for p, b, r in face_info:
+                    if r is None or j < r: continue
+                    G_rows.append(sp.csr_matrix(p @ phi_j))
+                    M_h_rows.append(-p @ A_pows[j] + (self.gamma ** j) * p)
+                    tighten = tighten_pref[tuple(p)][j - 1]
+                    v_h_rows.append(-p @ C_list[j] - b - tighten + (self.gamma ** j) * b)
+                    row_ptrs[j - 1].append(len(G_rows) - 1)
 
-        G_all = sp.vstack(G_rows, format="csc") if G_rows else sp.csc_matrix((0, H_max * self.u_dim))
-        M_h = np.vstack(M_h_rows) if M_h_rows else np.zeros((0, self.s_dim))
-        v_h = np.array(v_h_rows)
+            G_all = sp.vstack(G_rows, format="csc") if G_rows else sp.csc_matrix((0, H_max * self.u_dim))
+            M_h = np.vstack(M_h_rows) if M_h_rows else np.zeros((0, self.s_dim))
+            v_h = np.array(v_h_rows)
 
-        # --- 5. Setup the OSQP solver once ---
-        P_blocks = [sp.eye(self.u_dim, format="csc")] + [1e-4 * sp.eye(self.u_dim, format="csc")] * (H_max - 1)
-        Pmat = sp.block_diag(P_blocks, format="csc")
-        lb_actions = np.tile(self.action_space.low, H_max)
-        ub_actions = np.tile(self.action_space.high, H_max)
-        A_qp = sp.vstack([G_all, sp.eye(H_max * self.u_dim, format="csc")], format="csc")
-        
-        self.solver = osqp.OSQP()
-        self.solver.setup(P=Pmat, q=np.zeros(H_max * self.u_dim), A=A_qp, 
+            # 5. Setup a dedicated OSQP solver for this polyhedron
+            P_blocks = [sp.eye(self.u_dim, format="csc")] + [1e-4 * sp.eye(self.u_dim, format="csc")] * (H_max - 1)
+            Pmat = sp.block_diag(P_blocks, format="csc")
+            lb_actions = np.tile(self.action_space.low, H_max)
+            ub_actions = np.tile(self.action_space.high, H_max)
+            A_qp = sp.vstack([G_all, sp.eye(H_max * self.u_dim, format="csc")], format="csc")
+            
+            solver = osqp.OSQP()
+            solver.setup(P=Pmat, q=np.zeros(H_max * self.u_dim), A=A_qp, 
                           l=np.hstack([-np.inf * np.ones(G_all.shape[0]), lb_actions]), 
                           u=np.hstack([np.zeros(G_all.shape[0]), ub_actions]), 
                           verbose=False, polish=False)
+            
+            self.solvers.append(solver)
+            self.precomputed_per_poly.append({
+                "M_h": M_h, "v_h": v_h, "row_ptrs": row_ptrs, 
+                "H_trap_all": H_trap_all, "ub_actions": ub_actions
+            })
 
-        self.precomputed = {
-            "M_h": M_h, "v_h": v_h, "row_ptrs": row_ptrs, 
-            "H_trap_all": H_trap_all, "ub_actions": ub_actions
-        }
         self.is_model_updated = True
+        print(f"[RAMPS] Model updated. Pre-computed constraints for {len(self.safe_polys)} polyhedra.")
 
     def solve(
         self,
@@ -502,22 +497,49 @@ class CBFPolicy:
         debug: bool = False,
     ) -> Tuple[np.ndarray, bool]:
         """
-        Solves for a safe action using the pre-computed model. This method is
-        lightweight and designed for real-time execution.
+        Solves for a safe action by first selecting the most appropriate safe
+        polyhedron and then using its dedicated pre-computed solver.
         """
         if not self.is_model_updated:
-            # Lazy update: if the model has never been set, initialize it from the env.
-            # This is a convenience for the first call.
-            print("Model not initialized. Performing first-time update from environment.")
+            print("Model not initialized. Performing first-time update.")
             self.update_model()
 
-        # --- 1. State-Dependent Calculations ---
         z = self.transform(state.reshape(1, -1)).reshape(-1,)
         a_pi = np.zeros(self.u_dim, dtype=float) if action is None else np.asarray(action, float)
-        h_all = self.precomputed['M_h'] @ z + self.precomputed['v_h']
 
-        # --- 2. Binary Search for the Largest Feasible Horizon ---
-        data = self.precomputed
+        # --- 1. Choose the Active Polyhedron based on current state z ---
+        inside_candidates, violated = [], []
+        for idx, poly in enumerate(self.safe_polys):
+            P, b = poly[:, :-1].astype(float), poly[:, -1].astype(float)
+            g = P @ z + b
+            worst = float(np.max(g))
+            if worst <= 1e-9: # Use a small tolerance
+                inside_candidates.append((idx, worst))
+            else:
+                violated.append((idx, worst))
+
+        if inside_candidates:
+            # Pick the poly we are IN with the largest interior slack
+            chosen_idx = min(inside_candidates, key=lambda t: t[1])[0]
+            mode = "inside"
+        elif violated:
+            # Fallback: pick the most violated poly
+            chosen_idx = min(violated, key=lambda t: t[1])[0]
+        else:
+            # Should not happen if safe_polys is not empty
+            print("[RAMPS] WARN: No safe polyhedra found for the current state.")
+            return self.backup(state)
+
+        if debug: print(f"[RAMPS] selection mode={mode}, chosen poly idx={chosen_idx}")
+        
+        # --- 2. Select the correct pre-computed solver and data ---
+        solver = self.solvers[chosen_idx]
+        data = self.precomputed_per_poly[chosen_idx]
+
+        # --- 3. State-Dependent Calculations ---
+        h_all = data['M_h'] @ z + data['v_h']
+
+        # --- 4. Binary Search for the Largest Feasible Horizon ---
         lo, hi = data['H_trap_all'], self.horizon
         bestH, best_u0, best_dev = 0, None, None
         q_new = np.hstack([-a_pi, np.zeros((self.horizon - 1) * self.u_dim)])
@@ -531,8 +553,8 @@ class CBFPolicy:
             u_new = u_base.copy()
             u_new[:len(mask)] = mask
             
-            self.solver.update(q=q_new, u=u_new)
-            res = self.solver.solve()
+            solver.update(q=q_new, u=u_new)
+            res = solver.solve()
 
             if res.info.status == "solved":
                 bestH, best_u0, best_dev = mid, res.x[:self.u_dim], float(np.linalg.norm(res.x[:self.u_dim] - a_pi))
@@ -540,7 +562,7 @@ class CBFPolicy:
             else:
                 hi = mid - 1
 
-        # --- 3. Return Result or Fallback ---
+        # --- 5. Return Result or Fallback ---
         if bestH > 0:
             shielded = best_dev > 1e-8
             if debug: print(f"[RAMPS] Solved. Largest feasible H={bestH}, ||u0-a_pi||={best_dev:.3e}")

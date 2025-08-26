@@ -122,16 +122,15 @@ while True:
         
         if env.unsafe(next_state, False):
 
-            real_unsafe_episodes += 1
-            episode_reward -= 100
+            real_unsafe_episodes += (1 * (not unsafe_flag))
+            episode_reward -= (100 * (not unsafe_flag))
             reward -= 100
             print("UNSAFE (outside testing)", shielded)
             print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
             done = done or (True if safe_agent is not None else False)
             cost = 1
-            episode_cost
 
-            unsafe_flag = True or unsafe_flag
+            unsafe_flag = True
         # Ignore the "done" signal if it comes from hitting the time
         # horizon.
         # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
@@ -157,17 +156,6 @@ while True:
 
 
         state = next_state
-        
-        # if safe_agent is not None:
-            
-        #     start_gamma = 0.1
-        #     end_gamma = 0.9
-        #     total_training_steps = 1_000_000
-
-        #     # Inside your training loop
-        #     progress = min(total_numsteps / total_training_steps, 1.0)
-        #     safe_agent.shield.cbf_gamma = start_gamma + progress * (end_gamma - start_gamma)
-
         
     print("Sequence", "".join(flags))
     if safe_agent is not None:
@@ -217,25 +205,29 @@ while True:
         
         safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
 
-        safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
-        safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
+        if args.red_dim != 0:
+            safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
+            safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
+        else:
+            safety.lower = (safety.lower - mean)/(std + 1e-8)
+            safety.upper = (safety.upper - mean)/(std + 1e-8)
 
-        new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
-        
-        new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
-        new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
-        # print("New observation space", new_obs_space)
-        # print("Safety domain", safety)
+        if args.red_dim != 0:
+            new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
+            
+            new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
+            new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
+            
+        else:
+            new_obs_space = gym.spaces.Box(low=np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), high=np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), shape=(env.observation_space.shape[0],))
+            new_obs_space.low = (new_obs_space.low - mean)/(std + 1e-8)
+            new_obs_space.high = (new_obs_space.high - mean)/(std + 1e-8)
         
         polys = safety.to_hyperplanes(new_obs_space)
         print(polys)
         unsafe_domains = safety.invert_polytope(new_obs_space)
         env.transformed_safe_polys = polys
-        # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
-        
-        # print("LATENT SAFETY", safety, len(polys[0]))
-        # print("LATENT UNSAFETY",  len(env.transformed_polys))
         shield = CBFPolicy(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
@@ -249,6 +241,9 @@ while True:
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
+    
+    writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
+    writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
     if safe_agent is not None:
         safe_agent.reset_count()
 
@@ -332,10 +327,6 @@ while True:
             writer.add_scalar(f'agent/shield', shield_count, total_numsteps)
             writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
             writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_numsteps)
             writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_numsteps)
             writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_numsteps)
             writer.add_scalar(f'reward/test', avg_reward, total_numsteps)
