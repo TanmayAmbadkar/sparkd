@@ -5,12 +5,12 @@ import numpy as np
 import torch
 import os
 from torch.utils.tensorboard import SummaryWriter
-from src.policy import CPOPolicy, PCRPOPolicy, CUPPolicy, P3OPolicy
+from src.policy import CPOPolicy, PCRPOPolicy, CUPPolicy, P3OPolicy, PPOPolicy
 from src.cost_function import CostFunction
 from koopman.env_model import get_environment_model
 from abstract_interpretation import domains
 from benchmarks import envs
-from pytorch_soft_actor_critic.replay_memory import ReplayMemory
+from src.replay_memory import ReplayMemory
 import gymnasium as gym 
 import matplotlib.pyplot as plt
 
@@ -19,7 +19,7 @@ import traceback
 parser = argparse.ArgumentParser(description='Safe CPO/PCRPO/CUP Args')
 
 # --- ENV/GENERAL ---
-parser.add_argument('--env_name', default="lunar_lander")
+parser.add_argument('--env_name', default="hopper")
 parser.add_argument('--seed', type=int, default=123456)
 parser.add_argument('--cuda', action="store_true", default=False, help="Use CUDA if available")
 parser.add_argument('--save_dir', type=str, default='runs_analysis', help="Directory to save logs/models")
@@ -32,24 +32,25 @@ parser.add_argument('--start_steps', type=int, default=10000)
 parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--mini_batch_size', type=int, default=64)
 parser.add_argument('--replay_size', type=int, default=200000)
-parser.add_argument('--horizon', type=int, default=20)
+parser.add_argument('--horizon', type=int, default=5)
 
 # --- POLICY/CRITIC NETWORK ---
-parser.add_argument('--hidden_size', type=int, default=256)
+parser.add_argument('--hidden_size', type=int, default=64)
 parser.add_argument('--red_dim', type=int, default=20)
 parser.add_argument('--log_std_min', type=float, default=-20)
-parser.add_argument('--log_std_max', type=float, default=2)
+parser.add_argument('--log_std_max', type=float, default=1)
 
 # --- OPTIMIZATION/LOSS ---
-parser.add_argument('--lr', type=float, default=0.00001)
+parser.add_argument('--actor_lr', type=float, default=3e-4)
+parser.add_argument('--critic_lr', type=float, default=3e-4)
 parser.add_argument('--max_grad_norm', type=float, default=0.5, help="Gradient clipping max norm")
 parser.add_argument('--value_coeff', type=float, default=0.5, help="Coefficient for value loss")
-parser.add_argument('--entropy_coeff', type=float, default=0.01, help="Coefficient for entropy loss")
+parser.add_argument('--entropy_coeff', type=float, default=0.00, help="Coefficient for entropy loss")
 
 # --- ADVANTAGE/GAE ---
-parser.add_argument('--gamma', type=float, default=0.9)
-parser.add_argument('--cost_gamma', type=float, default=0.9, help="Discount factor for costs")
-parser.add_argument('--lam', type=float, default=0.95, help="GAE lambda")
+parser.add_argument('--gamma', type=float, default=0.95)
+parser.add_argument('--cost_gamma', type=float, default=0.95, help="Discount factor for costs")
+parser.add_argument('--lam', type=float, default=0.995, help="GAE lambda")
 parser.add_argument('--gae_bias_correction', action='store_true', help="Enable bias-corrected GAE (CUP)")
 
 # --- PPO-STYLE / CONSTRAINTS ---
@@ -57,21 +58,19 @@ parser.add_argument('--eps_clip', type=float, default=0.2, help="Clipping parame
 
 # --- CONSTRAINTS (Multi-constraint support) ---
 parser.add_argument('--num_costs', type=int, default=1, help="Number of cost constraints")
-parser.add_argument('--cost_limit', type=float, default=0.1, help="Cost constraint (max cost per episode)")
+parser.add_argument('--cost_limit', type=float, default=0, help="Cost constraint (max cost per episode)")
 parser.add_argument('--lagrange_init', type=float, default=1.0,
                     help="Initial values for Lagrange multipliers (list or single value)")
 parser.add_argument('--lagrange_lr', type=float, default=0.01, help="Learning rate for Lagrange multiplier update")
 parser.add_argument('--no_safety', default=False, action='store_true')
+parser.add_argument('--debug', default=False, action='store_true')
 
 # --- PCRPO-specific ---
 parser.add_argument('--switching_temp', type=float, default=1.0, help="Switching temperature for PCRPO gradient blending")
-parser.add_argument('--slack_coef', type=float, default=1.0, help="Slack coefficient (PCRPO, if using slacks)")
+parser.add_argument('--slack_coef', type=float, default=0, help="Slack coefficient (PCRPO, if using slacks)")
 
 # --- CUP-specific ---
 parser.add_argument('--cup_trust_region', type=float, default=0.1, help="Trust region size (KL bound) for CUP")
-parser.add_argument('--cup_bias_corrected_gae', action='store_true', default=True, help="Enable bias-corrected GAE in CUP")
-parser.add_argument('--cup_lagrangian', action='store_true', default=True, help="Enable primal-dual Lagrange (CUP), else use penalty")
-parser.add_argument('--cup_penalty', action='store_true', default=True, help="Enable penalty method for CUP constraint (not primal-dual)")
 
 # --- P3O-specific arguments ---
 
@@ -94,7 +93,7 @@ parser.add_argument('--log_std_eval', type=float, default=None, help="Set a fixe
 # parser.add_argument('--legacy_flag', action='store_true')
 
 
-parser.add_argument('--policy', type=str, default="cpo", help="Policy class to choose from: cpo or pcrpo or cup")
+parser.add_argument('--policy', type=str, default="cup", help="Policy class to choose from: cpo or pcrpo or cup")
 args = parser.parse_args()
 
 # Setup environment
@@ -106,15 +105,15 @@ np.random.seed(args.seed)
 hyperparams = vars(args)
 
 # Tensorboard
-if not os.path.exists("runs_analysis"):
-    os.makedirs("runs_analysis")
-writer = SummaryWriter('runs_analysis/{}_{}_{}_{}H{}_D{}'.format(
+if not os.path.exists("runs"):
+    os.makedirs("runs")
+writer = SummaryWriter('runs/{}_{}_{}_{}H{}_D{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name, args.policy, 
     ("safecost" if not args.no_safety else "nocost"),
     args.horizon, args.red_dim))
 
 print(hyperparams)
-file = open('runs_analysis/{}_{}_{}_{}H{}_D{}/log.txt'.format(
+file = open('runs/{}_{}_{}_{}H{}_D{}/log.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name, args.policy,
     ("safecost" if not args.no_safety else "nocost"),
     args.horizon, args.red_dim), "w+")
@@ -137,6 +136,8 @@ elif args.policy == "pcrpo":
     agent = PCRPOPolicy(env, args.batch_size, args.seed, args.batch_size, args)
 elif args.policy == "p3o":
     agent = P3OPolicy(env, args.batch_size, args.seed, args.batch_size, args)
+elif args.policy == "ppo":
+    agent = PPOPolicy(env, args.batch_size, args.seed, args.batch_size, args)
 cost_function = None
 
 # Training loop
@@ -187,7 +188,7 @@ while True:
 
                 real_unsafe_episodes += 1 * (not unsafe_flag)
                 episode_reward -= 100 * (not unsafe_flag)
-                reward = -100
+                reward -=100
                 print("UNSAFE (outside testing)")
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = done or (True if cost_function is not None else False) or args.no_safety
@@ -203,7 +204,7 @@ while True:
             if len(agent.memory) >= args.batch_size:
                 losses = agent.train()
                 for key, value in losses.items():
-                    writer.add_scalar(f'loss/{key[4:]}', value, total_numsteps)
+                    writer.add_scalar(f'loss/{key}', value, total_numsteps)
 
             state = next_state
         total_real_episodes += 1 
@@ -231,7 +232,7 @@ while True:
             epochs = 50
         else:
             koopman_model = None
-            epochs = 200
+            epochs = 100
 
         
         env_model, ev_score, r2_score, mean, std = get_environment_model(
@@ -254,21 +255,26 @@ while True:
         
         safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
 
-        safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
-        safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
+        if args.red_dim != 0:
+            safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
+            safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
+        else:
+            safety.lower = (safety.lower - mean)/(std + 1e-8)
+            safety.upper = (safety.upper - mean)/(std + 1e-8)
 
-        new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
-        
-        new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
-        new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
-        print("New observation space", new_obs_space)
-        print("Safety domain", safety)
+        if args.red_dim != 0:
+            new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
+            new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
+            new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)            
+        else:
+            new_obs_space = gym.spaces.Box(low=np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), high=np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), shape=(env.observation_space.shape[0],))
+            new_obs_space.low = (new_obs_space.low - mean)/(std + 1e-8)
+            new_obs_space.high = (new_obs_space.high - mean)/(std + 1e-8)
         
         polys = safety.to_hyperplanes(new_obs_space)
         print(polys)
         unsafe_domains = safety.invert_polytope(new_obs_space)
         env.transformed_safe_polys = polys
-        # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
         
         print("LATENT SAFETY", safety, len(polys[0]))

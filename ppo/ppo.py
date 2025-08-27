@@ -15,7 +15,7 @@ class PPO:
         self.entropy_coeff = 0.01
         self.device = torch.device("cuda" if args.cuda else "cpu")
         self.actor_critic = ActorCritic(obs_dim, action_space, args.hidden_size).to(self.device)
-        self.optimizer = Adam(self.actor_critic.parameters(), lr=args.lr)
+        self.optimizer = Adam(self.actor_critic.parameters(), lr=args.actor_lr)
         self.action_space = action_space
 
     def select_action(self, state):
@@ -157,13 +157,13 @@ class PPO:
         avg_explained_var = total_explained_var / num_updates
 
         return {
-            "avg_policy_loss": avg_policy_loss,
-            "avg_value_loss": avg_value_loss,
-            "avg_entropy_loss": avg_entropy_loss,
-            "avg_total_loss": avg_total_loss,
-            "avg_clip_fraction": avg_clip_fraction,
-            "avg_kl_divergence": avg_kl_divergence,
-            "avg_explained_variance": avg_explained_var,
+            "policy_loss": avg_policy_loss,
+            "value_loss": avg_value_loss,
+            "entropy_loss": avg_entropy_loss,
+            "total_loss": avg_total_loss,
+            "clip_fraction": avg_clip_fraction,
+            "kl_divergence": avg_kl_divergence,
+            "explained_variance": avg_explained_var,
         }
 
 

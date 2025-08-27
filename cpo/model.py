@@ -68,16 +68,17 @@ class CPOActorCritic(nn.Module):
         log_std = torch.clamp(self.actor_logstd, LOG_STD_MIN, LOG_STD_MAX)
         return mean, log_std
 
+    def get_distribution(self, state):
+        mean, log_std = self.get_policy(state)
+        std = log_std.exp()
+        dist = Normal(mean, std)
+        return dist
+    
     def act(self, state):
         mean, log_std = self.get_policy(state)
         std = log_std.exp()
         dist = Normal(mean, std)
         action = dist.sample()
-        action = torch.clamp(
-            action,
-            torch.tensor(self.action_space.low, device=action.device),
-            torch.tensor(self.action_space.high, device=action.device)
-        )
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         return action, log_prob
 

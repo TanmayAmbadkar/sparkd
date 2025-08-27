@@ -188,8 +188,7 @@ def get_environment_model(     # noqa: C901
     
     means = np.mean(input_states.reshape(-1, input_states.shape[-1]), axis=0)
     stds = np.std(input_states.reshape(-1, input_states.shape[-1]), axis=0)
-    print("Input states mean:", means.shape)
-    print("Input states std:", stds.shape)
+    
     stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
     
     # means = np.zeros_like(means)
@@ -198,7 +197,16 @@ def get_environment_model(     # noqa: C901
     print("Means:", means)
     print("Stds:", stds)
     
+    # means = np.zeros(domain.lower.shape[1])
+    # stds = np.ones(domain.lower.shape[1])
+    
+    # if koopman_model is not None:
+    #     means = koopman_model.mean + 0.001 * (means - koopman_model.mean)
+    #     stds = koopman_model.std + 0.001 * (means - koopman_model.mean)
+    
     domain.lower = (domain.lower - means) / stds
+    
+    
     domain.upper = (domain.upper - means) / stds
     input_states = (input_states - means) / stds
     output_states = (output_states - means) / stds
@@ -229,8 +237,6 @@ def get_environment_model(     # noqa: C901
     output_states_copy = parsed_mars_copy.koopman_model.transform(output_states[:, :, :input_states.shape[-1]])
     # output_states = output_states.reshape(-1, input_states.shape[-1])
 
-    print(np.min(Yh[:,0], axis = 0), np.max(Yh[:,0], axis = 0))
-    print(np.min(output_states[:,0], axis = 0), np.max(output_states[:,0], axis = 0))
     ev_score = None
     r2 = None
     ev_score_old = None
@@ -252,6 +258,15 @@ def get_environment_model(     # noqa: C901
         print(f"Old Explained Variance Score, horizon {i}:", ev_score_old)
         print(f"Old R2 Score, horizon {i}:", r2_old)
                 
+            # number of output dims
+
+    # 1) compute dimension‑wise maximum abs‑error over all samples & timesteps
+    #    (broadcast output_states across the middle axis of Yh)
+    #    Yh: (n_samples, n_steps, n_out)
+    #    output_states: (n_samples, n_out)
+            
+        # 1) Compute the absolute residuals for every (sample, step, feature)
+        
     if ev_score_old >= ev_score:
         Yh = Yh_copy
         output_states = output_states_copy
@@ -268,7 +283,6 @@ def get_environment_model(     # noqa: C901
     plt.close()
     # 2) Flatten over samples & time
     res_flat = res.reshape(-1, output_states.shape[-1])             # shape: (N*T, n_out))
-    print("Flattened res", res_flat.shape)
 
     # 3) Empirical max
 
@@ -277,19 +291,11 @@ def get_environment_model(     # noqa: C901
 
     q1 = np.percentile(res_flat, 25, axis=0)   # shape: (n_out,)
     q3 = np.percentile(res_flat, 75, axis=0)   # shape: (n_out,)
-    print("Q1", q1)
-    print("Q3", q3)
     iqr = q3 - q1
     lower_bound = q1 - 1.5 * iqr
     upper_bound = q3 + 1.5 * iqr
-    print("lower_bound", lower_bound)
     print("upper_bound", upper_bound)
-    print("Below LB", res_flat[res_flat < lower_bound].shape)
-    print("Above UB", res_flat[res_flat > upper_bound].shape)
     print(quantile)
-    print(upper_bound)
-    
-    print("Max error:", upper_bound)
 
     # 5) still store the full vector
     # parsed_mars.error = upper_bound
@@ -297,20 +303,27 @@ def get_environment_model(     # noqa: C901
     #  Get the maximum distance between a predction and a datapoint
     diff = np.amax(np.abs( Yh[:, 0] 
         - output_states[:, 0, :]))
-    
+
+    # Get a confidence interval based on the quantile of the chi-squared
+    # distribution
+    # from sklearn.linear_model import LinearRegression
+    # lr = LinearRegression().fit(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat)
+    # print("R² of residual vs (z,u):", lr.score(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat))
+       
     conf = np.sqrt(scipy.stats.chi2.ppf(
         0.9, output_states[:, 0, :].shape[1]))
     err = diff + conf
     print("Computed error:", err, "(", diff, conf, ")")
-    # err = err
+    error = err
     error = quantile
-    # error = np.minimum(np.minimum(upper_bound, quantile), err)
+    error = np.minimum(upper_bound, quantile)
+    
+    # error = np.max(res_flat, axis=0)
     
     
     parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
-    # parsed_mars.error =  error
-
-
+    # parsed_mars.error = err * np.ones(output_states[:, 0, :].shape[1] )
+    # parsed_mars.error = error
 
     print("Final Error", parsed_mars.error)
 

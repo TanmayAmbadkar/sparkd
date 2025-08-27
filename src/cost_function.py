@@ -5,11 +5,9 @@ import scipy
 import torch
 import time
 
-from koopman.env_model import MarsE2cModel
+from koopman.env_model import MarsE2cModel # Assuming this is your model definition
 import osqp
 import scipy.sparse as sp
-
-
 
 class CostFunction:
     def __init__(self,
@@ -19,7 +17,7 @@ class CostFunction:
                  action_space: gym.Space,
                  horizon: int,
                  unsafe_polys: List[np.ndarray],
-                 safe_polys: List[np.ndarray], 
+                 safe_polys: List[np.ndarray],
                  transform=lambda x: x,
                  mean: np.ndarray = None,
                  std: np.ndarray = None):
@@ -34,132 +32,149 @@ class CostFunction:
         self.mean = mean
         self.std = std
 
-    
-    def __call__(self, state: np.ndarray,
-          action: Optional[np.ndarray] = None,
-          debug: bool = False) -> Tuple[np.ndarray, bool]:
+        # Storage for pre-computed constraint matrices
+        self.precomputed_FGH = []
+        
+        # Perform the initial pre-computation
+        self.update_model_constraints()
+
+    def update_model_constraints(self):
+        """
+        Pre-computes the F, G, and h matrices for dynamics propagation.
+        This should be called whenever the underlying dynamics model (A, B, c) changes.
+        """
+        print("Updating model constraints (pre-computing F, G, h)...")
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
-        
-        state = (state - self.mean) / self.std
-        state = self.transform(state.reshape(1, -1)).reshape(-1,)
-        if action is None:
-            action = np.zeros(u_dim)
 
-        # get linearization at (state, action)
-        mat_dyn, eps = self.env.get_matrix_at_point(np.concatenate((state, action)), s_dim)
+        # Get the global, state-independent model matrices
+        mat_dyn, eps = self.env.get_matrix_at_point(np.zeros(s_dim + u_dim), s_dim)
         A = mat_dyn[:, :s_dim]
         B = mat_dyn[:, s_dim:-1]
         c = mat_dyn[:, -1]
 
-        best_score = 0
-
-        lambda_slack = 1e-4  # slack penalty (tune as needed)
-        
+        self.precomputed_FGH.clear()
 
         for poly in self.safe_polys:
             P_poly = poly[:, :-1]
             b_poly = poly[:, -1]
-            if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
-                print("State is not in the safe polytope, skipping...")
-                continue
 
-            # === Build safety constraints over the horizon ===
-            F = []
-            G = []
-            h = []
+            # === Build and store F, G, h matrices over the horizon ===
+            F, G, h = [], [], []
             for j in range(1, self.horizon + 1):
                 F.append([None] * (j + 1))
                 G.append([None] * (j + 1))
                 h.append([None] * (j + 1))
-                F[j-1][j] = P_poly
-                G[j-1][j] = np.zeros((b_poly.shape[0], u_dim))
-                h[j-1][j] = b_poly
+                F[j - 1][j] = P_poly
+                G[j - 1][j] = np.zeros((b_poly.shape[0], u_dim))
+                h[j - 1][j] = b_poly
                 for t in range(j - 1, -1, -1):
-                    F[j-1][t] = np.dot(F[j-1][t+1], A)
-                    G[j-1][t] = np.dot(F[j-1][t+1], B)
-                    epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
-                    h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1] + epsmax
+                    F[j - 1][t] = np.dot(F[j - 1][t + 1], A)
+                    G[j - 1][t] = np.dot(F[j - 1][t + 1], B)
+                    epsmax = np.dot(np.abs(F[j - 1][t + 1]), eps)
+                    h[j - 1][t] = np.dot(F[j - 1][t + 1], c) + h[j - 1][t + 1] + epsmax
+            
+            self.precomputed_FGH.append({
+                'P_poly': P_poly,
+                'b_poly': b_poly,
+                'F': F,
+                'G': G,
+                'h': h
+            })
+        print("Finished updating model constraints.")
 
-            n_con = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim  # total constraints
-            total_vars = self.horizon * u_dim  # action variables
+    def __call__(self, state: np.ndarray,
+                 action: Optional[np.ndarray] = None,
+                 debug: bool = False) -> float:
+        s_dim = self.state_space.shape[0]
+        u_dim = self.action_space.shape[0]
 
-            # === Assemble constraint matrices ===
+        # Normalize state
+        processed_state = (state - self.mean) / self.std
+        processed_state = self.transform(processed_state.reshape(1, -1)).reshape(-1,)
+        if action is None:
+            action = np.zeros(u_dim)
+
+        best_score = 0.0
+        lambda_slack = 1e-4
+
+        # Loop through the pre-computed F, G, h for each safe polytope
+        for precomp in self.precomputed_FGH:
+            P_poly = precomp['P_poly']
+            b_poly = precomp['b_poly']
+            F, G, h = precomp['F'], precomp['G'], precomp['h']
+
+            # Check if the current state is inside the polytope
+            if not np.all(np.dot(P_poly, processed_state) + b_poly <= 0.0):
+                if debug:
+                    print("State is not in the safe polytope, skipping...")
+                continue
+
+            # === Assemble full constraint matrices M and bias on the fly ===
+            n_safety_con = self.horizon * P_poly.shape[0]
+            n_action_con = 2 * self.horizon * u_dim
+            n_con = n_safety_con + n_action_con
+            total_vars = self.horizon * u_dim
+
             M = np.zeros((n_con, total_vars))
             bias = np.zeros(n_con)
+            
+            # Assemble safety constraints
             ind = 0
             step = P_poly.shape[0]
             for j in range(self.horizon):
-                G[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
-                M[ind:ind+step, :] = np.concatenate(G[j][:-1], axis=1)
-                bias[ind:ind+step] = h[j][0] + np.dot(F[j][0], state)
+                G_j_padded = G[j][:-1] + [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j -1)
+                M[ind:ind + step, :] = np.concatenate(G_j_padded, axis=1)
+                bias[ind:ind + step] = h[j][0] + np.dot(F[j][0], processed_state)
                 ind += step
-
-            # Add action bound constraints.
+            
+            # Assemble action bound constraints
             ind2 = 0
             for j in range(self.horizon):
-                M[ind:ind+u_dim, ind2:ind2+u_dim] = np.eye(u_dim)
-                bias[ind:ind+u_dim] = -self.action_space.high
+                M[ind:ind + u_dim, ind2:ind2 + u_dim] = np.eye(u_dim)
+                bias[ind:ind + u_dim] = -self.action_space.high
                 ind += u_dim
-                M[ind:ind+u_dim, ind2:ind2+u_dim] = -np.eye(u_dim)
-                bias[ind:ind+u_dim] = self.action_space.low
+                M[ind:ind + u_dim, ind2:ind2 + u_dim] = -np.eye(u_dim)
+                bias[ind:ind + u_dim] = self.action_space.low
                 ind += u_dim
                 ind2 += u_dim
 
             # ----------- SLACK QP LOGIC BELOW --------------------
-            # Add slack variable s >= 0 for each constraint
             slack_size = n_con
-
-            # ========== FIXED QP (u1,...u_{H-1}, s) ==========
-            fixed_total = (self.horizon - 1) * u_dim
             M_first = M[:, :u_dim]
-            M_rest  = M[:, u_dim:]
+            M_rest = M[:, u_dim:]
             new_bias = bias + M_first @ action
 
-            # QP variables: [u_rest; slack]
-            n_fixed = fixed_total
+            n_fixed = (self.horizon - 1) * u_dim
             n_var_fixed = n_fixed + slack_size
-
-            # Objective: tiny penalty on action, larger penalty on slack
-            P_fixed = np.eye(n_var_fixed) * 1e-6
+            
+            P_fixed = sp.eye(n_var_fixed) * 1e-6
             q_fixed = np.zeros(n_var_fixed)
             q_fixed[n_fixed:] = lambda_slack
 
-            # Constraints: G_fixed @ u_rest - s <= h_fixed, s >= 0
-            # [M_rest | -I] @ [u_rest; slack] <= h_fixed
             G_fixed_qp = sp.hstack([sp.csc_matrix(M_rest), -sp.eye(slack_size)], format='csc')
             l_fixed = -np.inf * np.ones(slack_size)
             u_fixed = -new_bias
 
-            # Slack bounds: s >= 0
             G_slack_identity = sp.hstack([sp.csc_matrix((slack_size, n_fixed)), sp.eye(slack_size)], format='csc')
             l_slack = np.zeros(slack_size)
             u_slack = np.inf * np.ones(slack_size)
 
-            # Stack all constraints
             A_fixed_total = sp.vstack([G_fixed_qp, G_slack_identity], format='csc')
             l_fixed_total = np.hstack([l_fixed, l_slack])
             u_fixed_total = np.hstack([u_fixed, u_slack])
 
             fixed_solver = osqp.OSQP()
-            fixed_solver.setup(P=sp.csc_matrix(P_fixed),
-                            q=q_fixed,
-                            A=A_fixed_total,
-                            l=l_fixed_total,
-                            u=u_fixed_total,
-                            warm_start=False,
-                            verbose=False)
+            fixed_solver.setup(P=sp.csc_matrix(P_fixed), q=q_fixed, A=A_fixed_total, l=l_fixed_total, u=u_fixed_total, warm_start=False, verbose=False)
             res_fixed = fixed_solver.solve()
-            slacks = res_fixed.x[-slack_size:]
             
-            if sum(slacks) >= best_score:
-                
-                # No slack needed, so we can use the action directly
-                best_score = sum(slacks) if sum(slacks) > 0 else 0.0
+            if res_fixed.info.status_val != 1: # Check for solver failure
+                continue
 
+            slacks = res_fixed.x[-slack_size:]
+            current_score = np.sum(slacks)
 
-        if best_score == np.inf:
-            best_score = 0.0
+            if current_score >= best_score:
+                best_score = current_score if current_score > 0 else 0.0
         
-        return best_score
-
+        return best_score if best_score != np.inf else 0.0

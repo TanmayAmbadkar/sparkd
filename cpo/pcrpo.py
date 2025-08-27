@@ -1,213 +1,268 @@
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
-from cpo.model import CPOActorCritic   # Import your own actor-critic with cost_critic
+from cpo.model import CPOActorCritic # Assuming this is your model definition
 import numpy as np
-from sklearn.metrics import explained_variance_score
+from cpo.utils import RunningMeanStd
+from torch.utils.data import DataLoader, TensorDataset
+from torch.nn.utils import clip_grad_norm_
 
 class PCRPO:
     def __init__(self, obs_dim, action_space, args):
         self.gamma = getattr(args, "gamma", 0.99)
         self.cost_gamma = getattr(args, "cost_gamma", 0.99)
         self.lam = getattr(args, "lam", 0.95)
-        self.eps_clip = getattr(args, "eps_clip", 0.2)
-        self.value_coeff = getattr(args, "value_coeff", 0.5)
         self.entropy_coeff = getattr(args, "entropy_coeff", 0.01)
-        self.device = torch.device("cuda" if getattr(args, "cuda", False) else "cpu")
+        self.device = torch.device("cuda" if getattr(args, "cuda", True) else "cpu")
+        self.max_grad_norm = getattr(args, "max_grad_norm", 0.5)
+        self.debug = getattr(args, "debug", False)
+        print(f"Using device: {self.device}")
 
-        self.switching_temp = getattr(args, "switching_temp", 1.0)  # PCRPO hyperparam
-        self.cost_limit = getattr(args, "cost_limit", 10.0)
-        # self.slack_coef = getattr(args, "slack_coef", 1.0)  # Optional
+        # --- PCRPO-specific parameters from paper ---
+        self.batch_size = getattr(args, "mini_batch_size", 128)
+        self.cost_limit = float(getattr(args, "cost_limit", 10.0))
+        
+        # Slack bounds from Algorithm 1
+        self.h_plus = getattr(args, "h_plus", 5.0)
+        self.h_minus = getattr(args, "h_minus", -5.0)
 
+        # Actor-critic networks and optimizers
         self.actor_critic = CPOActorCritic(obs_dim, action_space, args.hidden_size).to(self.device)
         self.actor_params = list(self.actor_critic.actor.parameters()) + [self.actor_critic.actor_logstd]
         self.critic_params = list(self.actor_critic.critic.parameters())
         self.cost_critic_params = list(self.actor_critic.cost_critic.parameters())
-        self.actor_optimizer = torch.optim.Adam(self.actor_params, lr=args.lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic_params, lr=args.lr)
-        self.cost_critic_optimizer = torch.optim.Adam(self.cost_critic_params, lr=args.lr)
-
-
-    def select_action(self, state):
-        state = torch.Tensor(state).to(self.device).unsqueeze(0)
-        action, log_prob = self.actor_critic.act(state)
-        return action.cpu().detach().numpy()[0], log_prob.cpu().detach().numpy()[0]
+        self.actor_optimizer = Adam(self.actor_params, lr=args.actor_lr)
+        self.critic_optimizer = Adam(self.critic_params, lr=args.critic_lr)
+        self.cost_critic_optimizer = Adam(self.cost_critic_params, lr=args.critic_lr)
+        
+        # State normalization
+        self.state_rms = RunningMeanStd(shape=obs_dim)
 
     @torch.no_grad()
-    def log_prob_advantage_estimation(self, memory):
-        states = memory.states[:memory.size]
-        rewards = memory.rewards[:memory.size]
-        costs = memory.costs[:memory.size]
-        dones = memory.dones[:memory.size]
-        next_states = memory.next_states[:memory.size]
-        actions = memory.actions[:memory.size]
+    def select_action(self, state):
+        """Selects an action given a state, using the running mean-std for normalization."""
+        state_normalized = np.clip((state - self.state_rms.mean) / (self.state_rms.var**0.5 + 1e-8), -10, 10)
+        state_tensor = torch.from_numpy(state_normalized).float().to(self.device).unsqueeze(0)
+        action, log_prob = self.actor_critic.act(state_tensor)
+        return action.cpu().numpy()[0], log_prob.cpu().numpy()[0]
 
-        state_tensor = torch.Tensor(states).to(self.device)
-        next_state_tensor = torch.Tensor(next_states).to(self.device)
-        actions = torch.Tensor(actions).to(self.device)
-        with torch.no_grad():
-            values = self.actor_critic.get_value(state_tensor).squeeze().detach()
-            next_values = self.actor_critic.get_value(next_state_tensor).squeeze().detach()
-            cost_values = self.actor_critic.get_cost_value(state_tensor).squeeze().detach()
-            next_cost_values = self.actor_critic.get_cost_value(next_state_tensor).squeeze().detach()
+    @torch.no_grad()
+    def process_data(self, memory):
+        """Processes rollout data to compute advantages and returns for both reward and cost."""
+        raw_states = np.array(memory.states[:memory.size])
+        raw_rewards = np.array(memory.rewards[:memory.size])
+        raw_costs = np.array(memory.costs[:memory.size])
+        raw_next_states = np.array(memory.next_states[:memory.size])
 
-        N = len(rewards)
-        returns = torch.zeros(N)
-        advantages = torch.zeros(N)
-        cost_returns = torch.zeros(N)
-        cost_advantages = torch.zeros(N)
-        gae = 0.0
-        cost_gae = 0.0
+        # Update and apply state normalization
+        self.state_rms.update(raw_states)
+        states = np.clip((raw_states - self.state_rms.mean) / (self.state_rms.var**0.5 + 1e-8), -10, 10)
+        next_states = np.clip((raw_next_states - self.state_rms.mean) / (self.state_rms.var**0.5 + 1e-8), -10, 10)
+        
+        # Convert to tensors
+        states_t = torch.from_numpy(states).float().to(self.device)
+        rewards_t = torch.from_numpy(raw_rewards).float().to(self.device)
+        costs_t = torch.from_numpy(raw_costs).float().to(self.device)
+        dones_t = torch.from_numpy(np.array(memory.dones[:memory.size])).float().to(self.device)
+        next_states_t = torch.from_numpy(next_states).float().to(self.device)
+        actions_t = torch.from_numpy(np.array(memory.actions[:memory.size])).float().to(self.device)
+
+        # Get value estimates
+        values = self.actor_critic.get_value(states_t).squeeze()
+        next_values = self.actor_critic.get_value(next_states_t).squeeze()
+        cost_values = self.actor_critic.get_cost_value(states_t).squeeze()
+        next_cost_values = self.actor_critic.get_cost_value(next_states_t).squeeze()
+
+        # Compute GAE
+        N = len(rewards_t)
+        returns, advantages = torch.zeros(N, device=self.device), torch.zeros(N, device=self.device)
+        cost_returns, cost_advantages = torch.zeros(N, device=self.device), torch.zeros(N, device=self.device)
+        gae, cost_gae = 0.0, 0.0
 
         for t in reversed(range(N)):
-            mask = 1 - dones[t]
-            delta = rewards[t] + self.gamma * next_values[t] * mask - values[t]
+            mask = 1.0 - dones_t[t]
+            
+            delta = rewards_t[t] + self.gamma * next_values[t] * mask - values[t]
             gae = delta + self.gamma * self.lam * mask * gae
             advantages[t] = gae
             returns[t] = gae + values[t]
-
-            cost_delta = costs[t] + self.cost_gamma * next_cost_values[t] * mask - cost_values[t]
-            cost_gae = cost_delta + self.cost_gamma * self.lam * mask * cost_gae
+            
+            cost_delta = costs_t[t] + self.cost_gamma * next_cost_values[t] * mask - cost_values[t]
+            cost_gae = cost_delta + self.cost_gamma * self.lam * mask * cost_gae 
             cost_advantages[t] = cost_gae
             cost_returns[t] = cost_gae + cost_values[t]
 
-        return (state_tensor, actions, self.actor_critic.get_log_prob(state_tensor, actions),
-                returns, advantages, cost_returns, cost_advantages)
+        log_probs_old = self.actor_critic.get_log_prob(states_t, actions_t)
+        
+        return {
+            'states': states_t, 'actions': actions_t, 'log_probs_old': log_probs_old,
+            'returns': returns, 'advantages': advantages,
+            'cost_returns': cost_returns, 'cost_advantages': cost_advantages,
+            'values_old': values, 'cost_values_old': cost_values,
+            'raw_costs': raw_costs,
+        }
 
-    def compute_switching_coeff(self, grad_reward, grad_cost, temp=1.0):
-        # Cosine similarity between reward and cost gradients
-        cos_sim = F.cosine_similarity(grad_reward, grad_cost, dim=0, eps=1e-8)
-        # Soft switching coefficient (PCRPO)
-        coeff = torch.sigmoid(-cos_sim / temp)
-        return coeff
+    def _get_gradients(self, ratios, advantages_b, cost_advantages_b):
+        """Helper to compute reward and cost gradient vectors for a given batch."""
+        reward_surrogate = (ratios * advantages_b).mean()
+        cost_surrogate = (ratios * cost_advantages_b).mean()
 
-    def _get_grad_vector(self, params):
-        # Utility: return parameter gradients as a single flat vector
-        grads = []
-        for p in params:
+        # Get reward gradient (for ascent)
+        self.actor_optimizer.zero_grad()
+        (-reward_surrogate).backward(retain_graph=True)
+        g_r = torch.cat([p.grad.flatten() for p in self.actor_params if p.grad is not None])
+
+        # Get cost gradient (for descent)
+        self.actor_optimizer.zero_grad()
+        cost_surrogate.backward(retain_graph=True)
+        g_c_raw = torch.cat([p.grad.flatten() for p in self.actor_params if p.grad is not None])
+        g_c_descent = -g_c_raw
+
+        return g_r, g_c_descent, reward_surrogate, cost_surrogate
+
+    def _apply_gradient(self, final_grad):
+        """Helper to manually set parameter gradients and step the optimizer."""
+        offset = 0
+        for p in self.actor_params:
             if p.grad is not None:
-                grads.append(p.grad.view(-1))
-        if grads:
-            return torch.cat(grads)
+                p_shape = p.grad.shape
+                p_size = p.grad.numel()
+                p.grad.copy_(final_grad[offset : offset + p_size].view(p_shape))
+                offset += p_size
+        
+        clip_grad_norm_(self.actor_params, self.max_grad_norm)
+        self.actor_optimizer.step()
+
+
+    def update_parameters(self, memory, epochs):
+        """Main update function with slack-based framework and detailed logging."""
+        data = self.process_data(memory)
+        
+        # Normalize advantages
+        data['advantages'] = (data['advantages'] - data['advantages'].mean()) / (data['advantages'].std() + 1e-8)
+        data['cost_advantages'] = (data['cost_advantages'] - data['cost_advantages'].mean()) / (data['cost_advantages'].std() + 1e-8)
+
+        # Determine update strategy from Algorithm 1
+        avg_rollout_cost = np.mean(data['raw_costs'])
+        update_type = ""
+        if avg_rollout_cost > self.cost_limit + self.h_plus:
+            update_type = "cost_only"
+        elif avg_rollout_cost < self.cost_limit + self.h_minus:
+            update_type = "reward_only"
         else:
-            # In case none of the params had gradients
-            return torch.zeros(1, device=self.device)
+            update_type = "combined"
 
-    def update_parameters(self, memory, epochs, batch_size):
-        (states, actions, log_probs_old, returns, advantages, 
-        cost_returns, cost_advantages) = self.log_prob_advantage_estimation(memory)
+        # --- Initialize tracking lists ---
+        policy_losses, value_losses, cost_value_losses = [], [], []
+        reward_surrogates, cost_surrogates, cosine_similarities, entropies = [], [], [], []
+        
+        dataset = TensorDataset(data['states'], data['actions'], data['log_probs_old'], 
+                                data['advantages'], data['returns'], data['cost_returns'],
+                                data['cost_advantages'])
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        
+        for epoch in range(epochs):
+            for states_b, actions_b, log_probs_old_b, advantages_b, returns_b, cost_returns_b, cost_advantages_b in dataloader:
+                
+                log_probs, entropy, values, cost_values = self.actor_critic.evaluate(states_b, actions_b)
+                ratios = torch.exp(log_probs - log_probs_old_b)
+                
+                # --- Actor Update Logic ---
+                final_update_direction = None
+                policy_loss = torch.tensor(0.)
 
-        # Normalize advantages for stability
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+                if update_type == "combined":
+                    g_r, g_c_descent, rs, cs = self._get_gradients(ratios, advantages_b, cost_advantages_b)
+                    cos_sim = F.cosine_similarity(g_r, g_c_descent, dim=0, eps=1e-8)
+                    
+                    if cos_sim < 0: # Conflict case
+                        g_r_proj = (torch.dot(g_r, g_c_descent) / torch.dot(g_c_descent, g_c_descent)) * g_c_descent
+                        g_r_plus = g_r - g_r_proj
+                        g_c_descent_proj = (torch.dot(g_c_descent, g_r) / torch.dot(g_r, g_r)) * g_r
+                        g_c_descent_plus = g_c_descent - g_c_descent_proj
+                        final_update_direction = 0.5 * g_r_plus + 0.5 * g_c_descent_plus
+                    else: # Non-conflict case
+                        final_update_direction = 0.5 * g_r + 0.5 * g_c_descent
 
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_cost_value_loss = 0.0
-        total_entropy_loss = 0.0
-        total_loss = 0.0
-        total_clip_frac = 0.0
-        total_kl_div = 0.0
-        total_explained_var = 0.0
-        num_updates = 0
+                    final_grad = -final_update_direction
+                    self._apply_gradient(final_grad)
+                    
+                    reward_surrogates.append(rs.item())
+                    cost_surrogates.append(cs.item())
+                    cosine_similarities.append(cos_sim.item())
+                else:
+                    reward_surrogate = (ratios * advantages_b).mean()
+                    cost_surrogate = (ratios * cost_advantages_b).mean()
 
-        for _ in range(epochs):
-            for idx in range(0, len(states), batch_size):
-                batch_slice = slice(idx, idx + batch_size)
+                    if update_type == "reward_only":
+                        policy_loss = -reward_surrogate - self.entropy_coeff * entropy.mean()
+                    elif update_type == "cost_only":
+                        policy_loss = cost_surrogate - self.entropy_coeff * entropy.mean()
+                    
+                    self.actor_optimizer.zero_grad()
+                    policy_loss.backward()
+                    clip_grad_norm_(self.actor_params, self.max_grad_norm)
+                    self.actor_optimizer.step()
+                    
+                    reward_surrogates.append(reward_surrogate.item())
+                    cost_surrogates.append(cost_surrogate.item())
 
-                # Policy evaluation
-                log_probs, entropy, values, cost_values = self.actor_critic.evaluate(
-                    states[batch_slice], actions[batch_slice]
-                )
-                ratios = torch.exp(log_probs - log_probs_old[batch_slice])
+                # --- Debugging Printouts ---
+                if self.debug:
+                    print(f"\n--- Batch Debug Info (Update Type: {update_type}) ---")
+                    if final_update_direction is not None: # Combined case
+                        print(f"  Cosine Similarity: {cos_sim.item():.6f}")
+                        print(f"  Gradient Norms: Reward={torch.linalg.norm(g_r):.4f}, Cost-Descent={torch.linalg.norm(g_c_descent):.4f}, Final={torch.linalg.norm(final_update_direction):.4f}")
+                    else: # Reward/Cost only cases
+                        grad_norm = sum(p.grad.data.norm(2).item() ** 2 for p in self.actor_params if p.grad is not None) ** 0.5
+                        print(f"  Policy Loss: {policy_loss.item():.6f}")
+                        print(f"  Actor Grad Norm: {grad_norm:.4f}")
+                    print(f"  Surrogates: Reward={reward_surrogates[-1]:.6f}, Cost={cost_surrogates[-1]:.6f}")
 
-                norm_advantages = (advantages[batch_slice] - advantages[batch_slice].mean()) / (advantages[batch_slice].std() + 1e-8)
-                norm_cost_advantages = (cost_advantages[batch_slice] - cost_advantages[batch_slice].mean()) / (cost_advantages[batch_slice].std() + 1e-8)
-
-                reward_surrogate = -torch.mean(ratios * norm_advantages.reshape(-1, 1))
-                cost_surrogate = torch.mean(ratios * norm_cost_advantages.reshape(-1, 1))
-
-                # --- Compute reward/cost gradients w.r.t actor parameters only ---
-                grad_reward = torch.autograd.grad(
-                    reward_surrogate, self.actor_params, retain_graph=True, create_graph=False, allow_unused=True
-                )
-                grad_cost = torch.autograd.grad(
-                    cost_surrogate, self.actor_params, retain_graph=True, create_graph=False, allow_unused=True
-                )
-                grad_reward_vec = torch.cat([
-                    g.reshape(-1) if g is not None else torch.zeros_like(p).reshape(-1)
-                    for g, p in zip(grad_reward, self.actor_params)
-                ])
-                grad_cost_vec = torch.cat([
-                    g.reshape(-1) if g is not None else torch.zeros_like(p).reshape(-1)
-                    for g, p in zip(grad_cost, self.actor_params)
-                ])
-
-                coeff = self.compute_switching_coeff(grad_reward_vec, grad_cost_vec, temp=self.switching_temp)
-
-                # --- Do synthetic loss update for actor only ---
-                self.actor_optimizer.zero_grad()
-                synthetic_loss = reward_surrogate * (1 - coeff) + cost_surrogate * coeff
-                synthetic_loss.backward()
-                self.actor_optimizer.step()
-
-                # --- Value Critic update ---
+                # --- Critic Updates (identical for all cases) ---
+                value_loss = F.mse_loss(values.squeeze(), returns_b)
+                cost_value_loss = F.mse_loss(cost_values.squeeze(), cost_returns_b)
+                
                 self.critic_optimizer.zero_grad()
-                value_loss = F.mse_loss(values, returns[batch_slice].reshape(-1, 1))
                 value_loss.backward()
+                clip_grad_norm_(self.critic_params, self.max_grad_norm)
                 self.critic_optimizer.step()
-
-                # --- Cost Critic update ---
+                
                 self.cost_critic_optimizer.zero_grad()
-                cost_value_loss = F.mse_loss(cost_values, cost_returns[batch_slice].reshape(-1, 1))
                 cost_value_loss.backward()
+                clip_grad_norm_(self.cost_critic_params, self.max_grad_norm)
                 self.cost_critic_optimizer.step()
 
-                # Logging
-                entropy_loss = entropy.mean()
-                clipped_mask = (ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))
-                clip_fraction = torch.mean(clipped_mask.float()).item()
-                total_clip_frac += clip_fraction
-
-                kl_div = torch.mean(log_probs_old[batch_slice] - log_probs).item()
-                total_kl_div += kl_div
-
-                explained_variance = explained_variance_score(
-                    returns[batch_slice].detach().cpu().numpy(),
-                    values.detach().cpu().numpy(),
-                )
-                total_explained_var += explained_variance
-
-                total_policy_loss += synthetic_loss.item()
-                total_value_loss += value_loss.item()
-                total_cost_value_loss += cost_value_loss.item()
-                total_entropy_loss += entropy_loss.item()
-                total_loss += (synthetic_loss + value_loss + cost_value_loss).item()
-                num_updates += 1
+                # --- Append to tracking lists ---
+                policy_losses.append(policy_loss.item())
+                value_losses.append(value_loss.item())
+                cost_value_losses.append(cost_value_loss.item())
+                entropies.append(entropy.mean().item())
+        
+        # --- Final Logging and Cleanup ---
+        with torch.no_grad():
+            final_values = self.actor_critic.get_value(data['states']).squeeze()
+            final_cost_values = self.actor_critic.get_cost_value(data['states']).squeeze()
+            var_y = torch.var(data['returns'])
+            explained_var_value = (1 - torch.var(data['returns'] - final_values) / (var_y + 1e-8)).item()
+            var_y_cost = torch.var(data['cost_returns'])
+            explained_var_cost_value = (1 - torch.var(data['cost_returns'] - final_cost_values) / (var_y_cost + 1e-8)).item()
 
         memory.clear_memory()
 
-        avg_policy_loss = total_policy_loss / num_updates
-        avg_value_loss = total_value_loss / num_updates
-        avg_cost_value_loss = total_cost_value_loss / num_updates
-        avg_entropy_loss = total_entropy_loss / num_updates
-        avg_total_loss = total_loss / num_updates
-        avg_clip_fraction = total_clip_frac / num_updates
-        avg_kl_divergence = total_kl_div / num_updates
-        avg_explained_var = total_explained_var / num_updates
-
         return {
-            "avg_policy_loss": avg_policy_loss,
-            "avg_value_loss": avg_value_loss,
-            "avg_cost_value_loss": avg_cost_value_loss,
-            "avg_entropy_loss": avg_entropy_loss,
-            "avg_total_loss": avg_total_loss,
-            "avg_clip_fraction": avg_clip_fraction,
-            "avg_kl_divergence": avg_kl_divergence,
-            "avg_explained_variance": avg_explained_var,
-            "switching_temp": self.switching_temp,
+            "avg_policy_loss": np.mean(policy_losses),
+            "avg_reward_surrogate": np.mean(reward_surrogates),
+            "avg_cost_surrogate": np.mean(cost_surrogates),
+            "avg_cosine_similarity": np.mean(cosine_similarities) if cosine_similarities else None,
+            "avg_value_loss": np.mean(value_losses),
+            "avg_cost_value_loss": np.mean(cost_value_losses),
+            "entropy": np.mean(entropies),
+            "explained_var_value": explained_var_value,
+            "explained_var_cost_value": explained_var_cost_value,
+            "avg_rollout_cost": avg_rollout_cost,
+            "update_type": update_type,
         }
-
 
     def save_checkpoint(self, path):
         torch.save(self.actor_critic.state_dict(), path)

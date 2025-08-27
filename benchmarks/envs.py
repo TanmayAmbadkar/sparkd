@@ -60,5 +60,11 @@ def get_env_from_name(name):
     if name == 'Oscillator':
         from .Oscillator import OscillatorEnv
         return OscillatorEnv()
+    if name == 'humanoid':
+        from .humanoid import HumanoidEnv
+        return HumanoidEnv()
+    if name == 'ant':
+        from .ant import AntEnv
+        return AntEnv()
     else:
         raise RuntimeError("Unkonwn environment: " + name)

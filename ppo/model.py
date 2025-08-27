@@ -55,7 +55,6 @@ class ActorCritic(nn.Module):
         dist = Normal(mean, std)
         action = dist.sample()
 
-        action = torch.clamp(action, torch.Tensor(self.action_space.low), torch.Tensor(self.action_space.high))
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         return action, log_prob
 

@@ -3,15 +3,16 @@ import torch
 import numpy as np
 from abstract_interpretation import domains, verification
 import sys
-
-class HopperEnv(gym.Env):
+from gymnasium.wrappers import NormalizeObservation
+class AntEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Hopper-v4")
+        self.env = gym.make("Ant-v5", render_mode="rgb_array")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
         self.safety = safety
+        print(self.action_space.low, self.action_space.high)
 
         self._max_episode_steps = 1000
        
@@ -47,10 +48,10 @@ class HopperEnv(gym.Env):
         
         # for i in range(12, 28):
         #     lower_bounds[i] = 0
-        #     upper_bounds[i] = 1
-        lower_bounds[5] = -0.37315
-        upper_bounds[5] = 0.37315
-            
+        #     upper_bounds[i] = 
+        lower_bounds[13] = -2.3475
+        upper_bounds[13] = 2.3475
+        
         # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         
@@ -77,15 +78,7 @@ class HopperEnv(gym.Env):
         self.done = done or self.step_counter >= self._max_episode_steps# Store the done flag
 
         original_state = np.copy(state)
-        if self.state_processor is not None:
-            # state = self.reduce_state(state)
-            # state = torch.Tensor(state, )
-            with torch.no_grad():
-                state = self.state_processor(state.reshape(1, -1))
-            # state = state.numpy()
-            state = state.reshape(-1,)
-        # else:
-            # state = self.reduce_state(state)
+        
         self.step_counter+=1
         
         return state, reward, self.done, truncation, {"state_original": original_state}
@@ -96,19 +89,11 @@ class HopperEnv(gym.Env):
         self.step_counter = 0
         self.done = False 
         original_state = np.copy(state)
-        if self.state_processor is not None:
-            # state = self.reduce_state(state)
-            # state = torch.Tensor(state)
-            with torch.no_grad():
-                state = self.state_processor(state.reshape(1, -1))
-            # state = state.numpy()
-            state = state.reshape(-1,)
-        # else:
-            # state = self.reduce_state(state)
+       
         return state, {"state_original": original_state}
 
-    def render(self, mode='human'):
-        return self.env.render(mode=mode)
+    def render(self):
+        return self.env.render()
 
     def close(self):
         return self.env.close()
@@ -123,7 +108,7 @@ class HopperEnv(gym.Env):
         return self.done
 
     def unsafe(self, state: np.ndarray, simulated:bool = False) -> bool:
-       
-       is_healthy =  -0.37315 <= state[5] <= 0.37315
-       
-       return not is_healthy
+        
+        is_health = 2.3475 >= state[13] >= -2.3475
+        return not is_health
+
