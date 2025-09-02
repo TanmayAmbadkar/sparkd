@@ -12,7 +12,7 @@ class PPO:
         self.lam = 0.95  # GAE lambda
         self.eps_clip = 0.2
         self.value_coeff = 0.5
-        self.entropy_coeff = 0.0
+        self.entropy_coeff = 0.000
         self.device = torch.device("cuda" if args.cuda else "cpu")
 
         self.actor_critic = ActorCritic(obs_dim, action_space, args.hidden_size).to(self.device)
@@ -129,7 +129,7 @@ class PPO:
                 
                 # check if logstd has nans, replace with -10
                 if torch.isnan(self.actor_critic.actor_logstd).any():
-                    self.actor_critic.actor_logstd.data = torch.clamp(self.actor_critic.actor_logstd.data, min=-10, max=-1)
+                    self.actor_critic.actor_logstd.data = torch.zeros_like(self.actor_critic.actor_logstd)
 
                 # --- Logging Metrics ---
                 clipped_mask = (ratios > (1 + self.eps_clip)) | (ratios < (1 - self.eps_clip))

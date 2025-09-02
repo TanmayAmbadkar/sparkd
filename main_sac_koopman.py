@@ -6,8 +6,7 @@ import torch
 import os
 from torch.utils.tensorboard import SummaryWriter
 from ppo import PPO, ActorCritic
-# from src.policy import Shield, PPOPolicy, ProjectionPolicy
-from src.policy import Shield, SACPolicy, ProjectionPolicy
+from src.policy import Shield, SACPolicy, ProjectionPolicy, CBFPolicy
 
 from koopman.env_model import get_environment_model
 from abstract_interpretation import domains, verification
@@ -18,7 +17,7 @@ import matplotlib.pyplot as plt
 
 import traceback
 
-parser = argparse.ArgumentParser(description='Safe PPO Args')
+parser = argparse.ArgumentParser(description='Safe SAC Args')
 parser.add_argument('--env_name', default="lunar_lander")
 parser.add_argument('--gamma', type=float, default=0.995)
 parser.add_argument('--lr', type=float, default=0.0003)
@@ -61,7 +60,7 @@ hyperparams = vars(args)
 # Tensorboard
 if not os.path.exists("runs_new"):
     os.makedirs("runs_new")
-writer = SummaryWriter('runs_new/{}_PPO_{}_H{}_D{}'.format(
+writer = SummaryWriter('runs_new/{}_SAC_{}_H{}_D{}'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim))
 
@@ -69,11 +68,11 @@ print(hyperparams)
 if not os.path.exists("logs_ppo"):
     os.makedirs("logs_ppo")
 
-file = open('runs_new/{}_PPO_{}_H{}_D{}/log.txt'.format(
+file = open('runs_new/{}_SAC_{}_H{}_D{}/log.txt'.format(
     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
     args.horizon, args.red_dim), "w+")
 
-# PPO agent setup
+# SAC agent setup
 
 # Replay memories
 real_data = ReplayMemory(args.replay_size, env.observation_space, env.action_space.shape[0], args.seed)
@@ -150,8 +149,8 @@ while True:
             if env.unsafe(next_state, False):
 
                 real_unsafe_episodes += 1 * (not unsafe_flag)
-                episode_reward -= 100 * (not unsafe_flag)
-                reward = -100
+                # episode_reward -= 100 * (not unsafe_flag)
+                reward -= 100
                 print("UNSAFE (outside testing)", shielded)
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = done or (True if safe_agent is not None else False)
@@ -163,11 +162,11 @@ while True:
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
             if cost > 0:
-                agent.add(state, action, reward, next_state, done or trunc, 1)
-                real_data.push(state, action, reward, next_state, done or trunc, 1)
+                agent.add(state, action, reward, next_state, done, 1)
+                real_data.push(state, action, reward, next_state, done, 1)
             else:
-                agent.add(state, action, reward, next_state, done or trunc, 0)
-                real_data.push(state, action, reward, next_state, done or trunc, 0)
+                agent.add(state, action, reward, next_state, done, 0)
+                real_data.push(state, action, reward, next_state, done, 0)
             
             
             
@@ -189,6 +188,8 @@ while True:
 
     
     
+    
+    
     if total_numsteps >= args.start_steps * train_steps and args.no_safety is False:
     # if False:
         train_steps*=2
@@ -205,7 +206,7 @@ while True:
             exit()
         
         if env_model is not None:
-            env_model.mars.koopman_model.lr = 0.001
+            env_model.mars.koopman_model.lr = 0.0003
             koopman_model = env_model.mars.koopman_model
             epochs = 50
         else:
@@ -219,42 +220,40 @@ while True:
         
         writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
         writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)   
-            
-        # new_obs_space_domain = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.koopman_model.embedding_net.embed_net, domains.DeepPoly(env.observation_space.low, env.observation_space.high)))
-        
-        
-        # safety_domain = domains.DeepPoly(env.safety.lower, env.safety.upper)
-        
-        # safety = domains.DeepPoly(*verification.get_ae_bounds(env_model.mars.koopman_model.embedding_net.embed_net, safety_domain))
-        
-        
         
         
         safety = domains.DeepPoly(torch.hstack([env.safety.lower, -torch.ones(env.safety.lower.shape[0], args.red_dim)]), torch.hstack([env.safety.upper, torch.ones(env.safety.upper.shape[0], args.red_dim)]))
 
-        safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
-        safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
+        if args.red_dim != 0:
+            safety.lower[:, :-args.red_dim] = (safety.lower[:, :-args.red_dim] - mean)/(std + 1e-8)
+            safety.upper[:, :-args.red_dim] = (safety.upper[:, :-args.red_dim] - mean)/(std + 1e-8)
+        else:
+            safety.lower = (safety.lower - mean)/(std + 1e-8)
+            safety.upper = (safety.upper - mean)/(std + 1e-8)
 
-        new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
-        
-        new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
-        new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
-        print("New observation space", new_obs_space)
-        print("Safety domain", safety)
+        if args.red_dim != 0:
+            new_obs_space = gym.spaces.Box(low=np.concatenate([np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), -np.ones(args.red_dim, )]), high=np.concatenate([np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), np.ones(args.red_dim, )]), shape=(args.red_dim + env.observation_space.shape[0],))
+            
+            new_obs_space.low[:-args.red_dim] = (new_obs_space.low[:-args.red_dim] - mean)/(std + 1e-8)
+            new_obs_space.high[:-args.red_dim] = (new_obs_space.high[:-args.red_dim] - mean)/(std + 1e-8)
+            
+        else:
+            new_obs_space = gym.spaces.Box(low=np.nan_to_num(env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333), high=np.nan_to_num(env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333), shape=(env.observation_space.shape[0],))
+            new_obs_space.low = (new_obs_space.low - mean)/(std + 1e-8)
+            new_obs_space.high = (new_obs_space.high - mean)/(std + 1e-8)
         
         polys = safety.to_hyperplanes(new_obs_space)
         print(polys)
         unsafe_domains = safety.invert_polytope(new_obs_space)
         env.transformed_safe_polys = polys
-        # env.state_processor = env_model.mars.koopman_model.transform
         env.transformed_polys = unsafe_domains
-        
-        print("LATENT SAFETY", safety, len(polys[0]))
-        print("LATENT UNSAFETY",  len(env.transformed_polys))
-        shield = ProjectionPolicy(
+        shield = CBFPolicy(
             env_model.get_symbolic_model(), new_obs_space, env.observation_space,
             env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform)
         safe_agent = Shield(shield, agent, mean, std)
+        
+        shield.update_model()
+
         
 
     # Test the agent periodically
@@ -263,6 +262,8 @@ while True:
     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}"
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
+    writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
+    writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
     if safe_agent is not None:
         safe_agent.reset_count()
 
@@ -345,10 +346,6 @@ while True:
             writer.add_scalar(f'agent/shield', shield_count, total_numsteps)
             writer.add_scalar(f'agent/neural', neural_count, total_numsteps)
             writer.add_scalar(f'agent/backup', backup_count, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_real_episodes', real_unsafe_episodes, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_real_episodes_ratio', real_unsafe_episodes/total_real_episodes, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_sim_episodes', unsafe_sim_episodes, total_numsteps)
-            writer.add_scalar(f'agent/unsafe_sim_episodes_ratio', (unsafe_sim_episodes+0.0000001)/(total_sim_episodes+0.0000001), total_numsteps)
             writer.add_scalar(f'agent/unsafe_test_episodes', unsafe_test_episodes, total_numsteps)
             writer.add_scalar(f'agent/unsafe_test_episodes_ratio', (unsafe_test_episodes+0.0000001)/(total_test_episodes + 0.0000001), total_numsteps)
             writer.add_scalar(f'reward/test', avg_reward, total_numsteps)

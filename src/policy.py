@@ -396,10 +396,9 @@ class CBFPolicy:
         self.saved_state = None
         self.saved_action = None
         self.shielded = False
-        self.gamma = 0.3
+        self.gamma = 0.7
         
                 # --- Placeholders for the pre-computed model and solver ---
-        self.solver= None
         self.precomputed = {}
         self.is_model_updated = False
 

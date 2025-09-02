@@ -40,7 +40,6 @@ class ReplayMemory:
             batch_dones = self.dones[idx]
             if get_cost:
                 batch_costs = self.costs[idx]
-            if get_cost:
                 return batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones, batch_costs
             return batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones
         else:

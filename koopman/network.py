@@ -68,7 +68,7 @@ class StateEmbedding(nn.Module):
             )
             self.decode_net = nn.Sequential(
                 # The decoder should take the full latent state z as input
-                nn.Linear(state_dim + embed_dim, 512),
+                nn.Linear(embed_dim, 512),
                 nn.SiLU(),
                 nn.Linear(512, 512),
                 nn.SiLU(),
@@ -140,7 +140,7 @@ class KoopmanLightning(pl.LightningModule):
     """
     A Lightning Module that implements multi-step training of a Koopman model.
     """
-    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001, w_pred=1.0, w_recon=0.5, w_cons=0.5, w_eig=0.1):
+    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001, w_pred=1.0, w_recon=0.1, w_cons=0.5, w_eig=0.1):
         """
         Args:
             state_dim (int): Dimensionality of the original state.
@@ -190,19 +190,20 @@ class KoopmanLightning(pl.LightningModule):
         # 2. Ground truth latents
         # IMPORTANT FIX: Removed `with torch.no_grad()` to allow gradients to flow
         # to the encoder from the prediction loss.
-        target_s_flat = next_states.reshape(B * H, -1)
-        target_latents_flat = self.embedding_net(target_s_flat)
-        target_latents = target_latents_flat.reshape(B, H, -1)
+        with torch.no_grad():
+            target_s_flat = next_states.reshape(B * H, -1)
+            target_latents_flat = self.embedding_net(target_s_flat)
+            target_latents = target_latents_flat.reshape(B, H, -1)
 
         # 3. Prediction loss (MSE in latent space)
         pred_loss = self.criterion(pred_latents, target_latents)
 
-        # 4. Consistency loss (as in original code)
-        decoded_states = pred_latents[:, :, :S_dim]
+        # # 4. Consistency loss (as in original code)
+        # decoded_states = pred_latents[:, :, :S_dim]
         
-        reencoded_latents = self.embedding_net(decoded_states.reshape(B * H, -1)).reshape(B, H, -1)
-        consistency_loss = self.criterion(reencoded_latents, pred_latents)
-
+        # reencoded_latents = self.embedding_net(decoded_states.reshape(B * H, -1)).reshape(B, H, -1)
+        # consistency_loss = self.criterion(reencoded_latents, pred_latents)
+        consistency_loss = torch.tensor(0.0, device=self.device)
         # 5. Reconstruction loss (as in original code)
         if self.hparams.embed_dim == 0:
             recon_loss = torch.tensor(0.0, device=self.device)

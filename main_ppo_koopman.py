@@ -20,7 +20,7 @@ import traceback
 parser = argparse.ArgumentParser(description='Safe PPO Args')
 parser.add_argument('--env_name', default="lunar_lander")
 parser.add_argument('--gamma', type=float, default=0.995)
-parser.add_argument('--lr', type=float, default=0.0003)
+parser.add_argument('--lr', type=float, default=0.00003)
 parser.add_argument('--seed', type=int, default=123456)
 parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--mini_batch_size', type=int, default=256)
@@ -32,6 +32,8 @@ parser.add_argument('--cuda', action="store_true")
 parser.add_argument('--horizon', type=int, default=20)
 parser.add_argument('--red_dim', type=int, default = 20)
 parser.add_argument('--no_safety', default=False, action='store_true')
+parser.add_argument('--render', default=False, action='store_true')
+
 args = parser.parse_args()
 
 # Setup environment
@@ -123,7 +125,7 @@ while True:
         if env.unsafe(next_state, False):
 
             real_unsafe_episodes += (1 * (not unsafe_flag))
-            episode_reward -= (100 * (not unsafe_flag))
+            # episode_reward -= (100 * (not unsafe_flag))
             reward -= 100
             print("UNSAFE (outside testing)", shielded)
             print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
@@ -270,7 +272,8 @@ while True:
             trunc = False
             episode_steps = 0
             trajectory = [state]
-            # frames  = [env.render()]
+            if args.render:
+                frames  = [env.render()]
 
             while not done and not trunc:
                 # Decide action
@@ -310,10 +313,11 @@ while True:
 
                 state = next_state
                 trajectory.append(state)
-                # frames.append(env.render())
+                if args.render:
+                    frames.append(env.render())
 
-            # if record_video:
-                # imageio.mimsave(custom_filename, frames, fps=30)
+            if record_video and args.render:
+                imageio.mimsave(custom_filename, frames, fps=30)
             avg_reward += episode_reward
             avg_length += episode_steps
 
