@@ -145,5 +145,4 @@ test*.py
 *ipynb
 *.png
 trajectories.pkl
-runs_new
-runs_final
+runs*/
