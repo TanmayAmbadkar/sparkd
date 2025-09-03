@@ -84,18 +84,19 @@ class CostFunction:
         print("Finished updating model constraints.")
 
     def __call__(self, state: np.ndarray,
-                 action: Optional[np.ndarray] = None,
-                 debug: bool = False) -> float:
+                    action: Optional[np.ndarray] = None,
+                    debug: bool = False) -> float:
         s_dim = self.state_space.shape[0]
         u_dim = self.action_space.shape[0]
 
         # Normalize state
-        processed_state = (state - self.mean) / self.std
+        processed_state = (state - self.mean) / (self.std + 1e-8)
         processed_state = self.transform(processed_state.reshape(1, -1)).reshape(-1,)
         if action is None:
             action = np.zeros(u_dim)
 
-        best_score = 0.0
+        # NEW: Track minimum violation across all polytopes
+        min_violation = float('inf')
         lambda_slack = 1e-4
 
         # Loop through the pre-computed F, G, h for each safe polytope
@@ -172,9 +173,16 @@ class CostFunction:
                 continue
 
             slacks = res_fixed.x[-slack_size:]
-            current_score = np.sum(slacks)
+            current_violation = np.mean(slacks)
+            
+            # Early return if perfect safety found in ANY polytope
+            if current_violation <= 1e-6:  # Effectively zero (accounting for numerical precision)
+                if debug:
+                    print(f"Found polytope with zero violations! Returning 0.")
+                return 0.0
+            
+            # Track minimum violation across polytopes
+            min_violation = min(min_violation, current_violation)
 
-            if current_score >= best_score:
-                best_score = current_score if current_score > 0 else 0.0
-        
-        return best_score if best_score != np.inf else 0.0
+        # Return minimum violation found, or 0 if no polytopes were feasible
+        return min_violation if min_violation != float('inf') else 0.0

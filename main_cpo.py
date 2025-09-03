@@ -58,7 +58,7 @@ parser.add_argument('--eps_clip', type=float, default=0.2, help="Clipping parame
 
 # --- CONSTRAINTS (Multi-constraint support) ---
 parser.add_argument('--num_costs', type=int, default=1, help="Number of cost constraints")
-parser.add_argument('--cost_limit', type=float, default=0, help="Cost constraint (max cost per episode)")
+parser.add_argument('--cost_limit', type=float, default=10, help="Cost constraint (max cost per episode)")
 parser.add_argument('--lagrange_init', type=float, default=1.0,
                     help="Initial values for Lagrange multipliers (list or single value)")
 parser.add_argument('--lagrange_lr', type=float, default=0.01, help="Learning rate for Lagrange multiplier update")
@@ -187,7 +187,7 @@ while True:
             if env.unsafe(next_state, False):
 
                 real_unsafe_episodes += 1 * (not unsafe_flag)
-                episode_reward -= 100 * (not unsafe_flag)
+                # episode_reward -= 100 * (not unsafe_flag)
                 reward -=100
                 print("UNSAFE (outside testing)")
                 print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
@@ -232,7 +232,7 @@ while True:
             epochs = 50
         else:
             koopman_model = None
-            epochs = 100
+            epochs = 200
 
         
         env_model, ev_score, r2_score, mean, std = get_environment_model(
