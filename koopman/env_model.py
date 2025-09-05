@@ -1,331 +1,172 @@
-from typing import Optional, List, Callable
+from typing import Optional, List, Tuple
 import numpy as np
-import scipy.stats
-from koopman.network import KoopmanLightning, fit_koopman
-from abstract_interpretation.verification import get_constraints, get_ae_bounds, get_variational_bounds
-from abstract_interpretation import domains
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import explained_variance_score, r2_score
-from typing import Union
+from koopman.network import KoopmanLightning, fit_koopman # Assuming these are in a separate file
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-
-class MarsE2cModel:
+class KoopmanLinearModel:
     """
-    A model that uses the KoopmanLightning to obtain A, B, and c matrices
-    and provides a similar interface to MARSModel.
+    Wraps a trained KoopmanLightning model to provide a clean interface for
+    accessing the linearized dynamics (A, B, c) and the computed error bound (eps).
     """
-    def __init__(self, koopman_model: KoopmanLightning, s_dim=None, original_s_dim = None):
+    def __init__(self, koopman_model: KoopmanLightning, original_s_dim: int):
         self.koopman_model = koopman_model
-        self.s_dim = s_dim
+        self.s_dim = koopman_model.hparams.state_dim + koopman_model.hparams.embed_dim
         self.original_s_dim = original_s_dim
-        self.error = 0
+        self.error_bound = np.zeros(self.s_dim)
 
-    def __call__(self, state, action,  normalized: bool = False) -> np.ndarray:
+    def predict_trajectory(self, states: np.ndarray, actions: np.ndarray) -> np.ndarray:
         """
-        Predict the next state given the current state x and action u.
-        """
-        
-        x_norm = state
-        u_norm = action
-        # Convert to tensors
-        x_tensor = torch.tensor(x_norm, )
-        u_tensor = torch.tensor(u_norm, )
+        Predicts a multi-step trajectory in the latent space.
 
-        # print(x_tensor.shape, u_tensor.shape)
-        # Use KoopmanLightning to predict next state
-        z_t_next = self.koopman_model(x_tensor, u_tensor)
-
-        # Predict next latent state
-        
-        return z_t_next.detach().cpu().numpy()
-
-    def get_matrix_at_point(self, point: np.ndarray, s_dim: int, steps: int = 1, normalized: bool = False):
-        """
-        Get the linear model at a particular point.
-        Returns M and eps similar to the original MARSModel.
-        M is such that the model output can be approximated as M @ [x; 1],
-        where x is the input state-action vector.
-
-        Parameters:
-        - point: The concatenated (state, action) input vector of length s_dim + u_dim.
-        - s_dim: The dimension of the state (and latent dimension, if they match).
-        - steps: Number of steps to unroll for error estimation (not used here).
-        - normalized: Whether 'point' is already normalized (not used here).
+        Args:
+            states (np.ndarray): Shape (N, H+1, s_dim) or (H+1, s_dim).
+            actions (np.ndarray): Shape (N, H, a_dim) or (H, a_dim).
 
         Returns:
-        - M: The linear approximation matrix of shape [s_dim, (s_dim + u_dim + 1)].
-        - eps: A vector of length s_dim, taken from diag(A_t @ A_t^T).
+            np.ndarray: The predicted latent trajectory, shape (N, H, latent_dim).
         """
+        states_tensor = torch.tensor(states, dtype=torch.float32, device=self.koopman_model.device)
+        actions_tensor = torch.tensor(actions, dtype=torch.float32, device=self.koopman_model.device)
 
-        # 1. If needed, unnormalize:
-        # if not normalized:
-        #     point = (point - self.inp_means) / self.inp_stds
-
-        # 2. Split into state (x_norm) and action (u_norm))
-        x_norm = point[:s_dim]
-        u_norm = point[s_dim:]
-
-        # 3. Convert to torch tensors
-        x_tensor = torch.Tensor(x_norm).unsqueeze(0)
-        u_tensor = torch.Tensor(u_norm).unsqueeze(0)
-
-        # 4. Run the E2C transition:
-        #    Returns (z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t)
-
+        if states_tensor.dim() == 2:
+            states_tensor = states_tensor.unsqueeze(0)
+        if actions_tensor.dim() == 2:
+            actions_tensor = actions_tensor.unsqueeze(0)
+            
         with torch.no_grad():
-            z_next, z_next_mean, A_t, B_t, c_t, v_t, r_t = self.koopman_model.transition(
-                x_tensor, x_tensor, u_tensor
-            )
+            pred_latents = self.koopman_model.forward(states_tensor, actions_tensor)
 
-        # 5. Convert PyTorch tensors to NumPy, remove batch dimension
-        A_t = A_t.detach().cpu().numpy()   # shape [s_dim, s_dim]
-        B_t = B_t.detach().cpu().numpy()    # shape [s_dim, u_dim]C
-        c_t = c_t.squeeze(0).detach().cpu().numpy()    # shape [s_dim]
-        # c_T = np.zeros(A_t.shape[0]) 
+        return pred_latents.cpu().numpy()
 
-        # 6. Construct M by stacking [A | B | c], giving shape [s_dim, s_dim + u_dim + 1]
-        #    Note: c_t[:, None] is the bias column
-        M = np.hstack((A_t, B_t, c_t[:, None]))
+    def get_linear_dynamics(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Extracts the learned A, B, and c matrices from the Koopman model.
+        """
+        # The model is fixed, so we don't need a specific point.
+        with torch.no_grad():
+            A, B, c = self.koopman_model.transition()
+        
+        A_np = A.cpu().numpy()
+        B_np = B.cpu().numpy()
+        c_np = c.cpu().numpy()
+        
+        return A_np, B_np, c_np
 
-        # 7. Compute eps as the diagonal of A_t @ A_t^T.
-        #    That yields a 1D array of length s_dim.
-        # eps = np.diag(A_tA_tT) # shape [s_dim]
-        # eps = np.zeros_like(c_t)
-        # eps = self.koopman_model.get_eps(x_tensor, u_tensor).squeeze(0).detach().cpu().numpy()
-        # print("Eps:", eps)
-        eps = self.error
-        return M, eps
-
-
+    def get_matrix_at_point(self, point: np.ndarray, s_dim: int, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns the pre-computed linear model and error bound.
+        """
+        A, B, c = self.get_linear_dynamics()
+        M = np.hstack((A, B, c[:, None]))
+        return M, self.error_bound
 
     def __str__(self):
-        return "MarsE2cModel using KoopmanLightning"
+        return "KoopmanLinearModel"
 
 
-class EnvModel:
+def get_environment_model(
+    input_states: np.ndarray,
+    actions: np.ndarray,
+    output_states: np.ndarray,
+    latent_dim: int = 4,
+    horizon: int = 5,
+    epochs: int = 50,
+    koopman_model: Optional[KoopmanLightning] = None,
+) -> Tuple[KoopmanLinearModel, dict, np.ndarray, np.ndarray]:
     """
-    A full environment model including a symbolic model and a neural model.
+    Trains a Koopman dynamics model and computes its error bound.
 
-    This model includes a symbolic (MARS) model of the dynamics, a neural
-    model which accounts for dynamics not captured by the symbolic model, and a
-    second neural model for the reward function.
+    Args:
+        input_states (np.ndarray): Trajectories of input states.
+        actions (np.ndarray): Trajectories of actions.
+        output_states (np.ndarray): Trajectories of ground-truth next states.
+        latent_dim (int): The number of learned latent dimensions.
+        horizon (int): The prediction horizon for training.
+        epochs (int): Number of training epochs.
+        koopman_model (Optional[KoopmanLightning]): An existing model to continue training.
+
+    Returns:
+        A tuple containing:
+        - KoopmanLinearModel: The wrapped, trained model.
+        - dict: A dictionary of one-step performance metrics (EV, R2).
+        - np.ndarray: The mean used for state normalization.
+        - np.ndarray: The standard deviation used for state normalization.
     """
-
-    def __init__(
-            self,
-            mars: MarsE2cModel,
-            observation_space_low,
-            observation_space_high):
-        """
-        Initialize an environment model.
-
-        Parameters:
-        mars - A symbolic model.
-        net - A neural model for the residuals.
-        reward - A neural model for the reward.
-        """
-        self.mars = mars
-        self.observation_space_low = np.array(observation_space_low)
-        self.observation_space_high = np.array(observation_space_high)
-        
-
-    def __call__(self,
-                 state: np.ndarray,
-                 action: np.ndarray,
-                 use_neural_model: bool = True) -> np.ndarray:
-        """
-        Predict a new state and reward value for a given state-action pair.
-
-        Parameters:
-        state (1D array) - The current state of the system.
-        action (1D array) - The action to take
-
-        Returns:
-        A tuple consisting of the new state and the reward.
-        """
-        state = state.reshape(-1, )
-        action = action.reshape(-1, )
-        inp = np.concatenate((state, action), axis=0)
-        symb = self.mars(inp)
-        
-            
-        return np.clip(symb[0], self.observation_space_low, self.observation_space_high), 0
-
-    def get_symbolic_model(self) -> MarsE2cModel:
-        """
-        Get the symbolic component of this model.
-        """
-        return self.mars
-
-    def get_confidence(self) -> float:
-        return self.confidence
-
-    @property
-    def error(self) -> float:
-        return self.mars.error
-
-
-
-
-def get_environment_model(     # noqa: C901
-        input_states: np.ndarray,
-        actions: np.ndarray,
-        output_states: np.ndarray,
-        rewards: np.ndarray,
-        domain,
-        seed: int = 0,
-        data_stddev: float = 0.01,
-        latent_dim: int = 4,
-        horizon: int = 5,
-        koopman_model = None,
-        epochs: int = 50) -> EnvModel:
-
-    
-    means = np.mean(input_states.reshape(-1, input_states.shape[-1]), axis=0)
-    stds = np.std(input_states.reshape(-1, input_states.shape[-1]), axis=0)
-    
-    stds[np.equal(np.round(stds, 1), np.zeros(*stds.shape))] = 1
-    
-    # means = np.zeros_like(means)
-    # stds = np.ones_like(stds)
-
-    print("Means:", means)
-    print("Stds:", stds)
-    
-    # means = np.zeros(domain.lower.shape[1])
-    # stds = np.ones(domain.lower.shape[1])
-    
-    # if koopman_model is not None:
-    #     means = koopman_model.mean + 0.001 * (means - koopman_model.mean)
-    #     stds = koopman_model.std + 0.001 * (means - koopman_model.mean)
-    
-    domain.lower = (domain.lower - means) / stds
+    # 1. Normalize Data
+    state_shape = input_states.shape[-1]
+    means = np.mean(input_states.reshape(-1, state_shape), axis=0)
+    stds = np.std(input_states.reshape(-1, state_shape), axis=0)
+    stds[stds < 1e-6] = 1.0  # Avoid division by zero
     
     
-    domain.upper = (domain.upper - means) / stds
-    input_states = (input_states - means) / stds
-    output_states = (output_states - means) / stds
-    # print("Input states:", input_states)
-    
+    input_states_norm = (input_states - means) / stds
+    output_states_norm = (output_states - means) / stds
+
+    # 2. Initialize or Continue Training
     if koopman_model is None:
-        koopman_model = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
-        koopman_model_copy = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
-    else:
-        koopman_model_copy = KoopmanLightning(input_states.shape[-1], latent_dim, actions.shape[-1], horizon)
-        koopman_model_copy.load_state_dict(koopman_model.state_dict())
-        koopman_model_copy.eval()
-        
-        
-    fit_koopman(input_states, actions, output_states, koopman_model, horizon, epochs=epochs)
-
-    koopman_model.update_stats(means, stds)
-
+        koopman_model = KoopmanLightning(state_shape, latent_dim, actions.shape[-1], horizon)
     
-    print(input_states.shape, actions.shape, output_states.shape)
-    parsed_mars = MarsE2cModel(koopman_model, latent_dim, input_states.shape[-1])
-    parsed_mars_copy = MarsE2cModel(koopman_model_copy, latent_dim, input_states.shape[-1])
-    koopman_model.horizon = horizon
-    Yh = parsed_mars(input_states, actions, normalized=True)
-    Yh_copy = parsed_mars_copy(input_states, actions, normalized=True)
+    fit_koopman(input_states_norm, actions, output_states_norm, koopman_model, horizon, epochs=epochs)
 
-    output_states = parsed_mars.koopman_model.transform(output_states)
-    output_states_copy = parsed_mars_copy.koopman_model.transform(output_states[:, :, :input_states.shape[-1]])
-    # output_states = output_states.reshape(-1, input_states.shape[-1])
+    # 3. Wrap the model in our clean interface
+    linear_model = KoopmanLinearModel(koopman_model, original_s_dim=state_shape)
 
-    ev_score = None
-    r2 = None
-    ev_score_old = None
-    r2_old = None
+    # 4. Evaluate and Compute Error Bound
+    # Predict the full trajectory to get multi-step predictions
+    pred_latents_traj = linear_model.predict_trajectory(
+        input_states_norm, 
+        actions
+    )
+
+    # Get ground-truth latent states for the entire trajectory
+    with torch.no_grad():
+        flat_true_states = torch.tensor(output_states_norm, dtype=torch.float32)
+        flat_true_latents = koopman_model.embedding_net(flat_true_states.view(-1, state_shape))
+        true_latents_traj = flat_true_latents.view(*pred_latents_traj.shape).numpy()
+    
+    print("\n--- Step-wise Model Accuracy Evaluation ---")
+    final_metrics = {}
     for i in range(horizon):
-        print(f"Model estimation error, horizon {i}:", np.mean((Yh[:,i, :input_states.shape[-1]] - (output_states[:, i, :input_states.shape[-1]]))**2)) 
-        print(f"Model estimation error old, horizon {i}:", np.mean((Yh_copy[:,i, :input_states.shape[-1]] - (output_states_copy[:, i, :input_states.shape[-1]]))**2)) 
-        
-        ev_score = explained_variance_score(
-            output_states[:,i, :input_states.shape[-1]].reshape(-1), Yh[:,i, :input_states.shape[-1]].reshape(-1))
-        r2 = r2_score(
-            output_states[:,i,  :input_states.shape[-1]].reshape(-1), Yh[:,i, :input_states.shape[-1]].reshape(-1))
-        print(f"Explained Variance Score, horizon {i}:", ev_score)
-        print(f"R2 Score, horizon {i}:", r2)
-        ev_score_old = explained_variance_score(
-            output_states_copy[:,i, :input_states.shape[-1]].reshape(-1), Yh_copy[:,i, :input_states.shape[-1]].reshape(-1))
-        r2_old = r2_score(
-            output_states_copy[:,i,  :input_states.shape[-1]].reshape(-1), Yh_copy[:,i, :input_states.shape[-1]].reshape(-1))
-        print(f"Old Explained Variance Score, horizon {i}:", ev_score_old)
-        print(f"Old R2 Score, horizon {i}:", r2_old)
-                
-            # number of output dims
+        # Predicted latents at step i (0-indexed)
+        pred_latents_step = pred_latents_traj[:, i, :]
+        # Ground truth latents are at step i+1
+        true_latents_step = true_latents_traj[:, i, :]
 
-    # 1) compute dimension‑wise maximum abs‑error over all samples & timesteps
-    #    (broadcast output_states across the middle axis of Yh)
-    #    Yh: (n_samples, n_steps, n_out)
-    #    output_states: (n_samples, n_out)
-            
-        # 1) Compute the absolute residuals for every (sample, step, feature)
-        
-    if ev_score_old >= ev_score:
-        Yh = Yh_copy
-        output_states = output_states_copy
-        parsed_mars = parsed_mars_copy
-        print("Using old model")
-        
-    res = np.abs(
-        Yh[:, 0] 
-        - output_states[:, 0]
-    )           # shape: (N, T, n_out)
+        # For interpretable metrics, compare only the original state dimensions
+        pred_states_step = pred_latents_step[:, :state_shape]
+        true_states_step = true_latents_step[:, :state_shape]
 
-    sns.boxplot(data=res.reshape(-1, output_states.shape[-1]))
-    plt.savefig("boxplot.png")
+        mse = np.mean((pred_states_step - true_states_step)**2)
+        ev_score = explained_variance_score(true_states_step.flatten(), pred_states_step.flatten())
+        r2 = r2_score(true_states_step.flatten(), pred_states_step.flatten())
+
+        print(f"Horizon {i}: MSE={mse:.6f}, EV={ev_score:.4f}, R2={r2:.4f}")
+
+        # Store the metrics for the first step to return
+        if i == 0:
+            final_metrics['explained_variance'] = ev_score
+            final_metrics['r2_score'] = r2
+
+    # Calculate robust error bound based on one-step prediction residuals
+    one_step_residuals = np.abs(pred_latents_traj[:, 0, :] - true_latents_traj[:, 1, :])
+    error_bound = np.percentile(one_step_residuals, 50, axis=0)
+    linear_model.error_bound = error_bound
+    
+    print(f"\nComputed Error Bound (eps) using 99th percentile of 1-step error: {error_bound}")
+    
+    # --- ADDED: Code to plot the boxplot of residuals ---
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=one_step_residuals)
+    plt.title('Boxplot of One-Step Prediction Residuals per Latent Dimension')
+    plt.xlabel('Latent Dimension Index')
+    plt.ylabel('Absolute Error')
+    plt.grid(True)
+    plt.savefig("residual_boxplot.png")
     plt.close()
-    # 2) Flatten over samples & time
-    res_flat = res.reshape(-1, output_states.shape[-1])             # shape: (N*T, n_out))
+    print("Saved residual boxplot to residual_boxplot.png")
 
-    # 3) Empirical max
+    return linear_model, final_metrics['explained_variance'], final_metrics['r2_score'], means, stds
 
-    # 4) Empirical 95%-quantile (or whatever α you choose)
-    quantile = np.percentile(res_flat, 99, axis=0)   # shape: (n_out,)
-
-    q1 = np.percentile(res_flat, 25, axis=0)   # shape: (n_out,)
-    q3 = np.percentile(res_flat, 75, axis=0)   # shape: (n_out,)
-    iqr = q3 - q1
-    lower_bound = q1 - 1.5 * iqr
-    upper_bound = q3 + 1.5 * iqr
-    print("upper_bound", upper_bound)
-    print(quantile)
-
-    # 5) still store the full vector
-    # parsed_mars.error = upper_bound
-    
-    #  Get the maximum distance between a predction and a datapoint
-    diff = np.amax(np.abs( Yh[:, 0] 
-        - output_states[:, 0, :]))
-
-    # Get a confidence interval based on the quantile of the chi-squared
-    # distribution
-    # from sklearn.linear_model import LinearRegression
-    # lr = LinearRegression().fit(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat)
-    # print("R² of residual vs (z,u):", lr.score(np.hstack([parsed_mars.koopman_model.transform(input_states)[:, 0], actions[:, 0]]), res_flat))
-       
-    conf = np.sqrt(scipy.stats.chi2.ppf(
-        0.9, output_states[:, 0, :].shape[1]))
-    err = diff + conf
-    print("Computed error:", err, "(", diff, conf, ")")
-    error = err
-    error = quantile
-    error = np.minimum(upper_bound, quantile)
-    
-    # error = np.max(res_flat, axis=0)
-    
-    
-    # parsed_mars.error =  np.concatenate((error[:input_states.shape[-1]],  np.zeros(output_states[:, 0, :].shape[1] - input_states.shape[-1])), axis=0)
-    # parsed_mars.error = err * np.ones(output_states[:, 0, :].shape[1] )
-    parsed_mars.error = error
-
-    print("Final Error", parsed_mars.error)
-
-    return EnvModel(parsed_mars, domain.lower.detach().numpy(), domain.upper.detach().numpy()), ev_score, r2, means, stds
- 

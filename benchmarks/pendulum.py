@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
-from abstract_interpretation import domains
+from constraints import safety
 
 class PendulumEnv(gym.Env):
 
@@ -31,11 +31,11 @@ class PendulumEnv(gym.Env):
             np.array([[-1.0, 0.0, 0.0, 0.0, -0.39],
                       [1.0, 0.0, 0.0, 0.0, -0.39]])
         ]
-        self.safety = domains.DeepPoly(
+        self.safety = safety.Box(
                 np.array([-0.39, -1]),
                 np.array([0.39, 1]))
         
-        self.original_safety = domains.DeepPoly(
+        self.original_safety = safety.Box(
                 np.array([-0.39, -1]),
                 np.array([0.39, 1]))
 

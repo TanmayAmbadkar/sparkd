@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety
 
 class InvertedPendulumEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
@@ -90,14 +90,14 @@ class InvertedPendulumEnv(gym.Env):
             polys.append(np.append(A2, lower_bounds[i]))
             generators[i][i] = (upper_bounds[i] - lower_bounds[i]) / 2
 
-        # Set the safety constraints using the DeepPoly domain
-        # input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
-        input_deeppoly = domains.Zonotope(center, generators)
+        # Set the safety constraints using the Box domain
+        # input_box = safety.Box(lower_bounds, upper_bounds)
+        input_box = safety.Zonotope(center, generators)
 
         self.original_safe_polys = [np.array(polys)]
         self.safe_polys = [np.array(polys)]
-        self.safety = input_deeppoly
-        self.original_safety = input_deeppoly
+        self.safety = input_box
+        self.original_safety = input_box
 
 
 
@@ -133,7 +133,7 @@ class InvertedPendulumEnv(gym.Env):
             state = self.state_processor(state.reshape(1, -1))
             state = state.reshape(-1,)
         self.step_counter += 1
-        return state, reward, self.done, truncation, {"state_original": original_state}
+        return state, reward, self.done, truncation, {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)
@@ -144,7 +144,7 @@ class InvertedPendulumEnv(gym.Env):
         if self.state_processor is not None:
             state = self.state_processor(state.reshape(1, -1))
             state = state.reshape(-1,)
-        return state, {"state_original": original_state}
+        return state, {}
 
     def render(self, mode='human'):
         return self.env.render(mode=mode)

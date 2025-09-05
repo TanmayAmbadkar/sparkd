@@ -2,7 +2,7 @@ import safety_gymnasium as gym
 import gymnasium
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety
 import sys
 from benchmarks.utils import *
 
@@ -75,15 +75,14 @@ class SafetyPointGoalEnv(gymnasium.Env):
             lower_bounds[i] = 0
             upper_bounds[i] = 0.9
             
-        # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
-        # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         
-        input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
-        polys = input_deeppoly_domain.to_hyperplanes()
         
-        # Set the safety constraints using the DeepPolyDomain and the polys
-        self.safety = input_deeppoly_domain
-        self.original_safety = input_deeppoly_domain
+        input_box_domain = safety.Box(lower_bounds, upper_bounds)
+        polys = input_box_domain.to_hyperplanes()
+        
+        # Set the safety constraints using the BoxDomain and the polys
+        self.safety = input_box_domain
+        self.original_safety = input_box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
         print(self.original_safety)

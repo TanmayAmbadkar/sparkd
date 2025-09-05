@@ -6,9 +6,6 @@ from torchmetrics.functional import explained_variance
 import numpy as np
 from torch.nn.utils import spectral_norm
 
-# If you are using the abstract_interpretation package:
-from abstract_interpretation.neural_network import LinearLayer, ReLULayer, TanhLayer, NeuralNetwork
-
 ###############################################
 # 1. Modified Dataset Class for Sequences (s, a, s_next) #
 ###############################################
@@ -264,7 +261,7 @@ class KoopmanLightning(pl.LightningModule):
     
     def transition(self, z=None, z_1=None, u=None):
         A, B, c = self.koopman_operator.get_koopman_operators(z, u)
-        return None, None, A, B, c, None, None
+        return A, B, c
     
     @torch.no_grad()
     def get_eps(self, z, u):

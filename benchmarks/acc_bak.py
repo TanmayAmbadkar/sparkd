@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
 import torch
-from abstract_interpretation import domains, verification
+from constraints import safety
 
 
 
@@ -81,23 +81,23 @@ class AccEnv(gym.Env):
         lower_bounds[3] = -1.5  # Increased from 0.5 to 0.75
         upper_bounds[3] = 1.5
 
-        input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
+        input_box = safety.Box(lower_bounds, upper_bounds)
     
-        self.original_safe_polys = [np.array(input_deeppoly.to_hyperplanes())]
-        self.safe_polys = [np.array(input_deeppoly.to_hyperplanes())]
-        self.safety = input_deeppoly
-        self.original_safety = input_deeppoly
+        self.original_safe_polys = [np.array(input_box.to_hyperplanes())]
+        self.safe_polys = [np.array(input_box.to_hyperplanes())]
+        self.safety = input_box
+        self.original_safety = input_box
  
         
     def unsafe_constraints(self):
         
         
-        unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
+        unsafe_boxs = safety.recover_safe_region(safety.Box(self.observation_space.low, self.observation_space.high), [self.original_safety])        
         self.polys = []
-        self.unsafe_domains = unsafe_deeppolys
+        self.unsafe_domains = unsafe_boxs
         
         
-        for poly in unsafe_deeppolys:
+        for poly in unsafe_boxs:
             self.polys.append(np.array(poly.to_hyperplanes()))
 
 

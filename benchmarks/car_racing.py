@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
-from abstract_interpretation import domains
+from constraints import safety
 
 class CarRacingEnv(gym.Env):
 
@@ -29,7 +29,7 @@ class CarRacingEnv(gym.Env):
             np.array([[0.0, 1.0, 0.0, 0.0, -0.99]]),
             np.array([[0.0, -1.0, 0.0, 0.0, 2.01]])
         ]
-        self.safety = domains.DeepPoly(lower_bounds=[
+        self.safety = safety.Box(lower_bounds=[
                 [-5, -5, -5, -5],
                 [-5, -5, -5, -5],
                 [2.01, -5, -5, -5],

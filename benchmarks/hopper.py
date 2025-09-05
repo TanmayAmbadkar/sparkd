@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety
 import sys
 from gymnasium.wrappers import NormalizeObservation
 class HopperEnv(gym.Env):
@@ -52,15 +52,14 @@ class HopperEnv(gym.Env):
         lower_bounds[5] = -0.37315
         upper_bounds[5] = 0.37315
             
-        # lower_bounds = normalize_constraints(lower_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
-        # upper_bounds = normalize_constraints(upper_bounds, a = self.MIN, b = self.MAX, target_range=(-1, 1))
         
-        input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
-        polys = input_deeppoly_domain.to_hyperplanes(self.env.observation_space)
         
-        # Set the safety constraints using the DeepPolyDomain and the polys
-        self.safety = input_deeppoly_domain
-        self.original_safety = input_deeppoly_domain
+        input_box_domain = safety.Box(lower_bounds, upper_bounds)
+        polys = input_box_domain.to_hyperplanes(self.env.observation_space)
+        
+        # Set the safety constraints using the BoxDomain and the polys
+        self.safety = input_box_domain
+        self.original_safety = input_box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
         print(self.original_safety)
@@ -89,7 +88,7 @@ class HopperEnv(gym.Env):
             # state = self.reduce_state(state)
         self.step_counter+=1
         
-        return state, reward, self.done, truncation, {"state_original": original_state}
+        return state, reward, self.done, truncation, {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)
@@ -106,7 +105,7 @@ class HopperEnv(gym.Env):
             state = state.reshape(-1,)
         # else:
             # state = self.reduce_state(state)
-        return state, {"state_original": original_state}
+        return state, {}
 
     def render(self):
         return self.env.render()

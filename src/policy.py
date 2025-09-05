@@ -8,7 +8,7 @@ import time
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from ppo import PPO
-from koopman.env_model import MarsE2cModel
+from koopman.env_model import KoopmanLinearModel
 import osqp
 import scipy.sparse as sp
 
@@ -82,7 +82,7 @@ class PPOPolicy:
 
 class ProjectionPolicy:
     def __init__(self,
-                 env: MarsE2cModel,
+                 env: KoopmanLinearModel,
                  state_space: gym.Space,
                  ori_state_space: gym.Space,
                  action_space: gym.Space,
@@ -361,7 +361,7 @@ class CBFPolicy:
     """
     def __init__(
         self,
-        env: MarsE2cModel,
+        env: KoopmanLinearModel,
         state_space: gym.Space,
         ori_state_space: gym.Space,
         action_space: gym.Space,
@@ -369,6 +369,7 @@ class CBFPolicy:
         unsafe_polys: List[np.ndarray],
         safe_polys: List[np.ndarray], 
         transform=lambda x: x,
+        gamma=0.7
     ):
         """
         Args:
@@ -396,7 +397,7 @@ class CBFPolicy:
         self.saved_state = None
         self.saved_action = None
         self.shielded = False
-        self.gamma = 0.7
+        self.gamma = gamma
         
                 # --- Placeholders for the pre-computed model and solver ---
         self.precomputed = {}
@@ -433,6 +434,7 @@ class CBFPolicy:
             for j in range(1, H_max + 1): C_list.append(C_list[-1] + A_pows[j - 1] @ c)
 
             # 2. Pre-compute face info for the current polyhedron
+            print(poly.shape)
             P_sel, b_sel = poly[:, :-1].astype(float), poly[:, -1].astype(float)
             faces = [(P_sel[i, :], float(b_sel[i])) for i in range(P_sel.shape[0])]
 
