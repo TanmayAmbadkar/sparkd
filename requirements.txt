@@ -1,0 +1,12 @@
+gymnasium==1.0.0
+imageio==2.35.0
+matplotlib==3.7.5
+numpy==1.23.3
+osqp==0.6.7.post1
+pytorch_lightning==2.4.0
+safety_gymnasium==1.0.0
+scikit_learn==1.1.2
+scipy==1.9.1
+seaborn==0.13.2
+torch==2.4.1
+torchmetrics==1.4.1
