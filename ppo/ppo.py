@@ -166,4 +166,3 @@ class PPO:
 
     def load_checkpoint(self, path):
         self.actor_critic.load_state_dict(torch.load(path, map_location=self.device))
-

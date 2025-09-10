@@ -305,8 +305,8 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     train_len = total_size - val_len
     train_dataset, val_dataset = random_split(dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=13)
-    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, num_workers=13)
+    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)
 
     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, check_val_every_n_epoch=5)
     trainer.fit(koopman_model, train_loader, val_loader)

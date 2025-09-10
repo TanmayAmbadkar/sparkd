@@ -49,8 +49,8 @@ class HumanoidEnv(gym.Env):
         # for i in range(12, 28):
         #     lower_bounds[i] = 0
         #     upper_bounds[i] = 
-        lower_bounds[22] = -2.3475
-        upper_bounds[22] = 2.3475
+        lower_bounds[22] = -1.4149
+        upper_bounds[22] = 1.4149
         
         
         
@@ -108,7 +108,7 @@ class HumanoidEnv(gym.Env):
 
     def unsafe(self, state: np.ndarray, simulated:bool = False) -> bool:
         
-        is_health = 2.3475 >= state[22] >= -2.3475
+        is_health = 1.4149 >= state[22] >= -1.4149
         # is_health = 10000 >= state[22] >= -10000
         return not is_health
 

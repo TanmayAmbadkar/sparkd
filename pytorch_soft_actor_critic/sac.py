@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from .utils import soft_update, hard_update
 from .model import GaussianPolicy, QNetwork, DeterministicPolicy
+from ppo.utils import RunningMeanStd # Assuming the RMS class is in this location
 
 
 class SAC(object):
@@ -19,6 +20,12 @@ class SAC(object):
 
         self.device = torch.device("cuda" if args.cuda else "cpu")
 
+        # --- NORMALIZATION ---
+        # Instantiate running mean-std normalizers for states and rewards
+        self.state_rms = RunningMeanStd(reward_size=num_inputs)
+        self.reward_rms = RunningMeanStd(reward_size=1)
+        # --- END NORMALIZATION ---
+
         self.critic = QNetwork(num_inputs, action_space.shape[0], args.hidden_size).to(device=self.device)
         self.critic_optim = Adam(self.critic.parameters(), lr=args.lr)
 
@@ -26,7 +33,6 @@ class SAC(object):
         hard_update(self.critic_target, self.critic)
 
         if self.policy_type == "Gaussian":
-            # Target Entropy = −dim(A) (e.g. , -6 for HalfCheetah-v2) as given in the paper
             if self.automatic_entropy_tuning is True:
                 self.target_entropy = -torch.prod(torch.Tensor(action_space.shape).to(self.device)).item()
                 self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
@@ -42,6 +48,11 @@ class SAC(object):
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
 
     def select_action(self, state, evaluate=False):
+        # --- NORMALIZATION ---
+        # Normalize the state before passing it to the policy
+        state = self.state_rms.normalize(state)
+        # --- END NORMALIZATION ---
+
         state = torch.Tensor(state).to(self.device).unsqueeze(0)
         if evaluate is False:
             action, _, _ = self.policy.sample(state)
@@ -53,10 +64,23 @@ class SAC(object):
         # Sample a batch from memory
         state_batch, action_batch, reward_batch, next_state_batch, mask_batch = memory.sample(batch_size=batch_size)
 
+        # --- NORMALIZATION ---
+        # Update the running statistics with the sampled batch
+        self.state_rms.update(state_batch)
+        self.reward_rms.update(reward_batch)
+
+        # Normalize the states and rewards from the batch
+        state_batch = self.state_rms.normalize(state_batch)
+        next_state_batch = self.state_rms.normalize(next_state_batch)
+        reward_batch = self.reward_rms.normalize(reward_batch)
+        # For added stability, clip normalized rewards
+        reward_batch = torch.from_numpy(reward_batch).float().clamp(min=-10.0, max=10.0)
+        # --- END NORMALIZATION ---
+
         state_batch = torch.Tensor(state_batch).to(self.device)
         next_state_batch = torch.Tensor(next_state_batch).to(self.device)
         action_batch = torch.Tensor(action_batch).to(self.device)
-        reward_batch = torch.Tensor(reward_batch).to(self.device).unsqueeze(1)
+        reward_batch = reward_batch.to(self.device).unsqueeze(1)
         mask_batch = torch.Tensor(mask_batch).to(self.device).unsqueeze(1)
 
         with torch.no_grad():
@@ -64,9 +88,10 @@ class SAC(object):
             qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
             min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
             next_q_value = reward_batch + mask_batch * self.gamma * (min_qf_next_target)
-        qf1, qf2 = self.critic(state_batch, action_batch)  # Two Q-functions to mitigate positive bias in the policy improvement step
-        qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-        qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+        
+        qf1, qf2 = self.critic(state_batch, action_batch)
+        qf1_loss = F.mse_loss(qf1, next_q_value)
+        qf2_loss = F.mse_loss(qf2, next_q_value)
         qf_loss = qf1_loss + qf2_loss
 
         self.critic_optim.zero_grad()
@@ -78,7 +103,7 @@ class SAC(object):
         qf1_pi, qf2_pi = self.critic(state_batch, pi)
         min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
-        policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean() # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
+        policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
         self.policy_optim.zero_grad()
         policy_loss.backward()
@@ -92,10 +117,10 @@ class SAC(object):
             self.alpha_optim.step()
 
             self.alpha = self.log_alpha.exp()
-            alpha_tlogs = self.alpha.clone() # For TensorboardX logs
+            alpha_tlogs = self.alpha.clone()
         else:
             alpha_loss = torch.tensor(0.).to(self.device)
-            alpha_tlogs = torch.tensor(self.alpha) # For TensorboardX logs
+            alpha_tlogs = torch.tensor(self.alpha)
 
 
         if updates % self.target_update_interval == 0:
@@ -103,7 +128,7 @@ class SAC(object):
 
         return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item()
 
-    # Save model parameters
+    # (Save and load checkpoint methods remain the same)
     def save_checkpoint(self, env_name, suffix="", ckpt_path=None):
         if not os.path.exists('checkpoints/'):
             os.makedirs('checkpoints/')
@@ -116,7 +141,6 @@ class SAC(object):
                     'critic_optimizer_state_dict': self.critic_optim.state_dict(),
                     'policy_optimizer_state_dict': self.policy_optim.state_dict()}, ckpt_path)
 
-    # Load model parameters
     def load_checkpoint(self, ckpt_path, evaluate=False):
         print('Loading models from {}'.format(ckpt_path))
         if ckpt_path is not None:
@@ -135,4 +159,3 @@ class SAC(object):
                 self.policy.train()
                 self.critic.train()
                 self.critic_target.train()
-

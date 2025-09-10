@@ -116,14 +116,18 @@ def get_environment_model(
 
     # 4. Evaluate and Compute Error Bound
     # Predict the full trajectory to get multi-step predictions
+
+    # Pick a random idx set for validation, where size of validation is min(100000, size of dataset)
+    
+    idx = np.random.choice(input_states.shape[0], size=min(100000, input_states.shape[0]), replace=False)
     pred_latents_traj = linear_model.predict_trajectory(
-        input_states_norm, 
-        actions
+        input_states_norm[idx], 
+        actions[idx]
     )
 
     # Get ground-truth latent states for the entire trajectory
     with torch.no_grad():
-        flat_true_states = torch.tensor(output_states_norm, dtype=torch.float32)
+        flat_true_states = torch.tensor(output_states_norm[idx], dtype=torch.float32)
         flat_true_latents = koopman_model.embedding_net(flat_true_states.view(-1, state_shape))
         true_latents_traj = flat_true_latents.view(*pred_latents_traj.shape).numpy()
     
@@ -151,8 +155,8 @@ def get_environment_model(
             final_metrics['r2_score'] = r2
 
     # Calculate robust error bound based on one-step prediction residuals
-    one_step_residuals = np.abs(pred_latents_traj[:, 0, :] - true_latents_traj[:, 1, :])
-    error_bound = np.percentile(one_step_residuals, 50, axis=0)
+    one_step_residuals = np.abs(pred_latents_traj[:, 0, :] - true_latents_traj[:, 0, :])
+    error_bound = np.percentile(one_step_residuals, 99, axis=0)
     linear_model.error_bound = error_bound
     
     print(f"\nComputed Error Bound (eps) using 99th percentile of 1-step error: {error_bound}")

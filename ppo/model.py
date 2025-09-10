@@ -3,6 +3,10 @@ import torch.nn as nn
 from torch.distributions import Normal
 import numpy as np
 
+# --- Define safe bounds for the log standard deviation ---
+LOG_STD_MIN = -20  # Prevents std from becoming zero (e^-20 is a tiny positive number)
+LOG_STD_MAX = 2    # Prevents std from becoming excessively large (e^2 is ~7.4)
+
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     """
     Initialize a linear layer with orthogonal initialization for weights
@@ -83,8 +87,13 @@ class ActorCritic(nn.Module):
             torch.distributions.Normal: The action distribution.
         """
         action_mean = self.actor_mean(state)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
+        
+        # --- MODIFICATION FOR STABILITY ---
+        # Clamp the log_std to prevent it from becoming too large or small
+        clamped_logstd = torch.clamp(self.actor_logstd, LOG_STD_MIN, LOG_STD_MAX)
+        action_std = torch.exp(clamped_logstd)
+        # --- END MODIFICATION ---
+
         return Normal(action_mean, action_std)
 
     def act(self, state):
@@ -95,19 +104,11 @@ class ActorCritic(nn.Module):
             state (torch.Tensor): The input state.
 
         Returns:
-            tuple: A tuple containing the action, its log probability, and its entropy.
+            tuple: A tuple containing the action and its log probability.
         """
         dist = self.get_policy(state)
         action = dist.sample()
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        entropy = dist.entropy().sum(-1, keepdim=True)
-
-        # Clip the action to the valid range of the environment's action space
-        # action = torch.clamp(
-        #     action,
-        #     torch.tensor(self.action_space.low, dtype=torch.float32, device=action.device),
-        #     torch.tensor(self.action_space.high, dtype=torch.float32, device=action.device)
-        # )
         return action, log_prob
 
     def evaluate(self, state, action):
