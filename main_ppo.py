@@ -239,7 +239,7 @@ def main(args):
             t = 0
 
             for episode_num in range(episodes):
-                record_video = i_episode % 100 == 0  # Record every alternate episode (example condition)
+                record_video = i_episode % 50 == 0  # Record every alternate episode (example condition)
                 custom_filename = f"runs_new/{name}/videos/episode_{i_episode}.mp4"
 
                 # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
@@ -356,7 +356,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--mini_batch_size', type=int, default=256)
     parser.add_argument('--num_steps', type=int, default=200000)
-    parser.add_argument('--hidden_size', type=int, default=256)
+    parser.add_argument('--hidden_size', type=int, default=512)
     parser.add_argument('--replay_size', type=int, default=5000000)
     parser.add_argument('--start_steps', type=int, default=10000)
     parser.add_argument('--cuda', action="store_true", default=False)

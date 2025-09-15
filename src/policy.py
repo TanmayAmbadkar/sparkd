@@ -441,7 +441,7 @@ class CBFPolicy:
             def rel_degree(p: np.ndarray) -> Optional[int]:
                 M = B.copy()
                 for r in range(1, H_max + 1):
-                    if np.linalg.norm(p @ M, ord=np.inf) > 1e-10: return r
+                    if np.linalg.norm(p @ M, ord=np.inf) > 1e-4: return r
                     M = A @ M
                 return None
 
