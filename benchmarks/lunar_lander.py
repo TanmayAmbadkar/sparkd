@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety, verification
 import sys
 
 class LunarLanderEnv(gym.Env):
@@ -55,22 +55,22 @@ class LunarLanderEnv(gym.Env):
         upper_bounds[3] = 1.5
 
                    
-        input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
-        polys = input_deeppoly_domain.to_hyperplanes(self.env.observation_space)
+        input_Box_domain = safety.Box(lower_bounds, upper_bounds)
+        polys = input_Box_domain.to_hyperplanes(self.env.observation_space)
         
         print("NUMBER OF SAFE POLYS", len(polys[0]))
 
-        # Set the safety constraints using the DeepPolyDomain and the polys
-        self.safety = input_deeppoly_domain
-        self.original_safety = input_deeppoly_domain
+        # Set the safety constraints using the BoxDomain and the polys
+        self.safety = input_Box_domain
+        self.original_safety = input_Box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
       
     def unsafe_constraints(self):
         
-        # unsafe_deeppolys = domains.recover_safe_region(domains.DeepPoly(self.observation_space.low, self.observation_space.high), [self.original_safety])        
+        # unsafe_Boxs = domains.recover_safe_region(domains.Box(self.observation_space.low, self.observation_space.high), [self.original_safety])        
         # self.polys = []
-        # self.unsafe_domains = unsafe_deeppolys
+        # self.unsafe_domains = unsafe_Boxs
         # self.polys = self.safety.invert_polytope()
         self.polys = self.safety.invert_polytope(self.env.observation_space)
         

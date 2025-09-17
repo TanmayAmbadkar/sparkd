@@ -8,7 +8,6 @@ import time
 from src.replay_memory import ReplayMemory
 from ppo import PPO
 from cpo import CPO, PCRPO, CUP, P3O
-from koopman.env_model import MarsE2cModel
 import osqp
 import scipy.sparse as sp
 

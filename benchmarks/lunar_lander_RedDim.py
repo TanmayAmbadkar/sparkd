@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety, verification
 import sys 
 
 class LunarLanderEnv2(gym.Env):
@@ -59,7 +59,7 @@ class LunarLanderEnv2(gym.Env):
                 generators.append(gen)
 
         # Create the zonotope
-        input_zonotope = domains.Zonotope(center, generators)
+        input_zonotope = safety.Zonotope(center, generators)
 
         polys = []
         print("Final Zonotope details")
@@ -94,7 +94,7 @@ class LunarLanderEnv2(gym.Env):
         # generators.append(vy_gen)
 
         # Create the zonotope
-        input_zonotope = domains.Zonotope(center, generators)
+        input_zonotope = safety.Zonotope(center, generators)
 
         polys = []
         print("Final Zonotope details")

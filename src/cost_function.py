@@ -5,13 +5,13 @@ import scipy
 import torch
 import time
 
-from koopman.env_model import MarsE2cModel # Assuming this is your model definition
+from koopman.env_model import KoopmanLinearModel  # Assuming this is your model definition
 import osqp
 import scipy.sparse as sp
 
 class CostFunction:
     def __init__(self,
-                 env: MarsE2cModel,
+                 env: KoopmanLinearModel,
                  state_space: gym.Space,
                  ori_state_space: gym.Space,
                  action_space: gym.Space,

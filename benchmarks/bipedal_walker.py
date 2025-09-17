@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety, verification
 import sys
 from benchmarks.utils import *
 
@@ -96,12 +96,12 @@ class BipedalWalkerEnv(gym.Env):
         # Construct the polyhedra constraints (polys)
         
            
-        input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
-        polys = input_deeppoly_domain.to_hyperplanes(self.env.observation_space)
+        input_Box_domain = safety.Box(lower_bounds, upper_bounds)
+        polys = input_Box_domain.to_hyperplanes(self.env.observation_space)
         
-        # Set the safety constraints using the DeepPolyDomain and the polys
-        self.safety = input_deeppoly_domain
-        self.original_safety = input_deeppoly_domain
+        # Set the safety constraints using the BoxDomain and the polys
+        self.safety = input_Box_domain
+        self.original_safety = input_Box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
         print(self.original_safety)

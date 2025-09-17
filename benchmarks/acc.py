@@ -1,7 +1,7 @@
 import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
-from abstract_interpretation import domains
+from constraints import safety
 
 class AccEnv(gym.Env):
 
@@ -34,7 +34,7 @@ class AccEnv(gym.Env):
             np.array([[1.0, 0.0, 0.01]])
         ]
 
-        self.safety = domains.DeepPoly(
+        self.safety = safety.Box(
                 np.array([-10, -10]),
                 np.array([-0.01, 10])
         )

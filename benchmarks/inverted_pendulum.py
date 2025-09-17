@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety, verification
 
 class InvertedPendulumEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
@@ -90,14 +90,14 @@ class InvertedPendulumEnv(gym.Env):
             polys.append(np.append(A2, lower_bounds[i]))
             generators[i][i] = (upper_bounds[i] - lower_bounds[i]) / 2
 
-        # Set the safety constraints using the DeepPoly domain
-        # input_deeppoly = domains.DeepPoly(lower_bounds, upper_bounds)
-        input_deeppoly = domains.Zonotope(center, generators)
+        # Set the safety constraints using the Box domain
+        # input_Box = domains.Box(lower_bounds, upper_bounds)
+        input_Box = safety.Zonotope(center, generators)
 
         self.original_safe_polys = [np.array(polys)]
         self.safe_polys = [np.array(polys)]
-        self.safety = input_deeppoly
-        self.original_safety = input_deeppoly
+        self.safety = input_Box
+        self.original_safety = input_Box
 
 
 

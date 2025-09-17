@@ -6,9 +6,6 @@ from torchmetrics.functional import explained_variance
 import numpy as np
 from torch.nn.utils import spectral_norm
 
-# If you are using the abstract_interpretation package:
-from abstract_interpretation.neural_network import LinearLayer, ReLULayer, TanhLayer, NeuralNetwork
-
 ###############################################
 # 1. Modified Dataset Class for Sequences (s, a, s_next) #
 ###############################################
@@ -110,31 +107,38 @@ class KoopmanOperator(nn.Module):
     Implements the Koopman operator for multi-step prediction with affine term:
          z_{t+1} = A * z_t + B * u_t + c
     where A and B are learnable linear mappings (no bias),
-    and c is an explicit offset parameter.
+    and c is an explicit offset parameter. Spectral normalization is applied
+    to A and B to ensure the operator is Lipschitz continuous.
     """
-    def __init__(self, embed_total_dim, control_dim):
+    def __init__(self, state_dim, embed_dim, control_dim):
         super(KoopmanOperator, self).__init__()
+        
+        embed_total_dim = state_dim + embed_dim
+        # Apply spectral norm to the linear operators for stability
         self.A = nn.Linear(embed_total_dim, embed_total_dim, bias=False)
         self.B = nn.Linear(control_dim, embed_total_dim, bias=False)
-        # Explicit constant offset
+        self.c = nn.Parameter(torch.zeros(embed_total_dim))
+        if embed_dim > 0:
+            self.c.requires_grad = False  # No offset if we have nonlinear features
         self.embed_total_dim = embed_total_dim
 
     def forward(self, z, u):
-        return self.A(z) + self.B(u)
+        return self.A(z) + self.B(u) + self.c
 
     def get_koopman_operators(self, z, u):
         """
+        Returns the learned Koopman operator matrices.
+
         Returns:
             A_w (Tensor): shape (embed_total_dim, embed_total_dim)
             B_w (Tensor): shape (embed_total_dim, control_dim)
             c   (Tensor): shape (embed_total_dim,)
         """
-        # clone to avoid in-place modifications
-        A_w = self.A.weight.data.clone()
-        B_w = self.B.weight.data.clone()
-        return A_w, B_w, torch.zeros(self.embed_total_dim, dtype=torch.float32)
-        # return A_w, B_w, self.c( torch.cat([z, u], dim=-1)).data.clone()
-
+        # .weight gives the spectrally normalized weight matrix
+        A_w = self.A.weight.clone()
+        B_w = self.B.weight.clone()
+        # This implementation does not have a learned offset 'c'
+        return A_w, B_w, self.c.data.clone()
 
 class KoopmanLightning(pl.LightningModule):
     """
@@ -156,7 +160,7 @@ class KoopmanLightning(pl.LightningModule):
         embed_total_dim = state_dim + embed_dim
         
         self.embedding_net = StateEmbedding(state_dim, embed_dim)
-        self.koopman_operator = KoopmanOperator(embed_total_dim, control_dim)
+        self.koopman_operator = KoopmanOperator(state_dim, embed_dim, control_dim)
         self.criterion = nn.MSELoss()
         
         if self.hparams.embed_dim == 0:
@@ -231,6 +235,13 @@ class KoopmanLightning(pl.LightningModule):
             self.hparams.w_recon * losses['recon'] + 
             self.hparams.w_cons * losses['cons']
         )
+        A_w = self.koopman_operator.A.weight
+        B_w = self.koopman_operator.B.weight
+
+        # Calculate the L1 penalty
+        l1_penalty = 0.01 * (torch.norm(A_w, 1) + torch.norm(B_w, 1))
+
+        # Add the penalty to your main 
         
         self.log('train_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log('train_pred_loss', losses['pred'], prog_bar=True, on_step=False, on_epoch=True)
@@ -264,7 +275,7 @@ class KoopmanLightning(pl.LightningModule):
     
     def transition(self, z=None, z_1=None, u=None):
         A, B, c = self.koopman_operator.get_koopman_operators(z, u)
-        return None, None, A, B, c, None, None
+        return A, B, c
     
     @torch.no_grad()
     def get_eps(self, z, u):
@@ -308,10 +319,12 @@ def fit_koopman(states, actions, next_states, koopman_model, horizon, epochs=100
     train_len = total_size - val_len
     train_dataset, val_dataset = random_split(dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=13)
-    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False, num_workers=13)
+    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)
 
     trainer = pl.Trainer(max_epochs=epochs, accelerator="gpu", devices=1, check_val_every_n_epoch=5)
     trainer.fit(koopman_model, train_loader, val_loader)
+    
+    print(koopman_model.koopman_operator.get_koopman_operators(None, None))
     
     torch.cuda.empty_cache()

@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from abstract_interpretation import domains, verification
+from constraints import safety, verification
 import sys
 
 class SimulatedEnv(gym.Env):

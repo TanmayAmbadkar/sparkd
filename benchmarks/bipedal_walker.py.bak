@@ -83,13 +83,13 @@ class BipedalWalkerEnv(gym.Env):
             generators[i][i] = (upper_bounds[i] - lower_bounds[i])/2
             
 
-        # Create the DeepPolyDomain using the derived lower and upper bounds
-        # input_deeppoly_domain = domains.DeepPoly(lower_bounds, upper_bounds)
-        input_deeppoly_domain = domains.Zonotope(center, generators)
+        # Create the BoxDomain using the derived lower and upper bounds
+        # input_Box_domain = domains.Box(lower_bounds, upper_bounds)
+        input_Box_domain = domains.Zonotope(center, generators)
 
-        # Set the safety constraints using the DeepPolyDomain and the polys
-        self.safety = input_deeppoly_domain
-        self.original_safety = input_deeppoly_domain
+        # Set the safety constraints using the BoxDomain and the polys
+        self.safety = input_Box_domain
+        self.original_safety = input_Box_domain
         self.safe_polys = [np.array(polys)]
         self.original_safe_polys = [np.array(polys)]
 
