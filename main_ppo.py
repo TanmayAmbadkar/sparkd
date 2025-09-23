@@ -33,19 +33,19 @@ def main(args):
     hyperparams = vars(args)
 
     # Tensorboard
-    if not os.path.exists("runs_new"):
-        os.makedirs("runs_new")
+    if not os.path.exists("ablations_final"):
+        os.makedirs("ablations_final")
         
-    name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_PPO_{args.env_name}_H{args.horizon}_D{args.red_dim}_G{args.gamma}_S{args.seed}{'_safe' if not args.no_safety else ''}"
-    writer = SummaryWriter(f'runs_new/{name}')
+    name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_PPO_{args.env_name}_H{args.horizon}_D{args.red_dim}_G{args.cbf_gamma}_S{args.seed}_P{args.percentile}{'_safe' if not args.no_safety else ''}"
+    writer = SummaryWriter(f'ablations_final/{name}')
 
     print(hyperparams)
     if not os.path.exists("logs_ppo"):
         os.makedirs("logs_ppo")
 
-    file = open(f'runs_new/{name}/log.txt', "w+")
-    os.makedirs(f'runs_new/{name}/videos')
-    # env = gym.wrappers.RecordVideo(env, f"runs_new/{name}/videos")
+    file = open(f'ablations_final/{name}/log.txt', "w+")
+    os.makedirs(f'ablations_final/{name}/videos')
+    # env = gym.wrappers.RecordVideo(env, f"ablations_final/{name}/videos")
 
     # PPO agent setup
 
@@ -174,7 +174,7 @@ def main(args):
                 epochs = 200
 
             env_model, ev_score, r2_score, mean, std = get_environment_model(
-                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
+                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs, percentile=args.percentile)
             
             writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
             writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)
@@ -240,7 +240,7 @@ def main(args):
 
             for episode_num in range(episodes):
                 record_video = i_episode % 50 == 0  # Record every alternate episode (example condition)
-                custom_filename = f"runs_new/{name}/videos/episode_{i_episode}.mp4"
+                custom_filename = f"ablations_final/{name}/videos/episode_{i_episode}.mp4"
 
                 # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
                 
@@ -356,7 +356,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--mini_batch_size', type=int, default=256)
     parser.add_argument('--num_steps', type=int, default=200000)
-    parser.add_argument('--hidden_size', type=int, default=512)
+    parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--replay_size', type=int, default=5000000)
     parser.add_argument('--start_steps', type=int, default=10000)
     parser.add_argument('--cuda', action="store_true", default=False)
@@ -365,6 +365,7 @@ if __name__ == "__main__":
     parser.add_argument('--red_dim', type=int, default = 20)
     parser.add_argument('--no_safety', default=False, action='store_true')
     parser.add_argument('--render', default=False, action='store_true')
+    parser.add_argument('--percentile', default=99, type=int)
 
     args = parser.parse_args()
     
