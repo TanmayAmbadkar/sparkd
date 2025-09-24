@@ -146,4 +146,5 @@ test*.py
 *.png
 trajectories.pkl
 
+ablation*
 runs*
