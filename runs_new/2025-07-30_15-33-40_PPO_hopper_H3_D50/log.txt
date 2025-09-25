@@ -1,4 +1,0 @@
-Total unsafe real: 246 / 8819
-Total unsafe sim: 0 / 0
-Total unsafe Test: 24 / 881
-Using SPICE: True
