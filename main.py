@@ -9,6 +9,7 @@ from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from benchmarks import envs
 from src.env_model import get_environment_model
 from src.policy import Shield, SACPolicy, ProjectionPolicy, CSCShield
+import traceback
 
 
 parser = argparse.ArgumentParser(description='SPICE Args')
@@ -93,7 +94,7 @@ for i_episode in itertools.count(1):
     done = False
     state = env.reset()
 
-    if (i_episode // 10) % 8 == 0:
+    if (i_episode // 10) % 8 == 0 or args.neural_safety:
         print(i_episode, ": Real data")
         tmp_buffer = []
         real_buffer = []
@@ -129,7 +130,7 @@ for i_episode in itertools.count(1):
             cost = 0
             if env.unsafe(next_state):
                 total_unsafe_episodes += 1
-                episode_reward -= 1000
+                episode_reward -= 100
                 print("UNSAFE (outside testing)")
                 done = True
                 cost = 1
@@ -257,7 +258,7 @@ for i_episode in itertools.count(1):
           .format(i_episode, total_numsteps,
                   episode_steps, round(episode_reward, 2)))
 
-    if i_episode % 1 == 0 and args.eval is True and \
+    if i_episode % 20 == 0 and args.eval is True and \
             safe_agent is not None:
         print("starting testing...")
         avg_reward = 0.
@@ -300,6 +301,7 @@ for i_episode in itertools.count(1):
                         safe_agent.reset_count()
                     except Exception as e:
                         print(e)
+                        print(traceback.format_exc())
                         pass
                     break
                 state = next_state
@@ -318,6 +320,7 @@ for i_episode in itertools.count(1):
 
             writer.add_scalar('avg_reward/test', avg_reward, total_numsteps)
             writer.add_scalar('agent/unsafe_episodes', total_unsafe_episodes_test, total_numsteps)
+            writer.add_scalar('agent/unsafe_episodes_train', total_unsafe_episodes, total_numsteps)
             # writer.add_scalar('agent/shield', s, i_episode)
             # writer.add_scalar('agent/neural', a, i_episode)
 

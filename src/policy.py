@@ -351,7 +351,7 @@ class CSCShield:
         return best_action.detach().numpy()
 
     def report(self) -> Tuple[int, int]:
-        return 0, 0
+        return 1, 0, 0, 1
 
     def reset_count(self):
         pass

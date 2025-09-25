@@ -42,5 +42,8 @@ def get_env_from_name(name):
     if name == 'cheetah':
         from .cheetah import CheetahEnv
         return CheetahEnv()
+    if name == 'ant':
+        from .ant import AntEnv
+        return AntEnv()
     else:
         raise RuntimeError("Unkonwn environment: " + name)
