@@ -11,11 +11,12 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.env = gym.make("SafetyPointGoal1-v0", render_mode = "rgb_array")
         self.action_space = self.env.action_space
         
-        self.observation_space = gymnasium.spaces.Box(
-            low=np.nan_to_num(self.env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333),
-            high=np.nan_to_num(self.env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333),
-            dtype=np.float32
-        )
+        # self.observation_space = gymnasium.spaces.Box(
+        #     low=np.nan_to_num(self.env.observation_space.low, nan=-9999, posinf=33333333, neginf=-33333333),
+        #     high=np.nan_to_num(self.env.observation_space.high, nan=-9999, posinf=33333333, neginf=-33333333),
+        #     dtype=np.float32
+        # )
+        self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
 
 #[-5,   -19,  -9.82, -0.8, -0.2,  -0.1, -0.1, 0.1, -3.,  -0.5, -0.52, -0.1, ]
 #[-2.69 -2.73  9.81  -0.06 -0.04  0.    0.    0.    2.23  0.5  -0.04  0.
@@ -29,16 +30,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.done = False  
         self.safe_polys = []
         self.polys = []
-        
-        self.MIN = np.array([-100, -100, -100, -100, -100, -100, -100, -100, -100, -100,
-                -100, -0.1, 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-                0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
-
-        self.MAX = np.concatenate((np.array([5, 19, 9.82, 0.8, 0.2, 0.1, 0.1, 0.1, 3., 0.5,
-                0.52, 0.1, ]), np.ones(48)))
+       
 
         self.safety_constraints()
         self.unsafe_constraints()
@@ -76,6 +68,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
             upper_bounds[i] = 0.9
             
         
+        self.lower_bounds = lower_bounds
+        self.upper_bounds = upper_bounds
         
         input_box_domain = safety.Box(lower_bounds, upper_bounds)
         polys = input_box_domain.to_hyperplanes()
@@ -85,14 +79,11 @@ class SafetyPointGoalEnv(gymnasium.Env):
         self.original_safety = input_box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
-        print(self.original_safety)
         # print(self.observation_space)
         
     def unsafe_constraints(self):
         
         self.polys = self.safety.invert_polytope(self.env.observation_space)
-        print(len(self.polys))
-            
         
     def step(self, action):
         
@@ -112,7 +103,7 @@ class SafetyPointGoalEnv(gymnasium.Env):
             
         return state, {}
 
-    def render(self, mode='human'):
+    def render(self):
         return self.env.render()
 
     def close(self):
@@ -129,27 +120,8 @@ class SafetyPointGoalEnv(gymnasium.Env):
 
     def unsafe(self, state: np.ndarray, simulated:bool = False) -> bool:
         
-        if simulated:
-            
-            truth = []
-            for polys in self.safe_polys:
-                
-                A = polys[:,:-1]
-                b = -polys[:,-1]
-                
-                truth.append(not np.all(A @ state.reshape(-1, 1) <= b.reshape(-1, 1)))
-            return all(truth)
-        else:
-            truth = []
-            for polys in self.original_safe_polys:
-                
-                A = polys[:,:-1]
-                b = -polys[:,-1]
-                # print(A @ state.reshape(-1, 1) <= b.reshape(-1, 1))
-                temp_indices = list(range(12,60)) + (list(range(72,120)))
-                truth.append(not np.all((A @ state.reshape(-1, 1) <= b.reshape(-1, 1))[temp_indices]))
-            
-            return all(truth)
-    
+        
+        healthy = np.all(state >= self.lower_bounds) and np.all(state <= self.upper_bounds)
+        return not healthy
 
 

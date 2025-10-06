@@ -69,6 +69,20 @@ class KoopmanLinearModel:
         return "KoopmanLinearModel"
 
 
+class FixedLinearModel:
+    def __init__(self, A: np.ndarray, B: np.ndarray, c: np.ndarray, eps: np.ndarray):
+        self.A = A
+        self.B = B
+        self.c = c
+        self.eps = eps
+        self.s_dim = A.shape[0]
+        self.original_s_dim = A.shape[0]
+    
+    def get_matrix_at_point(self, point: np.ndarray, s_dim: int, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        M = np.hstack((self.A, self.B, self.c))
+        return M, self.eps
+
+
 def get_environment_model(
     input_states: np.ndarray,
     actions: np.ndarray,

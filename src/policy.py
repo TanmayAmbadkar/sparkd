@@ -1,6 +1,6 @@
 import gymnasium as gym
 import numpy as np
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 import scipy
 import torch
 import time
@@ -8,7 +8,7 @@ import time
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from ppo import PPO
-from koopman.env_model import KoopmanLinearModel
+from koopman.env_model import KoopmanLinearModel, FixedLinearModel
 import osqp
 import scipy.sparse as sp
 
@@ -69,7 +69,7 @@ class PPOPolicy:
         self.memory.push(state, action, reward, next_state, done, cost)
 
     def train(self):
-        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 10)
+        ret = self.agent.update_parameters(self.memory, batch_size=self.minibatch_size, epochs = 40)
         self.updates += 1
         return ret
 
@@ -84,22 +84,217 @@ class ProjectionPolicy:
     def __init__(self,
                  env: KoopmanLinearModel,
                  state_space: gym.Space,
-                 ori_state_space: gym.Space,
                  action_space: gym.Space,
                  horizon: int,
                  unsafe_polys: List[np.ndarray],
-                 safe_polys: List[np.ndarray], 
+                 safe_polys: List[np.ndarray],
                  transform=lambda x: x):
         self.env = env
         self.horizon = horizon
         self.state_space = state_space
-        self.ori_state_space = ori_state_space
         self.action_space = action_space
         self.unsafe_polys = unsafe_polys
         self.safe_polys = safe_polys
         self.transform = transform
+        self.s_dim = self.state_space.shape[0]
+        self.u_dim = self.action_space.shape[0]
 
+        # --- NEW: Attributes for pre-computation cache ---
+        self._A, self._B, self._c, self._eps = None, None, None, None
+        self._precomputed_F = {}
+        self._precomputed_h_const = {}
+        self._precomputed_M = {}
+        
+        # --- NEW: Attributes for stateful call optimization ---
+        self.saved_state = None
+        self.saved_action = None
+        self.shielded = None
+
+    def update_model(self):
+        """
+        Pre-computes and caches all state-independent matrices for the QP.
+
+        This is the main optimization. This method performs the expensive,
+        iterative matrix propagations once and stores the results. The `solve`
+        method can then run much faster by reusing these cached matrices.
+
+        Call this method whenever the underlying linear dynamics model changes.
+
+        Args:
+            A: State transition matrix from the linearization.
+            B: Control matrix from the linearization.
+            c: Constant offset vector from the linearization.
+            eps: Error bounds from the linearization.
+        """
+        print("Pre-computing safety projection matrices...")
+        mat_dyn, eps = self.env.get_matrix_at_point(None, self.s_dim)
+        A, B, c = mat_dyn[:, :self.s_dim], mat_dyn[:, self.s_dim:-1], mat_dyn[:, -1]
+        self._A, self._B, self._c = A, B, c
+        self._eps = np.full(self.s_dim, float(eps)) if np.isscalar(eps) else np.asarray(eps, float).reshape(-1,)
+        s_dim = self.state_space.shape[0]
+        u_dim = self.action_space.shape[0]
+
+        # Clear old cache
+        self._precomputed_F.clear()
+        self._precomputed_h_const.clear()
+        self._precomputed_M.clear()
+
+        # Pre-compute for each safe polytope
+        for poly_idx, poly in enumerate(self.safe_polys):
+            P_poly, b_poly = poly[:, :-1], poly[:, -1]
+
+            # --- Pre-compute F and h_const (state-independent parts) ---
+            F = []
+            h_const = []
+            for j in range(1, self.horizon + 1):
+                F.append([None] * (j + 1))
+                h_const.append([None] * (j + 1))
+                F[j - 1][j] = P_poly
+                h_const[j - 1][j] = b_poly
+                for t in range(j - 1, -1, -1):
+                    F[j - 1][t] = np.dot(F[j - 1][t + 1], self._A)
+                    epsmax = np.dot(np.abs(F[j - 1][t + 1]), self._eps)
+                    h_const[j - 1][t] = np.dot(F[j - 1][t + 1], self._c) + h_const[j - 1][t + 1] + epsmax
+            
+            self._precomputed_F[poly_idx] = F
+            self._precomputed_h_const[poly_idx] = h_const
+
+            # --- Pre-compute G and M (also state-independent) ---
+            G = []
+            for j in range(1, self.horizon + 1):
+                G.append([None] * (j + 1))
+                G[j - 1][j] = np.zeros((b_poly.shape[0], u_dim))
+                for t in range(j - 1, -1, -1):
+                    G[j - 1][t] = np.dot(F[j - 1][t + 1], self._B)
+            
+            total_vars = self.horizon * u_dim
+            n_safety_constraints = self.horizon * P_poly.shape[0]
+            M = np.zeros((n_safety_constraints, total_vars))
+            ind = 0
+            step = P_poly.shape[0]
+            for j in range(self.horizon):
+                G[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
+                M[ind:ind + step, :] = np.concatenate(G[j][:-1], axis=1)
+                ind += step
+            
+            self._precomputed_M[poly_idx] = M
+        print("Pre-computation complete.")
+
+
+    def solve(self, state: np.ndarray,
+              action: Optional[np.ndarray] = None) -> Tuple[np.ndarray, bool]:
+        """
+        Solves the safety projection QP using pre-computed matrices.
+        """
+        original_state = state.copy()
+        shielded = True
+        u_dim = self.action_space.shape[0]
+        state = self.transform(state.reshape(1, -1)).reshape(-1,)
+        if action is None:
+            action = np.zeros(u_dim)
+            
+        if self._A is None:
+            raise RuntimeError("Must call .update() before .solve() to pre-compute matrices.")
+
+        best_score = np.inf
+        best_u0 = None
+
+        for poly_idx, poly in enumerate(self.safe_polys):
+            P_poly, b_poly = poly[:, :-1], poly[:, -1]
+            
+            if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
+                continue
+            
+            # --- Retrieve pre-computed matrices ---
+            F = self._precomputed_F[poly_idx]
+            h_const = self._precomputed_h_const[poly_idx]
+            M_safety = self._precomputed_M[poly_idx]
+
+            # --- Assemble full QP constraint matrix M ---
+            n_action_constraints = 2 * self.horizon * u_dim
+            n_constraints = M_safety.shape[0] + n_action_constraints
+            total_vars = self.horizon * u_dim
+            
+            M = np.zeros((n_constraints, total_vars))
+            M[:M_safety.shape[0], :] = M_safety
+            
+            # Add action bounds constraints to M
+            action_eye = np.eye(total_vars)
+            M[M_safety.shape[0]:M_safety.shape[0] + total_vars, :] = action_eye
+            M[M_safety.shape[0] + total_vars:, :] = -action_eye
+            
+            # --- Calculate the state-dependent bias vector ---
+            bias = np.zeros(n_constraints)
+            ind = 0
+            step = P_poly.shape[0]
+            for j in range(self.horizon):
+                bias[ind:ind+step] = h_const[j][0] + np.dot(F[j][0], state)
+                ind += step
+            
+            bias[ind:ind+total_vars] = -np.tile(self.action_space.high, self.horizon)
+            bias[ind+total_vars:] = np.tile(self.action_space.low, self.horizon)
+
+            # --- LP Feasibility Check (Identical logic, but faster setup) ---
+            fixed_total = (self.horizon - 1) * u_dim
+            M_first = M[:, :u_dim]
+            M_rest = M[:, u_dim:]
+            new_bias = bias + M_first @ action
+
+            res_lp = scipy.optimize.linprog(c=np.zeros(fixed_total),
+                                            A_ub=M_rest,
+                                            b_ub=-new_bias,
+                                            method='highs',
+                                            bounds=(self.action_space.low[0], self.action_space.high[0]))
+            fixed_feasible = res_lp.success
+
+            if fixed_feasible:
+                candidate_u0 = action.copy()
+                candidate_score = 0.0
+                shielded = False
+            else:
+                # --- Full-QP optimization (Identical logic) ---
+                P_full = 1e-6 * np.eye(total_vars)
+                P_full[:u_dim, :u_dim] = np.eye(u_dim)
+                q_full = np.zeros(total_vars)
+                q_full[:u_dim] = -action
+                
+                full_solver = osqp.OSQP()
+                full_solver.setup(P=sp.csc_matrix(P_full), q=q_full,
+                                  A=sp.csc_matrix(M), l=-np.inf * np.ones_like(bias), u=-bias,
+                                  verbose=False)
+                
+                res_full = full_solver.solve()
+                if res_full.info.status != 'solved':
+                    continue
+                candidate_u0 = res_full.x[:u_dim]
+                candidate_score = np.linalg.norm(candidate_u0 - action)
+
+            if candidate_score < best_score:
+                best_score = candidate_score
+                best_u0 = candidate_u0
+
+        if best_u0 is None:
+            best_u0 = self.backup(original_state)
+            shielded = False # Backup implies the original action was unsafe/infeasible
+
+        self.saved_state = original_state
+        self.saved_action = best_u0
+        self.shielded = shielded
+        return best_u0, shielded
     
+    # The __call__, unsafe, and backup methods remain unchanged
+    # ... (Copy the __call__, unsafe, and backup methods from your original code here) ...
+    def __call__(self, state: np.ndarray) -> np.ndarray:
+        if self.saved_state is not None and np.allclose(state, self.saved_state):
+            return self.saved_action, self.shielded
+        return self.solve(state)
+
+    def unsafe(self,
+               state: np.ndarray,
+               action: np.ndarray) -> bool:
+        res = self.solve(state, action=action)[0]
+        return not np.allclose(res, action)
+
     def backup(self, state: np.ndarray, epsilon: float = 0.1) -> np.ndarray:
         """
         Chooses a backup action by finding a smooth control sequence that pushes
@@ -157,9 +352,8 @@ class ProjectionPolicy:
         # Get linearization and compute the linear part of the cost vector `m`
         # (Identical to your original code)
         point = np.concatenate((z, np.zeros(u_dim)))
-        mat, _ = self.env.get_matrix_at_point(point, s_dim)
-        A_lin = mat[:, :s_dim]
-        B_lin = mat[:, s_dim:-1]
+        A_lin = self._A
+        B_lin = self._B
         
         m = np.zeros(total_control_dim)
         for i in range(self.horizon):
@@ -194,160 +388,7 @@ class ProjectionPolicy:
         else:
             print("WARN: Backup QP failed to find a smooth action. Returning zero action.")
             return np.zeros(u_dim)
-    
 
-    def solve(self, state: np.ndarray,
-          action: Optional[np.ndarray] = None,
-          debug: bool = False) -> Tuple[np.ndarray, bool]:
-        original_state = state.copy()
-        shielded = True
-        s_dim = self.state_space.shape[0]
-        u_dim = self.action_space.shape[0]
-        state = self.transform(state.reshape(1, -1)).reshape(-1,)
-        if action is None:
-            action = np.zeros(u_dim)
-
-        # get linearization at (state, action)
-        mat_dyn, eps = self.env.get_matrix_at_point(np.concatenate((state, action)), s_dim)
-        A = mat_dyn[:, :s_dim]
-        B = mat_dyn[:, s_dim:-1]
-        c = mat_dyn[:, -1]
-
-        best_score = np.inf
-        best_u0 = None
-
-        for poly in self.safe_polys:
-            P_poly = poly[:, :-1]
-            b_poly = poly[:, -1]
-            
-            # Skip if the current state is not in the safe polytope.
-            if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
-                continue
-                
-            # === Build safety constraints over the horizon ===
-            # ... (This part of the code remains identical) ...
-            F = []
-            G = []
-            h = []
-            for j in range(1, self.horizon + 1):
-                F.append([None] * (j + 1))
-                G.append([None] * (j + 1))
-                h.append([None] * (j + 1))
-                F[j-1][j] = P_poly
-                G[j-1][j] = np.zeros((b_poly.shape[0], u_dim))
-                h[j-1][j] = b_poly
-                for t in range(j - 1, -1, -1):
-                    F[j-1][t] = np.dot(F[j-1][t+1], A)
-                    G[j-1][t] = np.dot(F[j-1][t+1], B)
-                    epsmax = np.dot(np.abs(F[j-1][t+1]), eps)
-                    h[j-1][t] = np.dot(F[j-1][t+1], c) + h[j-1][t+1] + epsmax
-            
-
-            # === Assemble the full QP constraints ===
-            # ... (This part of the code also remains identical) ...
-            n_constraints = self.horizon * P_poly.shape[0] + 2 * self.horizon * u_dim
-            total_vars = self.horizon * u_dim
-            M = np.zeros((n_constraints, total_vars))
-            bias = np.zeros(n_constraints)
-            ind = 0
-            step = P_poly.shape[0]
-            for j in range(self.horizon):
-                G[j] += [np.zeros((P_poly.shape[0], u_dim))] * (self.horizon - j - 1)
-                M[ind:ind+step, :] = np.concatenate(G[j][:-1], axis=1)
-                bias[ind:ind+step] = h[j][0] + np.dot(F[j][0], state)
-                ind += step
-            ind2 = 0
-            for j in range(self.horizon):
-                M[ind:ind+u_dim, ind2:ind2+u_dim] = np.eye(u_dim)
-                bias[ind:ind+u_dim] = -self.action_space.high
-                ind += u_dim
-                M[ind:ind+u_dim, ind2:ind2+u_dim] = -np.eye(u_dim)
-                bias[ind:ind+u_dim] = self.action_space.low
-                ind += u_dim
-                ind2 += u_dim
-
-            ### START OF REPLACEMENT ###
-            # --- LP Feasibility Check: u1..u_{H-1} ---
-            # We replace the Fixed-QP with a more efficient LP feasibility check.
-            fixed_total = (self.horizon - 1) * u_dim
-            M_first = M[:, :u_dim]
-            M_rest = M[:, u_dim:]
-            # The constraints are M_rest @ u_rest + (bias + M_first @ u0) <= 0
-            # which is M_rest @ u_rest <= - (bias + M_first @ u0)
-            new_bias = bias + M_first @ action
-
-            # For a feasibility LP, the cost vector 'c' is all zeros.
-            c_lp = np.zeros(fixed_total)
-            
-            # The constraints are A_ub @ x <= b_ub
-            A_ub_lp = M_rest
-            b_ub_lp = -new_bias
-
-            # Solve the LP. We only care if it terminated successfully, which
-            # indicates that a feasible solution was found.
-            # The 'highs' method is the current default and is very efficient.
-            res_lp = scipy.optimize.linprog(c=c_lp, A_ub=A_ub_lp, b_ub=b_ub_lp, method='highs', bounds = (self.action_space.low[0], self.action_space.high[0]))
-
-            # The 'success' attribute is True if a feasible solution was found.
-            fixed_feasible = res_lp.success
-            ### END OF REPLACEMENT ###
-
-            if fixed_feasible:
-                candidate_u0 = action.copy()
-                candidate_score = 0.0
-                shielded = False
-            else:
-                # --- Full-QP: optimize [u0; u1..] ---
-                # This part remains the same, as it's a true QP.
-                total_vars = self.horizon * u_dim
-                P_full = 1e-6 * np.eye(total_vars)
-                P_full[:u_dim, :u_dim] = np.eye(u_dim)  # Hessian for u0
-                q_full = np.zeros((self.horizon)*u_dim)
-                q_full[:u_dim] = -action
-                A_full = sp.csc_matrix(M)
-                l_full = -np.inf * np.ones_like(bias)
-                u_full = -bias
-                full_solver = osqp.OSQP()
-                full_solver.setup(P=sp.csc_matrix(P_full),
-                                    q=q_full,
-                                    A=A_full,
-                                    l=l_full,
-                                    u=u_full,
-                                    warm_start=False,
-                                    verbose=False)
-                
-                res_full = full_solver.solve()
-                if res_full.info.status != 'solved':
-                    continue
-                full_sol = res_full.x
-                candidate_u0 = full_sol[:u_dim]
-                candidate_score = np.linalg.norm(candidate_u0 - action)
-
-            if candidate_score < best_score:
-                best_score = candidate_score
-                best_u0    = candidate_u0
-
-        if best_u0 is None:
-            best_u0 = self.backup(original_state)
-            if np.allclose(best_u0, action):
-                print("backup equal")
-            shielded = False
-
-        self.saved_state = original_state
-        self.saved_action = best_u0
-        self.shielded = shielded
-        return best_u0, shielded
-
-    def __call__(self, state: np.ndarray) -> np.ndarray:
-        if self.saved_state is not None and np.allclose(state, self.saved_state):
-            return self.saved_action, self.shielded
-        return self.solve(state)
-
-    def unsafe(self,
-               state: np.ndarray,
-               action: np.ndarray) -> bool:
-        res = self.solve(state, action=action)[0]
-        return not np.allclose(res, action)
 
 
 class CBFPolicy:
@@ -361,7 +402,7 @@ class CBFPolicy:
     """
     def __init__(
         self,
-        env: KoopmanLinearModel,
+        env: Union[KoopmanLinearModel, FixedLinearModel],
         state_space: gym.Space,
         ori_state_space: gym.Space,
         action_space: gym.Space,
@@ -694,7 +735,7 @@ class Shield:
         self.total_time += end - start
         
         # print(f"Shield: {shielded}, Action: {act}, Time: {end - start:.4f}s")
-        return act, shielded
+        return act, shielded, np.linalg.norm(act - proposed_action)
 
     def report(self) -> Tuple[int, int]:
         return self.shield_times, self.agent_times, self.backup_times, self.total_time

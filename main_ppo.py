@@ -16,7 +16,8 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import imageio
 import traceback
-
+from koopman.env_model import FixedLinearModel
+from koopman.utils import parse_dynamics_from_json
 # Setup environment
 
 def main(args):
@@ -33,19 +34,19 @@ def main(args):
     hyperparams = vars(args)
 
     # Tensorboard
-    if not os.path.exists("ablations_final"):
-        os.makedirs("ablations_final")
+    if not os.path.exists("runs"):
+        os.makedirs("runs")
         
     name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_PPO_{args.env_name}_H{args.horizon}_D{args.red_dim}_G{args.cbf_gamma}_S{args.seed}_P{args.percentile}{'_safe' if not args.no_safety else ''}"
-    writer = SummaryWriter(f'ablations_final/{name}')
+    writer = SummaryWriter(f'runs/{name}')
 
     print(hyperparams)
     if not os.path.exists("logs_ppo"):
         os.makedirs("logs_ppo")
 
-    file = open(f'ablations_final/{name}/log.txt', "w+")
-    os.makedirs(f'ablations_final/{name}/videos')
-    # env = gym.wrappers.RecordVideo(env, f"ablations_final/{name}/videos")
+    file = open(f'runs/{name}/log.txt', "w+")
+    os.makedirs(f'runs/{name}/videos')
+    # env = gym.wrappers.RecordVideo(env, f"runs/{name}/videos")
 
     # PPO agent setup
 
@@ -70,6 +71,7 @@ def main(args):
     total_sim_episodes = 0
     train_steps = 1
 
+    avg_deviation = []
     while True:
         i_episode = next(iterator_loop)
         episode_reward = 0
@@ -81,11 +83,12 @@ def main(args):
         print(i_episode, ": Real data")
         
         flags = []
-        
+        deviation = []
         while not done and not trunc:
             if safe_agent is not None:
-                action, shielded = safe_agent(state)
+                action, shielded, dev = safe_agent(state)
                 flags.append(shielded[0])
+                deviation.append(dev)
             else:
                 action = agent(state)
                 shielded = "N"
@@ -147,10 +150,12 @@ def main(args):
                 pass
         
         total_real_episodes += 1 
+        avg_deviation.append([total_numsteps, np.mean(deviation) if len(deviation) > 0 else 0])
+        writer.add_scalar(f'agent/avg_deviation', np.mean(deviation) if len(deviation) > 0 else 0, total_numsteps)
 
         
         
-        if total_numsteps >= args.start_steps * train_steps and args.no_safety is False:
+        if total_numsteps >= args.start_steps * train_steps and args.no_safety is False and args.dynamics is None:
         # if False:
             train_steps*=2
             try:
@@ -206,15 +211,42 @@ def main(args):
             unsafe_domains = safety_box.invert_polytope(new_obs_space)
             env.transformed_safe_polys = polys
             env.transformed_polys = unsafe_domains
-            shield = CBFPolicy(
-                env_model, new_obs_space, env.observation_space,
-                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
+            
+            # shield = CBFPolicy(
+            #     env_model, new_obs_space, env.observation_space,
+            #     env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
+            
+            shield = ProjectionPolicy(
+                env_model, new_obs_space,
+                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform)
+            
             safe_agent = Shield(shield, agent, mean, std)
             
             shield.update_model()
             
             print(len(polys), "safe polys")
-
+        
+        elif args.dynamics is not None and args.no_safety is False and safe_agent is None:
+            
+            A, B, c, eps = parse_dynamics_from_json(args.dynamics)
+            print("Loaded dynamics from", args.dynamics)
+            env_model = FixedLinearModel(A, B, c, eps)
+            4
+            polys = env.safety.to_hyperplanes(env.observation_space)
+            unsafe_domains = env.safety.invert_polytope(env.observation_space)
+            env.transformed_safe_polys = polys
+            env.transformed_polys = unsafe_domains  
+            
+            shield = CBFPolicy(
+                env_model, env.observation_space, env.observation_space,
+                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, lambda x: x, args.cbf_gamma)
+            
+            safe_agent = Shield(shield, agent, means=np.zeros(env.observation_space.shape[0]), stds = np.ones(env.observation_space.shape[0]))
+            
+            shield.update_model()
+            
+            print(len(polys), "safe polys")
+        
         # Test the agent periodically
         
         writer.add_scalar(f'reward/train', episode_reward, total_numsteps)
@@ -239,8 +271,8 @@ def main(args):
             t = 0
 
             for episode_num in range(episodes):
-                record_video = i_episode % 50 == 0  # Record every alternate episode (example condition)
-                custom_filename = f"ablations_final/{name}/videos/episode_{i_episode}.mp4"
+                record_video = i_episode % 5 == 0  # Record every alternate episode (example condition)
+                custom_filename = f"runs/{name}/videos/episode_{i_episode}.mp4"
 
                 # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
                 
@@ -255,7 +287,7 @@ def main(args):
                 while not done and not trunc:
                     # Decide action
                     if safe_agent is not None:
-                        action, shielded = safe_agent(state)
+                        action, shielded, dev = safe_agent(state)
                     else:
                         action = agent(state)
                         shielded = None
@@ -331,7 +363,12 @@ def main(args):
     print("Total unsafe Test:", unsafe_test_episodes, "/", total_test_episodes, file=file)
     print("Using SPICE:", not args.no_safety)
     print("Using SPICE:", not args.no_safety, file=file)
-
+    
+    avg_deviation = np.array(avg_deviation)
+    plt.figure()
+    plt.plot(avg_deviation)
+    plt.savefig(f"runs/{name}/deviation.png")
+    plt.close()
 
     writer.add_hparams(
         hparam_dict = hyperparams, 
@@ -353,7 +390,7 @@ if __name__ == "__main__":
     parser.add_argument('--gamma', type=float, default=0.995)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--seed', type=int, default=123456)
-    parser.add_argument('--batch_size', type=int, default=2048)
+    parser.add_argument('--batch_size', type=int, default=2038)
     parser.add_argument('--mini_batch_size', type=int, default=256)
     parser.add_argument('--num_steps', type=int, default=200000)
     parser.add_argument('--hidden_size', type=int, default=256)
@@ -366,6 +403,7 @@ if __name__ == "__main__":
     parser.add_argument('--no_safety', default=False, action='store_true')
     parser.add_argument('--render', default=False, action='store_true')
     parser.add_argument('--percentile', default=99, type=int)
+    parser.add_argument('--dynamics', default=None, type=str)
 
     args = parser.parse_args()
     

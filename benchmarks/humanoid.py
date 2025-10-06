@@ -6,13 +6,13 @@ import sys
 from gymnasium.wrappers import NormalizeObservation
 class HumanoidEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Humanoid-v5", render_mode="rgb_array")
+        self.env = gym.make("Humanoid-v4", render_mode="rgb_array")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
         self.safety = safety
-        print(self.action_space.low, self.action_space.high)
+        print(self.observation_space)
 
         self._max_episode_steps = 1000
        
