@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from constraints import safety, verification
+from constraints import safety
 
 class InvertedPendulumEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):

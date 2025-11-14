@@ -1,7 +1,7 @@
 import gymnasium as gym
 import torch
 import numpy as np
-from constraints import safety, verification
+from constraints import safety
 import sys 
 
 class LunarLanderEnv2(gym.Env):

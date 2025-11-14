@@ -33,6 +33,9 @@ class P3O:
         self.debug = getattr(args, "debug", False)
         
         self.state_rms = RunningMeanStd(shape=obs_dim)
+        
+        # For tracking episode cost (like official implementation)
+        self.episode_costs = []
 
     @torch.no_grad()
     def select_action(self, state):
@@ -59,7 +62,7 @@ class P3O:
         next_states_t = torch.from_numpy(next_states).float().to(self.device)
         actions_t = torch.from_numpy(np.array(memory.actions[:memory.size])).float().to(self.device)
 
-        # Calculate mean episodic cost for P3O
+        # Calculate mean episodic cost (like official implementation)
         ep_costs = []
         current_ep_cost = 0
         for i in range(len(raw_costs)):
@@ -70,6 +73,7 @@ class P3O:
         if not memory.dones[-1]:
             ep_costs.append(current_ep_cost)
         mean_ep_cost = np.mean(ep_costs) if ep_costs else 0
+        self.episode_costs = ep_costs  # Store for loss calculation
 
         values = self.actor_critic.get_value(states_t).squeeze()
         next_values = self.actor_critic.get_value(next_states_t).squeeze()
@@ -112,71 +116,77 @@ class P3O:
         surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
         return -torch.min(surr1, surr2).mean()
 
-    def _loss_pi_cost(self, log_probs, log_probs_old, cost_advantages, mean_ep_cost):
-        """P3O-specific cost penalty loss."""
+    def _loss_pi_cost(self, log_probs, log_probs_old, cost_advantages):
+        """P3O cost penalty loss - simplified like official implementation."""
         ratios = torch.exp(log_probs - log_probs_old)
         surr_cadv = (ratios * cost_advantages).mean()
         
-        jc = mean_ep_cost - self.cost_limit
-        loss_cost = self.kappa * F.relu(surr_cadv + jc)
+        # Use mean episode cost like official implementation
+        Jc = self.episode_costs[-1] - self.cost_limit if self.episode_costs else 0 - self.cost_limit
+        loss_cost = self.kappa * F.relu(surr_cadv + Jc)
         return loss_cost
 
-    def update_parameters(self, memory, epochs, batch_size):
-        data = self.process_data(memory)
+    def _update_actor(self, data, epochs, batch_size):
+        """Update actor network like official implementation."""
+        dataset = TensorDataset(
+            data['states'], data['actions'], data['log_probs_old'],
+            data['advantages'], data['cost_advantages']
+        )
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
-        if self.debug:
-            print(f"Raw advantages - mean: {data['advantages'].mean():.6f}, std: {data['advantages'].std():.6f}")
-            print(f"Raw advantages range: [{data['advantages'].min():.6f}, {data['advantages'].max():.6f}]")
-            print(f"Mean episodic cost: {data['mean_ep_cost']:.6f}")
+        policy_losses, reward_losses, cost_losses = [], [], []
         
-        # Normalize advantages globally
-        data['advantages'] = (data['advantages'] - data['advantages'].mean()) / (data['advantages'].std() + 1e-8)
-
-        policy_losses, value_losses, cost_value_losses = [], [], []
-        reward_losses, cost_losses = [], []
-        clip_fractions, entropies = [], []
-        
-        dataset = TensorDataset(data['states'], data['actions'], data['log_probs_old'], 
-                               data['advantages'], data['returns'], data['cost_returns'],
-                               data['values_old'], data['cost_values_old'], data['cost_advantages'])
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-
         for epoch in range(epochs):
-            for states_b, actions_b, log_probs_old_b, advantages_b, returns_b, cost_returns_b, values_old_b, cost_values_old_b, cost_advantages_b in dataloader:
-                log_probs, entropy, values, cost_values = self.actor_critic.evaluate(states_b, actions_b)
+            for batch in dataloader:
+                states_b, actions_b, log_probs_old_b, advantages_b, cost_advantages_b = batch
                 
-                # Calculate losses
+                # Normalize advantages per batch
+                advantages_b = (advantages_b - advantages_b.mean()) / (advantages_b.std() + 1e-8)
+                cost_advantages_b = (cost_advantages_b - cost_advantages_b.mean()) / (cost_advantages_b.std() + 1e-8)
+                
+                log_probs, entropy, _, _ = self.actor_critic.evaluate(states_b, actions_b)
+                
+                # Calculate losses like official implementation
                 reward_loss = self._loss_pi_reward(log_probs, log_probs_old_b, advantages_b)
-                cost_loss = self._loss_pi_cost(log_probs, log_probs_old_b, cost_advantages_b, data['mean_ep_cost'])
+                cost_loss = self._loss_pi_cost(log_probs, log_probs_old_b, cost_advantages_b)
                 policy_loss = reward_loss + cost_loss - self.entropy_coeff * entropy.mean()
                 
-                if self.debug:
-                    ratios = torch.exp(log_probs - log_probs_old_b)
-                    total_grad_norm = 0
-                    
-                    # Calculate gradients without stepping
-                    self.actor_optimizer.zero_grad()
-                    policy_loss.backward(retain_graph=True)
-                    for p in self.actor_params:
-                        if p.grad is not None:
-                            total_grad_norm += p.grad.data.norm(2).item() ** 2
-                    
-                    print(f"Actor gradient norm: {total_grad_norm ** 0.5}")
-                    print(f"  Advantages: mean={advantages_b.mean():.6f}, std={advantages_b.std():.6f}")
-                    print(f"  Ratios: mean={ratios.mean():.6f}, std={ratios.std():.6f}, range=[{ratios.min():.6f}, {ratios.max():.6f}]")
-                    print(f"  Reward loss: {reward_loss.item():.6f}")
-                    print(f"  Cost loss: {cost_loss.item():.6f}")
-                    print(f"  Total policy loss: {policy_loss.item():.6f}")
-                    print(f"  Log prob diff: {(log_probs - log_probs_old_b).abs().mean():.6f}")
-                
-                # Actor update
+                # Single actor update like official
                 self.actor_optimizer.zero_grad()
                 policy_loss.backward()
                 clip_grad_norm_(self.actor_params, self.max_grad_norm)
                 self.actor_optimizer.step()
+                
+                policy_losses.append(policy_loss.item())
+                reward_losses.append(reward_loss.item())
+                cost_losses.append(cost_loss.item())
+        
+        return {
+            "avg_total_policy_loss": np.mean(policy_losses),
+            "avg_reward_policy_loss": np.mean(reward_losses),
+            "avg_cost_policy_loss": np.mean(cost_losses),
+        }
 
-                # Critic updates with value clipping
-                values_clipped = values_old_b.reshape(-1, 1) + torch.clamp(values - values_old_b.reshape(-1, 1), -self.eps_clip, self.eps_clip)
+    def _update_critic(self, data, epochs, batch_size):
+        """Update critic networks."""
+        dataset = TensorDataset(
+            data['states'], data['returns'], data['cost_returns'],
+            data['values_old'], data['cost_values_old']
+        )
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        value_losses, cost_value_losses = [], []
+        
+        for epoch in range(epochs):
+            for batch in dataloader:
+                states_b, returns_b, cost_returns_b, values_old_b, cost_values_old_b = batch
+                
+                _, _, values, cost_values = self.actor_critic.evaluate(states_b, torch.zeros_like(states_b[:, :1]))  # actions not needed
+                
+                # Value loss with clipping
+                values_clipped = values_old_b.reshape(-1, 1) + torch.clamp(
+                    values - values_old_b.reshape(-1, 1), -self.eps_clip, self.eps_clip
+                )
                 value_loss_clipped = F.mse_loss(values_clipped, returns_b.reshape(-1, 1))
                 value_loss_unclipped = F.mse_loss(values, returns_b.reshape(-1, 1))
                 value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
@@ -186,7 +196,10 @@ class P3O:
                 clip_grad_norm_(self.critic_params, self.max_grad_norm)
                 self.critic_optimizer.step()
 
-                cost_values_clipped = cost_values_old_b.reshape(-1, 1) + torch.clamp(cost_values - cost_values_old_b.reshape(-1, 1), -self.eps_clip, self.eps_clip)
+                # Cost value loss with clipping
+                cost_values_clipped = cost_values_old_b.reshape(-1, 1) + torch.clamp(
+                    cost_values - cost_values_old_b.reshape(-1, 1), -self.eps_clip, self.eps_clip
+                )
                 cost_value_loss_clipped = F.mse_loss(cost_values_clipped, cost_returns_b.reshape(-1, 1))
                 cost_value_loss_unclipped = F.mse_loss(cost_values, cost_returns_b.reshape(-1, 1))
                 cost_value_loss = torch.max(cost_value_loss_unclipped, cost_value_loss_clipped)
@@ -196,40 +209,69 @@ class P3O:
                 clip_grad_norm_(self.cost_critic_params, self.max_grad_norm)
                 self.cost_critic_optimizer.step()
 
-                with torch.no_grad():
-                    ratios = torch.exp(log_probs - log_probs_old_b)
-                    policy_losses.append(policy_loss.item())
-                    reward_losses.append(reward_loss.item())
-                    cost_losses.append(cost_loss.item())
-                    value_losses.append(value_loss.item())
-                    cost_value_losses.append(cost_value_loss.item())
-                    entropies.append(entropy.mean().item())
-                    clip_fractions.append((torch.abs(ratios - 1.0) > self.eps_clip).float().mean().item())
+                value_losses.append(value_loss.item())
+                cost_value_losses.append(cost_value_loss.item())
+        
+        return {
+            "avg_value_loss": np.mean(value_losses),
+            "avg_cost_value_loss": np.mean(cost_value_losses),
+        }
 
+    def update_parameters(self, memory, epochs, batch_size):
+        """Main update function following official P3O structure."""
+        data = self.process_data(memory)
+        
+        if self.debug:
+            print(f"Mean episode cost: {data['mean_ep_cost']:.4f}")
+            print(f"JC (ep_cost - limit): {data['mean_ep_cost'] - self.cost_limit:.4f}")
+            print(f"Kappa: {self.kappa}")
+        
+        # Update actor (combined reward + cost loss)
+        actor_metrics = self._update_actor(data, epochs, batch_size)
+        
+        # Update critics
+        critic_metrics = self._update_critic(data, epochs, batch_size)
+        
+        # Compute explained variance
         with torch.no_grad():
             final_values = self.actor_critic.get_value(data['states']).squeeze()
             final_cost_values = self.actor_critic.get_cost_value(data['states']).squeeze()
+            
             var_y = torch.var(data['returns'])
-            explained_var_value = (1 - torch.var(data['returns'] - final_values) / (var_y + 1e-8)).item()
+            explained_var_value = 1 - torch.var(data['returns'] - final_values) / (var_y + 1e-8)
+            explained_var_value = explained_var_value.item() if not torch.isnan(explained_var_value) else 0.0
+            
             var_y_cost = torch.var(data['cost_returns'])
-            explained_var_cost_value = (1 - torch.var(data['cost_returns'] - final_cost_values) / (var_y_cost + 1e-8)).item()
+            explained_var_cost_value = 1 - torch.var(data['cost_returns'] - final_cost_values) / (var_y_cost + 1e-8)
+            explained_var_cost_value = explained_var_cost_value.item() if not torch.isnan(explained_var_cost_value) else 0.0
 
         memory.clear_memory()
 
-        return {
-            "avg_reward_policy_loss": np.mean(reward_losses),
-            "avg_cost_policy_loss": np.mean(cost_losses),
-            "avg_value_loss": np.mean(value_losses),
-            "avg_cost_value_loss": np.mean(cost_value_losses),
-            "clip_fraction": np.mean(clip_fractions),
-            "entropy": np.mean(entropies),
+        metrics = {
+            **actor_metrics,
+            **critic_metrics,
             "explained_var_value": explained_var_value,
             "explained_var_cost_value": explained_var_cost_value,
+            "mean_ep_cost": data['mean_ep_cost'],
             "avg_rollout_cost": np.mean(data['raw_costs']),
+            "kappa": self.kappa,
         }
+        
+        return metrics
 
     def save_checkpoint(self, path):
-        torch.save(self.actor_critic.state_dict(), path)
+        """Save model with additional state information."""
+        torch.save({
+            'actor_critic_state_dict': self.actor_critic.state_dict(),
+            'state_rms_mean': self.state_rms.mean,
+            'state_rms_var': self.state_rms.var,
+            'state_rms_count': self.state_rms.count,
+        }, path)
 
     def load_checkpoint(self, path):
-        self.actor_critic.load_state_dict(torch.load(path, map_location=self.device))
+        """Load model with state information."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
+        self.state_rms.mean = checkpoint['state_rms_mean']
+        self.state_rms.var = checkpoint['state_rms_var']
+        self.state_rms.count = checkpoint['state_rms_count']

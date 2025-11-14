@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from src.policy import CPOPolicy, PCRPOPolicy, CUPPolicy, P3OPolicy, PPOPolicy
-from src.cost_function import CostFunction
+from src.cost_function import CostFunctionWP,  CostFunctionCBF
 from koopman.env_model import get_environment_model
 from constraints import safety
 from benchmarks import envs
@@ -30,16 +30,16 @@ def main(args):
     # Tensorboard
     if not os.path.exists("runs"):
         os.makedirs("runs")
-    writer = SummaryWriter('runs/{}_{}_{}_{}H{}_D{}'.format(
-        datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name, args.policy, 
-        ("safecost" if not args.no_safety else "nocost"),
-        args.horizon, args.red_dim))
+    
+    cost_fn = "binary" if args.no_safety else ("wp" if args.cost_fn == "wp" else f"cbf_{args.cbf_gamma}")
+    
+    folder_name = f'{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{args.env_name}_{args.policy}_{cost_fn}_H{args.horizon}_D{args.red_dim}'
+        
+        
+    writer = SummaryWriter(f'runs/{folder_name}')
 
     print(hyperparams)
-    file = open('runs/{}_{}_{}_{}H{}_D{}/log.txt'.format(
-        datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name, args.policy,
-        ("safecost" if not args.no_safety else "nocost"),
-        args.horizon, args.red_dim), "w+")
+    file = open(f'runs/{folder_name}/log.txt', "w+")
 
     # CPO agent setup
 
@@ -155,7 +155,7 @@ def main(args):
                 epochs = 200
 
             env_model, ev_score, r2_score, mean, std = get_environment_model(
-                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
+                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs, percentile=args.percentile)
             
             writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
             writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)
@@ -187,11 +187,19 @@ def main(args):
             unsafe_domains = safety_box.invert_polytope(new_obs_space)
             env.transformed_safe_polys = polys
             env.transformed_polys = unsafe_domains
-            cost_function = CostFunction(
-                env_model, new_obs_space, env.observation_space,
-                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform,
-                mean, std)
             
+            if args.cost_fn == "wp":
+                cost_function = CostFunctionWP(
+                    env_model, new_obs_space, env.observation_space,
+                    env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.mars.koopman_model.transform,
+                    mean, std)
+            
+            else:                
+                cost_function = CostFunctionCBF(
+                    env_model, new_obs_space, env.observation_space,
+                    env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform,
+                    mean, std, args.cbf_gamma)
+                        
 
         # Test the agent periodically
         
@@ -214,8 +222,8 @@ def main(args):
             t = 0
 
             for episode_num in range(episodes):
-                # record_video = episode_num % 2 == 0  # Record every alternate episode (example condition)
-                custom_filename = f"videos/episode_{i_episode}.mp4"
+                record_video = i_episode % 5 == 0  # Record every alternate episode (example condition)
+                custom_filename = f"runs/{folder_name}/videos/episode_{i_episode}.mp4"
                 
                 # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
                 
@@ -226,7 +234,8 @@ def main(args):
                 trunc = False
                 episode_steps = 0
                 trajectory = [state]
-                # frames  = [env.render()]
+                if args.render:
+                    frames  = [env.render()]
 
                 while not done and not trunc:
                     # Decide action
@@ -251,9 +260,11 @@ def main(args):
 
                     state = next_state
                     trajectory.append(state)
-                    # frames.append(env.render())
+                    if args.render:
+                        frames.append(env.render())
 
-                # imageio.mimsave(custom_filename, frames, fps=30)
+                if args.render and record_video:
+                    imageio.mimsave(custom_filename, frames, fps=30)
                 avg_reward += episode_reward
                 avg_cost += episode_cost
                 avg_length += episode_steps
@@ -319,12 +330,9 @@ if __name__ == "__main__":
     parser.add_argument('--env_name', default="hopper")
     parser.add_argument('--seed', type=int, default=123456)
     parser.add_argument('--cuda', action="store_true", default=False, help="Use CUDA if available")
-    parser.add_argument('--save_dir', type=str, default='runs_analysis', help="Directory to save logs/models")
-    parser.add_argument('--log_interval', type=int, default=10, help="Logging interval in episodes")
-    parser.add_argument('--eval_episodes', type=int, default=10, help="Number of episodes to use for evaluation")
 
     # --- RL TRAINING LOOP ---
-    parser.add_argument('--num_steps', type=int, default=200000)
+    parser.add_argument('--num_steps', type=int, default=300000)
     parser.add_argument('--start_steps', type=int, default=10000)
     parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--mini_batch_size', type=int, default=64)
@@ -332,7 +340,7 @@ if __name__ == "__main__":
     parser.add_argument('--horizon', type=int, default=5)
 
     # --- POLICY/CRITIC NETWORK ---
-    parser.add_argument('--hidden_size', type=int, default=64)
+    parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--red_dim', type=int, default=20)
     parser.add_argument('--log_std_min', type=float, default=-20)
     parser.add_argument('--log_std_max', type=float, default=1)
@@ -345,8 +353,8 @@ if __name__ == "__main__":
     parser.add_argument('--entropy_coeff', type=float, default=0.00, help="Coefficient for entropy loss")
 
     # --- ADVANTAGE/GAE ---
-    parser.add_argument('--gamma', type=float, default=0.95)
-    parser.add_argument('--cost_gamma', type=float, default=0.95, help="Discount factor for costs")
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--cost_gamma', type=float, default=0.99, help="Discount factor for costs")
     parser.add_argument('--lam', type=float, default=0.995, help="GAE lambda")
     parser.add_argument('--gae_bias_correction', action='store_true', help="Enable bias-corrected GAE (CUP)")
 
@@ -391,5 +399,10 @@ if __name__ == "__main__":
 
 
     parser.add_argument('--policy', type=str, default="cup", help="Policy class to choose from: cpo or pcrpo or cup")
+    parser.add_argument('--cost_fn', type=str, default="cbf", help="Cost function class to choose from: wp or cbf")
+    parser.add_argument('--percentile', type=int, default=99, help="Percentile of error residuals for polytope tightening")
+    parser.add_argument('--cbf_gamma', type=float, default=0.4, help="CBF Gamma for CBF WP")
+    parser.add_argument('--render',  default=False, action="store_true", help="Turn on rendering")
+    
     args = parser.parse_args()
     main(args)

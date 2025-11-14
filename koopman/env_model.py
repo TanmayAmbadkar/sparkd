@@ -5,6 +5,8 @@ from sklearn.metrics import explained_variance_score, r2_score
 from koopman.network import KoopmanLightning, fit_koopman # Assuming these are in a separate file
 import seaborn as sns
 import matplotlib.pyplot as plt
+plt.ioff()
+
 
 class KoopmanLinearModel:
     """
@@ -67,6 +69,20 @@ class KoopmanLinearModel:
         return "KoopmanLinearModel"
 
 
+class FixedLinearModel:
+    def __init__(self, A: np.ndarray, B: np.ndarray, c: np.ndarray, eps: np.ndarray):
+        self.A = A
+        self.B = B
+        self.c = c
+        self.eps = eps
+        self.s_dim = A.shape[0]
+        self.original_s_dim = A.shape[0]
+    
+    def get_matrix_at_point(self, point: np.ndarray, s_dim: int, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        M = np.hstack((self.A, self.B, self.c))
+        return M, self.eps
+
+
 def get_environment_model(
     input_states: np.ndarray,
     actions: np.ndarray,
@@ -74,6 +90,7 @@ def get_environment_model(
     latent_dim: int = 4,
     horizon: int = 5,
     epochs: int = 50,
+    percentile: int = 99,
     koopman_model: Optional[KoopmanLightning] = None,
 ) -> Tuple[KoopmanLinearModel, dict, np.ndarray, np.ndarray]:
     """
@@ -156,20 +173,10 @@ def get_environment_model(
 
     # Calculate robust error bound based on one-step prediction residuals
     one_step_residuals = np.abs(pred_latents_traj[:, 0, :] - true_latents_traj[:, 0, :])
-    error_bound = np.percentile(one_step_residuals, 99, axis=0)
+    error_bound = np.percentile(one_step_residuals, percentile, axis=0)
     linear_model.error_bound = error_bound
     
     print(f"\nComputed Error Bound (eps) using 99th percentile of 1-step error: {error_bound}")
     
-    # --- ADDED: Code to plot the boxplot of residuals ---
-    plt.figure(figsize=(12, 6))
-    sns.boxplot(data=one_step_residuals)
-    plt.title('Boxplot of One-Step Prediction Residuals per Latent Dimension')
-    plt.xlabel('Latent Dimension Index')
-    plt.ylabel('Absolute Error')
-    plt.grid(True)
-    plt.savefig("residual_boxplot.png")
-    plt.close()
-    print("Saved residual boxplot to residual_boxplot.png")
 
     return linear_model, final_metrics['explained_variance'], final_metrics['r2_score'], means, stds

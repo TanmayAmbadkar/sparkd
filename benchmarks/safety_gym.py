@@ -2,7 +2,7 @@ import safety_gymnasium as gym
 import gymnasium
 import torch
 import numpy as np
-from constraints import safety, verification
+from constraints import safety
 import sys
 from benchmarks.utils import *
 

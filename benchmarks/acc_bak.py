@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 from typing import Tuple, Dict, Any
 import torch
-from constraints import safety, verification
+from constraints import safety
 
 
 
