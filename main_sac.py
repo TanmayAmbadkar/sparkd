@@ -1,6 +1,7 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import argparse
+import random
 import datetime
 import itertools
 import numpy as np
@@ -17,29 +18,31 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import imageio
 import traceback
-
+torch.set_num_threads(1)
 
 # Setup environment
 
 def main(args):
     env = envs.get_env_from_name(args.env_name)
-    env.seed(args.seed)
-    torch.manual_seed(args.seed)
+    
+    random.seed(args.seed)
     np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
 
     hyperparams = vars(args)
 
     # Tensorboard
-    if not os.path.exists("runs_new"):
-        os.makedirs("runs_new")
+    if not os.path.exists("runs_sac"):
+        os.makedirs("runs_sac")
         
     name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_SAC_{args.env_name}_H{args.horizon}_D{args.red_dim}_G{args.gamma}_S{args.seed}{'_safe' if not args.no_safety else ''}"
-    writer = SummaryWriter(f'runs_new/{name}')
+    writer = SummaryWriter(f'runs_sac/{name}')
 
     print(hyperparams)
 
-    file = open(f'runs_new/{name}/log.txt', "w+")
-    os.makedirs(f'runs_new/{name}/videos')
+    file = open(f'runs_sac/{name}/log.txt', "w+")
+    os.makedirs(f'runs_sac/{name}/videos')
     print(hyperparams)
 
     # SAC agent setup
@@ -62,8 +65,6 @@ def main(args):
     env_model = None
     unsafe_test_episodes = 0
     total_test_episodes = 0
-    unsafe_sim_episodes = 0
-    total_sim_episodes = 0
     train_steps = 1
 
     while True:
@@ -85,24 +86,11 @@ def main(args):
             
             while not done and not trunc:
                 if safe_agent is not None:
-                    action, shielded = safe_agent(state)
+                    action, shielded, _, _ = safe_agent(state)
                     flags.append(shielded[0])
                 else:
                     action = agent(state)
                     shielded = "N"
-                    
-                if len(agent.memory) > args.batch_size:
-                    # Number of updates per step in environment
-                    for i in range(args.updates_per_step):
-                        # Update parameters of all the networks
-                        critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
-                            agent.train()
-
-                        writer.add_scalar(f'loss/critic_1', critic_1_loss, total_numsteps)
-                        writer.add_scalar(f'loss/critic_2', critic_2_loss, total_numsteps)
-                        writer.add_scalar(f'loss/policy_loss', policy_loss, total_numsteps)
-                        writer.add_scalar(f'loss/entropy_loss', ent_l, total_numsteps)
-                        writer.add_scalar(f'loss/alpha', alph, total_numsteps)
 
 
                 next_state, reward, done, trunc, info = env.step(action)
@@ -122,23 +110,34 @@ def main(args):
                     # episode_reward -= 100 * (not unsafe_flag)
                     reward -= 100
                     print("UNSAFE (outside testing)", shielded)
-                    print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
+                    # print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                     done = done or (True if safe_agent is not None else False)
                     cost = 1
 
-                    unsafe_flag = True or unsafe_flag
+                    unsafe_flag = True
                 # Ignore the "done" signal if it comes from hitting the time
                 # horizon.
                 # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
                 if cost > 0:
-                    agent.add(state, action, reward, next_state, done, 1)
-                    real_data.push(state, action, reward, next_state, done, 1)
+                    agent.add(state, action, reward, next_state, done or trunc, 1)
+                    real_data.push(state, action, reward, next_state, done or trunc, 1)
                 else:
-                    agent.add(state, action, reward, next_state, done, 0)
-                    real_data.push(state, action, reward, next_state, done, 0)
+                    agent.add(state, action, reward, next_state, done or trunc, 0)
+                    real_data.push(state, action, reward, next_state, done or trunc, 0)
                 
-                
+                if len(agent.memory) > args.batch_size and total_numsteps%1 == 0:
+                    # Number of updates per step in environment
+                    for i in range(args.updates_per_step):
+                        # Update parameters of all the networks
+                        critic_1_loss, critic_2_loss, policy_loss, ent_l, alph = \
+                            agent.train()
+
+                        writer.add_scalar(f'loss/critic_1', critic_1_loss, total_numsteps)
+                        writer.add_scalar(f'loss/critic_2', critic_2_loss, total_numsteps)
+                        writer.add_scalar(f'loss/policy_loss', policy_loss, total_numsteps)
+                        writer.add_scalar(f'loss/entropy_loss', ent_l, total_numsteps)
+                        writer.add_scalar(f'loss/alpha', alph, total_numsteps)
                 
 
                 state = next_state
@@ -184,7 +183,7 @@ def main(args):
                 epochs = 200
 
             env_model, ev_score, r2_score, mean, std = get_environment_model(
-                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs)
+                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs, percentile=args.percentile)
             
             writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
             writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)
@@ -250,7 +249,7 @@ def main(args):
 
             for episode_num in range(episodes):
                 record_video = i_episode % 100 == 0  # Record every alternate episode (example condition)
-                custom_filename = f"runs_new/{name}/videos/episode_{i_episode}.mp4"
+                custom_filename = f"runs_sac/{name}/videos/episode_{i_episode}.mp4"
 
                 # video_env.video_recorder.file_prefix = os.path.join("videos/", f"{custom_filename.split('.')[0]}")
                 
@@ -266,7 +265,7 @@ def main(args):
                 while not done and not trunc:
                     # Decide action
                     if safe_agent is not None:
-                        action, shielded = safe_agent(state)
+                        action, shielded, _, _ = safe_agent(state)
                     else:
                         action = agent(state)
                         shielded = None
@@ -365,8 +364,8 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=123456)
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--num_steps', type=int, default=200000)
-    parser.add_argument('--hidden_size', type=int, default=128)
-    parser.add_argument('--replay_size', type=int, default=200000)
+    parser.add_argument('--hidden_size', type=int, default=256)
+    parser.add_argument('--replay_size', type=int, default=1000000)
     parser.add_argument('--start_steps', type=int, default=10000)
     parser.add_argument('--cuda', action="store_true")
     parser.add_argument('--horizon', type=int, default=20)
@@ -374,6 +373,9 @@ if __name__ == "__main__":
     parser.add_argument('--no_safety', default=False, action='store_true')
     parser.add_argument('--render', default=False, action='store_true')
     parser.add_argument('--cbf_gamma', default=0.7, type=float)
+    parser.add_argument('--percentile', default=99, type=int)
+    parser.add_argument('--dynamics', default=None, type=str)
+
 
     parser.add_argument('--policy', default="Gaussian",
                         help='Policy Type: Gaussian | Deterministic (default: Gaussian)')

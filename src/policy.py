@@ -548,7 +548,6 @@ class CBFPolicy:
 
         z = self.transform(state.reshape(1, -1)).reshape(-1,)
         a_pi = np.zeros(self.u_dim, dtype=float) if action is None else np.asarray(action, float)
-
         # --- 1. Choose the Active Polyhedron based on current state z ---
         inside_candidates, violated = [], []
         for idx, poly in enumerate(self.safe_polys):
@@ -735,7 +734,7 @@ class Shield:
         self.total_time += end - start
         
         # print(f"Shield: {shielded}, Action: {act}, Time: {end - start:.4f}s")
-        return act, shielded, np.linalg.norm(act - proposed_action)
+        return act, shielded, np.linalg.norm(act - proposed_action), proposed_action
 
     def report(self) -> Tuple[int, int]:
         return self.shield_times, self.agent_times, self.backup_times, self.total_time

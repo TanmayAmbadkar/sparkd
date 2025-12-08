@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from .utils import soft_update, hard_update
 from .model import GaussianPolicy, QNetwork, DeterministicPolicy
-from ppo.utils import RunningMeanStd # Assuming the RMS class is in this location
 
 
 class SAC(object):
@@ -19,12 +18,6 @@ class SAC(object):
         self.automatic_entropy_tuning = args.automatic_entropy_tuning
 
         self.device = torch.device("cuda" if args.cuda else "cpu")
-
-        # --- NORMALIZATION ---
-        # Instantiate running mean-std normalizers for states and rewards
-        self.state_rms = RunningMeanStd(reward_size=num_inputs)
-        self.reward_rms = RunningMeanStd(reward_size=1)
-        # --- END NORMALIZATION ---
 
         self.critic = QNetwork(num_inputs, action_space.shape[0], args.hidden_size).to(device=self.device)
         self.critic_optim = Adam(self.critic.parameters(), lr=args.lr)
@@ -48,11 +41,6 @@ class SAC(object):
             self.policy_optim = Adam(self.policy.parameters(), lr=args.lr)
 
     def select_action(self, state, evaluate=False):
-        # --- NORMALIZATION ---
-        # Normalize the state before passing it to the policy
-        state = self.state_rms.normalize(state)
-        # --- END NORMALIZATION ---
-
         state = torch.Tensor(state).to(self.device).unsqueeze(0)
         if evaluate is False:
             action, _, _ = self.policy.sample(state)
@@ -64,30 +52,18 @@ class SAC(object):
         # Sample a batch from memory
         state_batch, action_batch, reward_batch, next_state_batch, mask_batch = memory.sample(batch_size=batch_size)
 
-        # --- NORMALIZATION ---
-        # Update the running statistics with the sampled batch
-        self.state_rms.update(state_batch)
-        self.reward_rms.update(reward_batch)
-
-        # Normalize the states and rewards from the batch
-        state_batch = self.state_rms.normalize(state_batch)
-        next_state_batch = self.state_rms.normalize(next_state_batch)
-        reward_batch = self.reward_rms.normalize(reward_batch)
-        # For added stability, clip normalized rewards
-        reward_batch = torch.from_numpy(reward_batch).float().clamp(min=-10.0, max=10.0)
-        # --- END NORMALIZATION ---
-
-        state_batch = torch.Tensor(state_batch).to(self.device)
-        next_state_batch = torch.Tensor(next_state_batch).to(self.device)
-        action_batch = torch.Tensor(action_batch).to(self.device)
-        reward_batch = reward_batch.to(self.device).unsqueeze(1)
-        mask_batch = torch.Tensor(mask_batch).to(self.device).unsqueeze(1)
+        state_batch = torch.FloatTensor(state_batch).to(self.device)
+        next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
+        action_batch = torch.FloatTensor(action_batch).to(self.device)
+        reward_batch = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(1)
+        mask_batch = torch.FloatTensor(mask_batch).to(self.device).unsqueeze(1)
 
         with torch.no_grad():
             next_state_action, next_state_log_pi, _ = self.policy.sample(next_state_batch)
             qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
             min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
-            next_q_value = reward_batch + mask_batch * self.gamma * (min_qf_next_target)
+            # Assuming mask_batch is 1 when done, so we need (1 - mask_batch) to avoid bootstrapping terminal states
+            next_q_value = reward_batch + (1 - mask_batch) * self.gamma * (min_qf_next_target)
         
         qf1, qf2 = self.critic(state_batch, action_batch)
         qf1_loss = F.mse_loss(qf1, next_q_value)
@@ -122,13 +98,11 @@ class SAC(object):
             alpha_loss = torch.tensor(0.).to(self.device)
             alpha_tlogs = torch.tensor(self.alpha)
 
-
         if updates % self.target_update_interval == 0:
             soft_update(self.critic_target, self.critic, self.tau)
 
         return qf1_loss.item(), qf2_loss.item(), policy_loss.item(), alpha_loss.item(), alpha_tlogs.item()
 
-    # (Save and load checkpoint methods remain the same)
     def save_checkpoint(self, env_name, suffix="", ckpt_path=None):
         if not os.path.exists('checkpoints/'):
             os.makedirs('checkpoints/')

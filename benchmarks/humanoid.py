@@ -6,7 +6,7 @@ import sys
 from gymnasium.wrappers import NormalizeObservation
 class HumanoidEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Humanoid-v4", render_mode="rgb_array")
+        self.env = gym.make("Humanoid-v5", render_mode="rgb_array")
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
@@ -49,9 +49,14 @@ class HumanoidEnv(gym.Env):
         # for i in range(12, 28):
         #     lower_bounds[i] = 0
         #     upper_bounds[i] = 
-        lower_bounds[22] = -2.3475
-        upper_bounds[22] = 2.3475
+        lower_bounds[22:25] = -	2.3475
+        upper_bounds[22:25] = 	2.3475
         
+        # lower_bounds[25:28] = -	7
+        # upper_bounds[25:28] = 	7
+        
+        lower_bounds[28:45] = -	20
+        upper_bounds[28:45] = 	20
         
         
         input_box_domain = safety.Box(lower_bounds, upper_bounds)
@@ -106,10 +111,20 @@ class HumanoidEnv(gym.Env):
     def predict_done(self, state: np.ndarray) -> bool:
         return self.done
 
-    def unsafe(self, state: np.ndarray, simulated:bool = False) -> bool:
-        
-        is_health = 2.3475 >= state[22] >= -2.3475
-        # is_health = 10000 >= state[22] >= -10000
-        return not is_health
+    def unsafe(self, state: np.ndarray, simulated: bool = False) -> bool:
+        # 1. Torso Linear Velocity (22, 23, 24)
+        # Allow up to 10 m/s (approx 22 mph)
+        torso_lin_unsafe = np.any(np.abs(state[22:25]) > 2.3475)
+
+        # 2. Torso Angular Velocity (25, 26, 27)
+        # Allow up to 10 rad/s
+        # torso_ang_unsafe = np.any(np.abs(state[25:28]) > 7.0)
+
+        # 3. Joint Angular Velocities (28 through 44)
+        # Allow up to 20 rad/s to permit fast kicks/steps
+        # Note: 3.14 is too slow for joints!
+        joints_unsafe = np.any(np.abs(state[28:45]) > 20.0)
+
+        return torso_lin_unsafe or joints_unsafe
 
 

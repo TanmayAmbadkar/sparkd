@@ -77,6 +77,9 @@ class GaussianPolicy(nn.Module):
         self.log_std_linear = nn.Linear(hidden_dim, num_actions)
 
         self.apply(weights_init_)
+        # 1. Initialize the log_std head weights to zero
+        # self.log_std_linear.weight.data.fill_(0.0)
+        # torch.nn.init.constant_(self.log_std_linear.bias, -1)
 
         # action rescaling
         if action_space is None:

@@ -18,6 +18,8 @@ import imageio
 import traceback
 from koopman.env_model import FixedLinearModel
 from koopman.utils import parse_dynamics_from_json
+torch.set_num_threads(1)
+import time
 # Setup environment
 
 def main(args):
@@ -86,11 +88,12 @@ def main(args):
         deviation = []
         while not done and not trunc:
             if safe_agent is not None:
-                action, shielded, dev = safe_agent(state)
+                action, shielded, dev, policy_action = safe_agent(state)
                 flags.append(shielded[0])
                 deviation.append(dev)
             else:
-                action = agent(state)
+                policy_action = agent(state)
+                action = np.copy(policy_action)
                 shielded = "N"
 
             next_state, reward, done, trunc, info = env.step(action)
@@ -108,7 +111,7 @@ def main(args):
                 # episode_reward -= (100 * (not unsafe_flag))
                 reward -= 100
                 print("UNSAFE (outside testing)", shielded)
-                print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
+                # print(f"{np.round(state, 2)}", "\n", action, "\n", f"{np.round(next_state, 2)}")
                 done = done or (True if safe_agent is not None else False)
                 cost = 1
 
@@ -118,10 +121,10 @@ def main(args):
             # github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py
 
             if cost > 0:
-                agent.add(state, action, reward, next_state, done or trunc, 1)
+                agent.add(state, policy_action, reward, next_state, done or trunc, 1)
                 real_data.push(state, action, reward, next_state, done or trunc, 1)
             else:
-                agent.add(state, action, reward, next_state, done or trunc, 0)
+                agent.add(state, policy_action, reward, next_state, done or trunc, 0)
                 real_data.push(state, action, reward, next_state, done or trunc, 0)
             
             
@@ -212,18 +215,20 @@ def main(args):
             env.transformed_safe_polys = polys
             env.transformed_polys = unsafe_domains
             
-            # shield = CBFPolicy(
-            #     env_model, new_obs_space, env.observation_space,
-            #     env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
+            shield = CBFPolicy(
+                env_model, new_obs_space, env.observation_space,
+                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
             
-            shield = ProjectionPolicy(
-                env_model, new_obs_space,
-                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform)
+            # shield = ProjectionPolicy(
+            #     env_model, new_obs_space,
+            #     env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform)
             
             safe_agent = Shield(shield, agent, mean, std)
             
+            start_time = time.time()
             shield.update_model()
-            
+            end_time = time.time()
+            print(f"Precomputation Phase: {end_time - start_time}")
             print(len(polys), "safe polys")
         
         elif args.dynamics is not None and args.no_safety is False and safe_agent is None:
@@ -287,7 +292,7 @@ def main(args):
                 while not done and not trunc:
                     # Decide action
                     if safe_agent is not None:
-                        action, shielded, dev = safe_agent(state)
+                        action, shielded, dev, _ = safe_agent(state)
                     else:
                         action = agent(state)
                         shielded = None
@@ -388,9 +393,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Safe PPO Args')
     parser.add_argument('--env_name', default="lunar_lander")
     parser.add_argument('--gamma', type=float, default=0.995)
-    parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--lr', type=float, default=0.0003)
     parser.add_argument('--seed', type=int, default=123456)
-    parser.add_argument('--batch_size', type=int, default=2038)
+    parser.add_argument('--batch_size', type=int, default=2048)
     parser.add_argument('--mini_batch_size', type=int, default=256)
     parser.add_argument('--num_steps', type=int, default=200000)
     parser.add_argument('--hidden_size', type=int, default=256)
