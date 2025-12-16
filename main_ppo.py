@@ -16,7 +16,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import imageio
 import traceback
-from koopman.env_model import FixedLinearModel
+# from koopman.env_model import FixedLinearModel
 from koopman.utils import parse_dynamics_from_json
 torch.set_num_threads(1)
 import time
@@ -39,7 +39,7 @@ def main(args):
     if not os.path.exists("runs"):
         os.makedirs("runs")
         
-    name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_PPO_{args.env_name}_H{args.horizon}_D{args.red_dim}_G{args.cbf_gamma}_S{args.seed}_P{args.percentile}{'_safe' if not args.no_safety else ''}"
+    name = f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_PPO_{args.env_name}_H{args.horizon}_D{args.red_dim}_G{args.cbf_gamma}_S{args.seed}_P{args.percentile}{'_safe' if not args.no_safety else ''}_{'WP' if args.wp else 'CBF'}_{'Adaptive' if args.adaptive_error else 'Global'}"
     writer = SummaryWriter(f'runs/{name}')
 
     print(hyperparams)
@@ -182,7 +182,7 @@ def main(args):
                 epochs = 200
 
             env_model, ev_score, r2_score, mean, std = get_environment_model(
-                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs, percentile=args.percentile)
+                    states, actions, next_states, koopman_model = koopman_model, latent_dim=args.red_dim, horizon = args.horizon, epochs= epochs, percentile=args.percentile, adaptive_error=args.adaptive_error)
             
             writer.add_scalar(f'loss/ev_koopman', ev_score, total_numsteps)   
             writer.add_scalar(f'loss/r2_score', r2_score, total_numsteps)
@@ -210,18 +210,21 @@ def main(args):
                 new_obs_space.high = (new_obs_space.high - mean)/(std + 1e-8)
                 
             
+            print(new_obs_space)
+            print(safety_box)
             polys = safety_box.to_hyperplanes(new_obs_space)
             unsafe_domains = safety_box.invert_polytope(new_obs_space)
             env.transformed_safe_polys = polys
             env.transformed_polys = unsafe_domains
             
-            shield = CBFPolicy(
-                env_model, new_obs_space, env.observation_space,
-                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
-            
-            # shield = ProjectionPolicy(
-            #     env_model, new_obs_space,
-            #     env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform)
+            if not args.wp:
+                shield = CBFPolicy(
+                    env_model, new_obs_space, env.observation_space,
+                    env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
+            else:
+                shield = ProjectionPolicy(
+                    env_model, new_obs_space,
+                    env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform)
             
             safe_agent = Shield(shield, agent, mean, std)
             
@@ -231,26 +234,25 @@ def main(args):
             print(f"Precomputation Phase: {end_time - start_time}")
             print(len(polys), "safe polys")
         
-        elif args.dynamics is not None and args.no_safety is False and safe_agent is None:
+        # elif args.dynamics is not None and args.no_safety is False and safe_agent is None:
             
-            A, B, c, eps = parse_dynamics_from_json(args.dynamics)
-            print("Loaded dynamics from", args.dynamics)
-            env_model = FixedLinearModel(A, B, c, eps)
-            4
-            polys = env.safety.to_hyperplanes(env.observation_space)
-            unsafe_domains = env.safety.invert_polytope(env.observation_space)
-            env.transformed_safe_polys = polys
-            env.transformed_polys = unsafe_domains  
+            # A, B, c, eps = parse_dynamics_from_json(args.dynamics)
+            # print("Loaded dynamics from", args.dynamics)
+            # env_model = FixedLinearModel(A, B, c, eps)
+            # polys = env.safety.to_hyperplanes(env.observation_space)
+            # unsafe_domains = env.safety.invert_polytope(env.observation_space)
+            # env.transformed_safe_polys = polys
+            # env.transformed_polys = unsafe_domains  
             
-            shield = CBFPolicy(
-                env_model, env.observation_space, env.observation_space,
-                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, lambda x: x, args.cbf_gamma)
+            # shield = CBFPolicy(
+            #     env_model, env.observation_space, env.observation_space,
+            #     env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, lambda x: x, args.cbf_gamma)
             
-            safe_agent = Shield(shield, agent, means=np.zeros(env.observation_space.shape[0]), stds = np.ones(env.observation_space.shape[0]))
+            # safe_agent = Shield(shield, agent, means=np.zeros(env.observation_space.shape[0]), stds = np.ones(env.observation_space.shape[0]))
             
-            shield.update_model()
+            # shield.update_model()
             
-            print(len(polys), "safe polys")
+            # print(len(polys), "safe polys")
         
         # Test the agent periodically
         
@@ -407,8 +409,10 @@ if __name__ == "__main__":
     parser.add_argument('--red_dim', type=int, default = 20)
     parser.add_argument('--no_safety', default=False, action='store_true')
     parser.add_argument('--render', default=False, action='store_true')
-    parser.add_argument('--percentile', default=99, type=int)
+    parser.add_argument('--percentile', default=99, type=float)
     parser.add_argument('--dynamics', default=None, type=str)
+    parser.add_argument('--adaptive_error', default=False, action='store_true')
+    parser.add_argument('--wp', default=False, action='store_true')
 
     args = parser.parse_args()
     

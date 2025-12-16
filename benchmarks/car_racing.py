@@ -106,7 +106,7 @@ class CarRacingEnv(gym.Env):
         self.steps += 1
         
         # Gymnasium API uses terminated (end of episode) and truncated (time limit)
-        terminated = (self.corner and x <= 0.0 and y <= 0.0) or self.unsafe(self.state)
+        terminated = (self.corner and x <= 0.0 and y <= 0.0)
         truncated = self.steps >= self._max_episode_steps
         
         if self.render_mode == "human":

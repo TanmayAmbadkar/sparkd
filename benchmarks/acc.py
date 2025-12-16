@@ -100,7 +100,7 @@ class AccEnv(gym.Env):
         self.steps += 1
         
         # Check for termination conditions
-        terminated = bool(self.state[0] >= 0)
+        terminated = False
         truncated = self.steps >= self._max_episode_steps
         
         # Calculate reward

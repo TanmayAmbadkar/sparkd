@@ -215,9 +215,17 @@ def main(args):
             unsafe_domains = safety_box.invert_polytope(new_obs_space)
             env.transformed_safe_polys = polys
             env.transformed_polys = unsafe_domains
-            shield = CBFPolicy(
-                env_model, new_obs_space, env.observation_space,
-                env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
+            
+            
+            if not args.wp:
+                shield = CBFPolicy(
+                    env_model, new_obs_space, env.observation_space,
+                    env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform, args.cbf_gamma)
+            else:
+                shield = ProjectionPolicy(
+                    env_model, new_obs_space,
+                    env.action_space, args.horizon, env.transformed_polys, env.transformed_safe_polys, env_model.koopman_model.transform)
+            
             safe_agent = Shield(shield, agent, mean, std)
             
             shield.update_model()
@@ -390,6 +398,9 @@ if __name__ == "__main__":
                         help='model updates per simulator step (default: 1)')
     parser.add_argument('--target_update_interval', type=int, default=1, metavar='N',
                         help='Value target update per no. of updates per step (default: 1)')
+    
+    parser.add_argument('--adaptive_error', default=False, action='store_true')
+    parser.add_argument('--wp', default=False, action='store_true')
 
     args = parser.parse_args()
     main(args)

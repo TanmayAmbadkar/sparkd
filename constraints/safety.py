@@ -109,7 +109,7 @@ class Box:
             
             all_inverted_polytopes.append(inverted_polytopes_for_batch)
         
-        return all_inverted_polytopes[0] if B == 1 else all_inverted_polytopes
+        return all_inverted_polytopes
 
     def intersects(self, other: 'Box') -> np.ndarray:
         """

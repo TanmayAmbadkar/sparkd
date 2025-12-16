@@ -62,7 +62,7 @@ class ActorCritic(nn.Module):
         )
 
         # A learnable parameter for the standard deviation of the action distribution
-        self.actor_logstd = nn.Parameter(-torch.ones(1, action_dim))
+        self.actor_logstd = nn.Parameter(-torch.zeros(1, action_dim))
 
     def get_value(self, state):
         """

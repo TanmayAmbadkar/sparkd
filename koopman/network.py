@@ -144,7 +144,7 @@ class KoopmanLightning(pl.LightningModule):
     """
     A Lightning Module that implements multi-step training of a Koopman model.
     """
-    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001, w_pred=1.0, w_recon=0.1, w_cons=0.5, w_eig=0.1):
+    def __init__(self, state_dim, embed_dim, control_dim, horizon, lr=0.001, w_pred=1.0, w_recon=0.1, w_cons=0.01, w_eig=0.1):
         """
         Args:
             state_dim (int): Dimensionality of the original state.
@@ -203,11 +203,11 @@ class KoopmanLightning(pl.LightningModule):
         pred_loss = self.criterion(pred_latents, target_latents)
 
         # # 4. Consistency loss (as in original code)
-        # decoded_states = pred_latents[:, :, :S_dim]
+        decoded_states = pred_latents[:, :, :S_dim]
         
-        # reencoded_latents = self.embedding_net(decoded_states.reshape(B * H, -1)).reshape(B, H, -1)
-        # consistency_loss = self.criterion(reencoded_latents, pred_latents)
-        consistency_loss = torch.tensor(0.0, device=self.device)
+        reencoded_latents = self.embedding_net(decoded_states.reshape(B * H, -1)).reshape(B, H, -1)
+        consistency_loss = self.criterion(reencoded_latents[:,:,S_dim:], pred_latents[:,:,S_dim:])
+        # consistency_loss = torch.tensor(0.0, device=self.device)
         # 5. Reconstruction loss (as in original code)
         if self.hparams.embed_dim == 0:
             recon_loss = torch.tensor(0.0, device=self.device)
@@ -228,25 +228,42 @@ class KoopmanLightning(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
+        # 1. Calculate Original Losses
         losses = self._calculate_losses(batch)
         
+        # Original weighted sum
         total_loss = (
             self.hparams.w_pred * losses['pred'] + 
             self.hparams.w_recon * losses['recon'] + 
             self.hparams.w_cons * losses['cons']
         )
+        
+        # 2. Get the Matrix Weights
         A_w = self.koopman_operator.A.weight
         B_w = self.koopman_operator.B.weight
 
-        # Calculate the L1 penalty
-        l1_penalty = 0.01 * (torch.norm(A_w, 1) + torch.norm(B_w, 1))
+        # 3. Original L1 Penalty (General Sparsity)
+        l1_penalty = 0.001 * (torch.norm(A_w, 1) + torch.norm(B_w, 1))
 
-        # Add the penalty to your main 
+        # 4. NEW: Coupling (Leakage) Penalty
+        # Extract the Top-Right block: 
+        # Rows 0 to state_dim (Physical outputs)
+        # Cols state_dim to end (Feature inputs)
+        s_dim = self.embedding_net.state_dim
+        leakage_block = A_w[:s_dim, s_dim:]
         
-        self.log('train_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('train_pred_loss', losses['pred'], prog_bar=True, on_step=False, on_epoch=True)
-        self.log('train_ev_score', losses['ev'], prog_bar=True, on_step=False, on_epoch=True)
-        return total_loss
+        # We use L1 norm to encourage zeros (sparsity) in this block
+        # You need a weight for this (e.g., 0.1 or 1.0)
+        w_coupling = 0.00
+        coupling_loss = w_coupling * torch.norm(leakage_block, p=1)
+
+        # 5. Sum Everything
+        final_loss = total_loss + l1_penalty + coupling_loss
+        
+        self.log('train_loss', final_loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('ev', losses['ev'], on_step = False, on_epoch = True, prog_bar=True) # Monitor this!
+        
+        return final_loss
 
     def validation_step(self, batch, batch_idx):
         losses = self._calculate_losses(batch)
@@ -266,7 +283,7 @@ class KoopmanLightning(pl.LightningModule):
         )
 
         self.log('val_loss', total_loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log('val_eig_penalty', eig_penalty, prog_bar=True, on_step=False, on_epoch=True)
+        self.log('val_ev', losses['ev'], prog_bar=True, on_step=False, on_epoch=True)
         return total_loss
 
     def configure_optimizers(self):

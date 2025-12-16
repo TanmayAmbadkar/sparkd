@@ -88,7 +88,6 @@ class PPO:
         states, actions, log_probs_old, returns, advantages = self.compute_advantages_and_returns(memory)
 
         # Normalize advantages for stability
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # --- FIX: Initialize accumulators BEFORE the epoch loop ---
         total_policy_loss, total_value_loss, total_entropy_loss = 0.0, 0.0, 0.0
@@ -107,7 +106,8 @@ class PPO:
                 ratios = torch.exp(log_probs - log_probs_old[batch_slice])
                 
                 # Policy Loss (Clipped Surrogate Objective)
-                norm_advantages = advantages[batch_slice].unsqueeze(1)
+                batch_advantages = (advantages[batch_slice] - advantages[batch_slice].mean()) / (advantages[batch_slice].std() + 1e-8)
+                norm_advantages = batch_advantages.unsqueeze(1)
                 surr1 = ratios * norm_advantages
                 surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * norm_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()

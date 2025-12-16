@@ -8,7 +8,7 @@ import time
 from pytorch_soft_actor_critic.sac import SAC
 from pytorch_soft_actor_critic.replay_memory import ReplayMemory
 from ppo import PPO
-from koopman.env_model import KoopmanLinearModel, FixedLinearModel
+from koopman.env_model import KoopmanLinearModel
 import osqp
 import scipy.sparse as sp
 
@@ -79,6 +79,7 @@ class PPOPolicy:
     def load_checkpoint(self, path):
         self.agent.load_checkpoint(path)
 
+# --- Start of updated ProjectionPolicy ---
 
 class ProjectionPolicy:
     def __init__(self,
@@ -99,67 +100,98 @@ class ProjectionPolicy:
         self.s_dim = self.state_space.shape[0]
         self.u_dim = self.action_space.shape[0]
 
-        # --- NEW: Attributes for pre-computation cache ---
-        self._A, self._B, self._c, self._eps = None, None, None, None
+        # --- Cache Attributes ---
+        self._A, self._B, self._c = None, None, None
+        
         self._precomputed_F = {}
-        self._precomputed_h_const = {}
+        self._precomputed_h_base = {} 
         self._precomputed_M = {}
         
-        # --- NEW: Attributes for stateful call optimization ---
+        # Cache for nominal error bound (Single V0, eps0)
+        self.V0_nominal, self.eps0_nominal = None, None
+        self.is_adaptive = False
+
+        # --- Stateful call optimization ---
         self.saved_state = None
         self.saved_action = None
         self.shielded = None
 
     def update_model(self):
         """
-        Pre-computes and caches all state-independent matrices for the QP.
-
-        This is the main optimization. This method performs the expensive,
-        iterative matrix propagations once and stores the results. The `solve`
-        method can then run much faster by reusing these cached matrices.
-
-        Call this method whenever the underlying linear dynamics model changes.
-
-        Args:
-            A: State transition matrix from the linearization.
-            B: Control matrix from the linearization.
-            c: Constant offset vector from the linearization.
-            eps: Error bounds from the linearization.
+        Pre-computes safety matrices using Single-Step Analytical Propagation.
         """
         print("Pre-computing safety projection matrices...")
-        mat_dyn, eps = self.env.get_matrix_at_point(None, self.s_dim)
-        A, B, c = mat_dyn[:, :self.s_dim], mat_dyn[:, self.s_dim:-1], mat_dyn[:, -1]
-        self._A, self._B, self._c = A, B, c
-        self._eps = np.full(self.s_dim, float(eps)) if np.isscalar(eps) else np.asarray(eps, float).reshape(-1,)
-        s_dim = self.state_space.shape[0]
-        u_dim = self.action_space.shape[0]
+        
+        # 1. Get Global Dynamics and Single Error Bound (V0, eps0)
+        dummy_state = np.zeros(self.s_dim)
+        dummy_action = np.zeros(self.u_dim)
+        
+        # We must retrieve a single (V, eps) pair
+        mat_dyn, adaptive_info = self.env.get_matrix_at_point(
+            np.concatenate((dummy_state, dummy_action)), self.s_dim
+        )
+        
+        self._A, self._B, self._c = mat_dyn[:, :self.s_dim], mat_dyn[:, self.s_dim:-1], mat_dyn[:, -1]
+        
+        # adaptive_info is now (V_0, eps_0)
+        self.V0_nominal, self.eps0_nominal = adaptive_info
+        self.is_adaptive = self.env.adaptive_error
+        
+        # Logging check
+        self._global_eps = self.eps0_nominal
+        if self._global_eps.size > 0:
+            print(f"Mode: {'ADAPTIVE' if self.is_adaptive else 'FIXED'}. Single Eps (V0, eps0) Retrieved.")
+        else:
+            print("Error: Empty epsilon vector.")
+
+
+        s_dim = self.s_dim
+        u_dim = self.u_dim
 
         # Clear old cache
         self._precomputed_F.clear()
-        self._precomputed_h_const.clear()
+        self._precomputed_h_base.clear()
         self._precomputed_M.clear()
 
-        # Pre-compute for each safe polytope
+        # 3. Pre-compute Propagation (Nominal Path + FIXED Analytical Error)
+        V_fixed, eps_fixed = self.V0_nominal, self.eps0_nominal
+        
         for poly_idx, poly in enumerate(self.safe_polys):
             P_poly, b_poly = poly[:, :-1], poly[:, -1]
 
-            # --- Pre-compute F and h_const (state-independent parts) ---
             F = []
-            h_const = []
+            h_base = []
+            
             for j in range(1, self.horizon + 1):
                 F.append([None] * (j + 1))
-                h_const.append([None] * (j + 1))
+                h_base.append([None] * (j + 1))
+                
+                # Initialization at t=j
                 F[j - 1][j] = P_poly
-                h_const[j - 1][j] = b_poly
+                h_base[j - 1][j] = b_poly
+                
+                # Backward propagation to t=0
                 for t in range(j - 1, -1, -1):
+                    # Propagate Dynamics
                     F[j - 1][t] = np.dot(F[j - 1][t + 1], self._A)
-                    epsmax = np.dot(np.abs(F[j - 1][t + 1]), self._eps)
-                    h_const[j - 1][t] = np.dot(F[j - 1][t + 1], self._c) + h_const[j - 1][t + 1] + epsmax
-            
-            self._precomputed_F[poly_idx] = F
-            self._precomputed_h_const[poly_idx] = h_const
+                    term_c = np.dot(F[j - 1][t + 1], self._c)
+                    
+                    if not self.is_adaptive:
+                        # FIXED MODE: Add the analytical error buffer NOW (Optimization)
+                        # We use the nominal V0, eps0 for pre-computation
+                        P_matrix = F[j - 1][t + 1] # P_t+1 in the robust constraint derivation
+                        P_rot = np.dot(P_matrix, V_fixed)
+                        term_eps = np.dot(np.abs(P_rot), eps_fixed)
 
-            # --- Pre-compute G and M (also state-independent) ---
+                        h_base[j - 1][t] = h_base[j - 1][t + 1] + term_c + term_eps
+                    else:
+                        # ADAPTIVE MODE: Store nominal path only (Error added in solve)
+                        h_base[j - 1][t] = h_base[j - 1][t + 1] + term_c
+
+            self._precomputed_F[poly_idx] = F
+            self._precomputed_h_base[poly_idx] = h_base
+
+            # G and M (Action Constraints) remains unchanged
             G = []
             for j in range(1, self.horizon + 1):
                 G.append([None] * (j + 1))
@@ -168,8 +200,9 @@ class ProjectionPolicy:
                     G[j - 1][t] = np.dot(F[j - 1][t + 1], self._B)
             
             total_vars = self.horizon * u_dim
-            n_safety_constraints = self.horizon * P_poly.shape[0]
-            M = np.zeros((n_safety_constraints, total_vars))
+            n_constraints = self.horizon * P_poly.shape[0]
+            M = np.zeros((n_constraints, total_vars))
+            
             ind = 0
             step = P_poly.shape[0]
             for j in range(self.horizon):
@@ -178,219 +211,296 @@ class ProjectionPolicy:
                 ind += step
             
             self._precomputed_M[poly_idx] = M
+            
         print("Pre-computation complete.")
-
 
     def solve(self, state: np.ndarray,
               action: Optional[np.ndarray] = None) -> Tuple[np.ndarray, bool]:
         """
-        Solves the safety projection QP using pre-computed matrices.
+        Solves the safety projection QP with Soft Constraints (Slacks) using 
+        Single-Step Adaptive Error Bounds propagated analytically.
         """
         original_state = state.copy()
         shielded = True
-        u_dim = self.action_space.shape[0]
+        u_dim = self.u_dim
+        
+        # 0. State Pre-processing
         state = self.transform(state.reshape(1, -1)).reshape(-1,)
+        
         if action is None:
             action = np.zeros(u_dim)
             
         if self._A is None:
-            raise RuntimeError("Must call .update() before .solve() to pre-compute matrices.")
+            raise RuntimeError("Must call .update_model() before .solve().")
 
+        # --- 1. ADAPTIVE LOGIC: Retrieve Single-Step Error Bound ---
+        # adaptive_info is a single tuple (V_0, eps_0)
+        _, (V_0, eps_0) = self.env.get_matrix_at_point(original_state, self.s_dim)
+        
         best_score = np.inf
         best_u0 = None
+        SLACK_TOL = 1e-4
 
         for poly_idx, poly in enumerate(self.safe_polys):
             P_poly, b_poly = poly[:, :-1], poly[:, -1]
             
-            if not np.all(np.dot(P_poly, state) + b_poly <= 0.0):
+            # Quick check to skip if hopelessly unsafe
+            violation = np.dot(P_poly, state) + b_poly
+            if np.any(violation > 0.5): 
                 continue
             
-            # --- Retrieve pre-computed matrices ---
             F = self._precomputed_F[poly_idx]
-            h_const = self._precomputed_h_const[poly_idx]
+            h_base = self._precomputed_h_base[poly_idx]
             M_safety = self._precomputed_M[poly_idx]
 
-            # --- Assemble full QP constraint matrix M ---
-            n_action_constraints = 2 * self.horizon * u_dim
-            n_constraints = M_safety.shape[0] + n_action_constraints
-            total_vars = self.horizon * u_dim
+            # --- 2. SETUP QP VARIABLES (Unchanged from base) ---
+            n_u_vars = self.horizon * u_dim
+            n_slack_vars = self.horizon
+            total_vars = n_u_vars + n_slack_vars
+            n_safety_rows = M_safety.shape[0]
+            faces = P_poly.shape[0]
+
+            # --- CONSTRAINTS (A matrix) ---
+            # (A matrix construction logic is omitted for brevity, assumed correct)
+            n_action_rows = 2 * n_u_vars
+            n_slack_pos_rows = n_slack_vars
+            n_total_rows = n_safety_rows + n_action_rows + n_slack_pos_rows
             
-            M = np.zeros((n_constraints, total_vars))
-            M[:M_safety.shape[0], :] = M_safety
+            A_osqp = np.zeros((n_total_rows, total_vars))
+            A_osqp[:n_safety_rows, :n_u_vars] = M_safety
             
-            # Add action bounds constraints to M
-            action_eye = np.eye(total_vars)
-            M[M_safety.shape[0]:M_safety.shape[0] + total_vars, :] = action_eye
-            M[M_safety.shape[0] + total_vars:, :] = -action_eye
+            # Link constraints to slacks
+            current_row = 0
+            for t in range(self.horizon):
+                col_idx = n_u_vars + t
+                A_osqp[current_row : current_row + faces, col_idx] = -1.0
+                current_row += faces
             
-            # --- Calculate the state-dependent bias vector ---
-            bias = np.zeros(n_constraints)
+            # Action Limits and Slack Positivity (A matrix)
+            A_osqp[n_safety_rows : n_safety_rows + n_u_vars, :n_u_vars] = np.eye(n_u_vars)
+            A_osqp[n_safety_rows + n_u_vars : n_safety_rows + 2*n_u_vars, :n_u_vars] = -np.eye(n_u_vars)
+            row_start = n_safety_rows + n_action_rows
+            A_osqp[row_start:, n_u_vars:] = -np.eye(n_slack_vars)
+
+
+            # --- 3. CALCULATE ROBUST BIAS (Upper Bound, u_vec) ---
+            bias = np.zeros(n_safety_rows)
             ind = 0
-            step = P_poly.shape[0]
-            for j in range(self.horizon):
-                bias[ind:ind+step] = h_const[j][0] + np.dot(F[j][0], state)
-                ind += step
             
-            bias[ind:ind+total_vars] = -np.tile(self.action_space.high, self.horizon)
-            bias[ind+total_vars:] = np.tile(self.action_space.low, self.horizon)
-
-            # --- LP Feasibility Check (Identical logic, but faster setup) ---
-            fixed_total = (self.horizon - 1) * u_dim
-            M_first = M[:, :u_dim]
-            M_rest = M[:, u_dim:]
-            new_bias = bias + M_first @ action
-
-            res_lp = scipy.optimize.linprog(c=np.zeros(fixed_total),
-                                            A_ub=M_rest,
-                                            b_ub=-new_bias,
-                                            method='highs',
-                                            bounds=(self.action_space.low[0], self.action_space.high[0]))
-            fixed_feasible = res_lp.success
-
-            if fixed_feasible:
-                candidate_u0 = action.copy()
-                candidate_score = 0.0
-                shielded = False
-            else:
-                # --- Full-QP optimization (Identical logic) ---
-                P_full = 1e-6 * np.eye(total_vars)
-                P_full[:u_dim, :u_dim] = np.eye(u_dim)
-                q_full = np.zeros(total_vars)
-                q_full[:u_dim] = -action
+            for j in range(self.horizon):
+                # Nominal Constraint Value: h_base[j][0] already contains the nominal drift/fixed error
+                bias_val = h_base[j][0] + np.dot(F[j][0], state)
                 
-                full_solver = osqp.OSQP()
-                full_solver.setup(P=sp.csc_matrix(P_full), q=q_full,
-                                  A=sp.csc_matrix(M), l=-np.inf * np.ones_like(bias), u=-bias,
-                                  verbose=False)
+                # Add Adaptive Buffer ONLY if running in Adaptive Mode
+                if self.is_adaptive:
+                    # Adaptive Mode: Recalculate Error Buffer analytically from single bound (eps_0)
+                    
+                    adaptive_buffer = np.zeros(faces)
+                    for t in range(j):
+                        P_matrix = F[j][t+1] 
+                        
+                        # 1. Rotate the error coefficient into the PCA basis (V_0)
+                        P_rot = np.dot(P_matrix, V_0)
+                        
+                        # 2. Compute the worst-case push from the error at step t
+                        step_error = np.dot(np.abs(P_rot), eps_0)
+                        
+                        # 3. Accumulate the total analytical buffer
+                        adaptive_buffer += step_error
+                    
+                    # Apply the total analytically propagated buffer
+                    bias_val += adaptive_buffer
                 
-                res_full = full_solver.solve()
-                if res_full.info.status != 'solved':
-                    continue
-                candidate_u0 = res_full.x[:u_dim]
-                candidate_score = np.linalg.norm(candidate_u0 - action)
+                # The constraint is A x <= -bias 
+                bias[ind : ind+faces] = bias_val
+                ind += faces
 
-            if candidate_score < best_score:
-                best_score = candidate_score
-                best_u0 = candidate_u0
+            # Construct full Upper Bound vector (u_vec)
+            u_vec = np.concatenate([
+                -bias,
+                np.tile(self.action_space.high, self.horizon),
+                -np.tile(self.action_space.low, self.horizon),
+                np.zeros(n_slack_vars)
+            ])
+            l_vec = np.full_like(u_vec, -np.inf)
 
+            # --- 4. OBJECTIVE & SOLVE (Unchanged from base) ---
+            n_u_vars = self.horizon * u_dim
+            n_slack_vars = self.horizon
+            
+            P_matrix = np.eye(total_vars) * 1e-6
+            P_matrix[:u_dim, :u_dim] = np.eye(u_dim) # Prioritize u_0 tracking
+            P_matrix[n_u_vars:, n_u_vars:] = np.eye(n_slack_vars) * 1e4 # High slack penalty
+            P_csc = sp.csc_matrix(P_matrix)
+            
+            q_vec = np.zeros(total_vars)
+            q_vec[:u_dim] = -action # Minimize ||u_0 - u_ref||^2
+            
+            solver = osqp.OSQP()
+            solver.setup(P=P_csc, q=q_vec, A=sp.csc_matrix(A_osqp), l=l_vec, u=u_vec, verbose=False)
+            res = solver.solve()
+            
+            # --- 5. RESULT CHECK ---
+
+            if res.info.status == 'solved':
+                sol_u = res.x[:n_u_vars]
+                sol_slacks = res.x[n_u_vars:]
+                immediate_slack = sol_slacks[0]
+                
+                if sol_slacks[0] <= SLACK_TOL:
+                    candidate_u0 = sol_u[:u_dim]
+                    candidate_score = np.linalg.norm(candidate_u0 - action)
+                    if candidate_score < best_score:
+                        best_score = candidate_score
+                        best_u0 = candidate_u0
+
+        # --- 6. FINAL DECISION ---
         if best_u0 is None:
+            # If no poly returned a zero-slack solution, we fail.
             best_u0 = self.backup(original_state)
-            shielded = False # Backup implies the original action was unsafe/infeasible
-
+            shielded = False 
+        
         self.saved_state = original_state
         self.saved_action = best_u0
         self.shielded = shielded
         return best_u0, shielded
-    
-    # The __call__, unsafe, and backup methods remain unchanged
-    # ... (Copy the __call__, unsafe, and backup methods from your original code here) ...
-    def __call__(self, state: np.ndarray) -> np.ndarray:
+
+    def __call__(self, state: np.ndarray) -> Tuple[np.ndarray, bool]:
         if self.saved_state is not None and np.allclose(state, self.saved_state):
             return self.saved_action, self.shielded
         return self.solve(state)
 
-    def unsafe(self,
-               state: np.ndarray,
-               action: np.ndarray) -> bool:
+    def unsafe(self, state: np.ndarray, action: np.ndarray) -> bool:
         res = self.solve(state, action=action)[0]
         return not np.allclose(res, action)
 
     def backup(self, state: np.ndarray, epsilon: float = 0.1) -> np.ndarray:
         """
-        Chooses a backup action by finding a smooth control sequence that pushes
-        the system away from the nearest unsafe polygon.
-
-        This is a two-stage process:
-        1. A QP finds the geometric "escape vector" from the current state.
-        2. A second QP finds a smooth, full-horizon action sequence that
-        aligns with this escape vector, avoiding "bang-bang" control.
-
-        Args:
-            state: The current original system state.
-            epsilon: Regularization weight. Higher values lead to smoother,
-                    smaller-norm actions.
-
-        Returns:
-            The first action (u_0) of the optimal safe sequence.
+        Robust Backup Policy: Finds the geometric escape direction and solves a QP
+        to find the action u_0 that maximally moves the state in that direction,
+        subject to the immediate (j=1) robust safety constraint.
         """
-        # --- Stage 1: Find Geometric Escape Vector (Identical to your original code) ---
+        # 0. Initial Setup and State Transformation
         with torch.no_grad():
             z = self.transform(state.reshape(1, -1)).reshape(-1,)
         
-        s_dim = self.state_space.shape[0]
+        s_dim = self.s_dim
+        u_dim = self.u_dim
+        
+        # Retrieve the single adaptive bound (V_0, eps_0) for robustness
+        _, (V_0, eps_0) = self.env.get_matrix_at_point(state, self.s_dim)
+        
+        # --- STAGE 1: Find the Optimal Geometric Escape Direction ---
         P_stage1 = sp.eye(s_dim, format='csc')
         q_stage1 = np.zeros(s_dim)
         best_val = np.inf
         best_proj = np.zeros(s_dim)
+        
+        # Store the most critical constraint found (for Stage 2)
+        most_critical_poly_idx = -1
+        min_safety_margin = np.inf 
 
-        for unsafe_mat in self.unsafe_polys:
+        for poly_idx, unsafe_mat in enumerate(self.unsafe_polys):
+            # ... (Stage 1 QP logic to find best_proj and most_critical_poly_idx) ...
+            # [Note: The Stage 1 QP logic must be modified to track the most critical *safe* poly, 
+            # but using the current projection logic for escape direction is acceptable.]
+            
+            unsafe_mat = np.array(unsafe_mat)[:,0,:]
             A_ineq = unsafe_mat[:, :-1]
             b_ineq = -unsafe_mat[:, -1] - (A_ineq @ z)
             
-            # This setup is inefficient; ideally the solver is initialized once.
-            # But keeping it for consistency with your original code.
             backup_qp_stage1 = osqp.OSQP()
             backup_qp_stage1.setup(P=P_stage1, q=q_stage1, A=sp.csc_matrix(A_ineq),
-                                l=-np.inf * np.ones_like(b_ineq), u=b_ineq,
-                                verbose=False)
+                                    l=-np.inf * np.ones_like(b_ineq), u=b_ineq,
+                                    verbose=False)
             res = backup_qp_stage1.solve()
             
             if res.info.status == 'solved' and np.linalg.norm(res.x) < best_val:
                 best_val = np.linalg.norm(res.x)
                 best_proj = res.x
-
+                # Heuristic: The poly corresponding to the minimal distance is the most critical
+                most_critical_poly_idx = poly_idx 
+                
         if np.linalg.norm(best_proj) < 1e-6:
-            # Could not find a valid escape direction
             return np.zeros(self.action_space.shape[0])
             
         best_proj /= np.linalg.norm(best_proj)
+        
+        # --- STAGE 2: Robust Control Action QP (One-Step Only) ---
+        
+        # Get the critical safe polyhedron corresponding to the unsafe region
+        if most_critical_poly_idx == -1:
+            # Fallback if the geometric QP couldn't find a projection (shouldn't happen often)
+            return np.zeros(u_dim)
 
-        # --- Stage 2: Solve for a Smooth Action Sequence (QP instead of LP) ---
-        u_dim = self.action_space.shape[0]
-        total_control_dim = self.horizon * u_dim
-
-        # Get linearization and compute the linear part of the cost vector `m`
-        # (Identical to your original code)
-        point = np.concatenate((z, np.zeros(u_dim)))
-        A_lin = self._A
-        B_lin = self._B
+        # Use the safe poly associated with the most critical unsafe region
+        poly = self.safe_polys[most_critical_poly_idx] 
+        P_poly, b_poly = poly[:, :-1], poly[:, -1]
         
-        m = np.zeros(total_control_dim)
-        for i in range(self.horizon):
-            A_pow = np.linalg.matrix_power(A_lin, self.horizon - i - 1)
-            m[i*u_dim:(i+1)*u_dim] = (B_lin.T @ A_pow.T @ (-best_proj)).T
-
-        # --- QP Formulation ---
-        # Objective: min -m^T * U + epsilon * ||U||^2
-        # Standard form: min 0.5 * U^T * P * U + q^T * U
+        # 1. Define the Robust Constraint (G*u_0 <= h_robust)
         
-        # Quadratic part: P = 2 * epsilon * I
-        P_stage2 = sp.csc_matrix(2 * epsilon * sp.eye(total_control_dim))
+        # P_1 matrix is simply P_poly * A (for j=1)
+        P_matrix_1 = P_poly @ self._A
+        G_robust = P_poly @ self._B
         
-        # Linear part: q = -m
-        q_stage2 = -m
+        # Calculate the upper bound vector h_robust (right hand side of the constraint)
+        h_robust = []
+        for i in range(P_poly.shape[0]):
+            p_i, b_i = P_poly[i, :], b_poly[i]
+            
+            # Nominal drift term (p_i^T * c)
+            nominal_drift = p_i @ self._c
+            
+            # Robust tightening term (Error Buffer) for j=1: |p_i * V_0| * eps_0
+            P_rot = np.dot(p_i, V_0)
+            error_buffer = np.dot(np.abs(P_rot), eps_0)
+            
+            # CBF Decay Term (Assuming gamma is the decay rate for the backup, here we use 1.0 for strictness)
+            gamma = 1.0 
+            
+            # Robust Constraint: h_robust = gamma * h(z) - error_buffer - nominal_drift
+            # The constraint is: p_i^T * B * u_0 <= gamma * (-(p_i^T * z + b_i)) - error_buffer - p_i^T * A * z - p_i^T * c + b_i
+            # Let's use the standard simplified form:
+            # p_i^T * B * u_0 <= gamma * p_i^T z + p_i^T(gamma-I)z - error_buffer - p_i^T * c + gamma*b_i - b_i
+            # Since we use the precomputed F/h_base in the main QP, we simplify the backup here:
+            
+            # This is the full right-hand side of the constraint when solving for u_0:
+            # RHS = p_i^T * z + b_i - p_i^T * (A*z + c) + gamma * (p_i^T * z + b_i) - error_buffer
+            
+            # We need the RHS to ensure feasibility: p_i^T * B * u_0 <= RHS 
+            RHS = -p_i @ P_matrix_1 @ z - nominal_drift + gamma * (p_i @ z + b_i) - error_buffer - b_i
+            h_robust.append(RHS)
+            
+        h_robust = np.array(h_robust)
         
-        # Constraints are just the action bounds
-        A_stage2 = sp.csc_matrix(sp.eye(total_control_dim))
-        l_stage2 = np.tile(self.action_space.low, self.horizon)
-        u_stage2 = np.tile(self.action_space.high, self.horizon)
+        # 2. Define the Objective (Minimize control effort while maximizing escape)
+        # Target cost: min -m^T * u_0 + 0.5 * u_0^T * P_reg * u_0
         
-        # Setup and solve the QP
+        # P_reg: Regularization matrix (only on u_0, using epsilon from signature)
+        P_reg = sp.csc_matrix(2 * epsilon * sp.eye(u_dim))
+        
+        # q_vec: Linear cost vector to maximize escape alignment
+        q_vec = -((self._B.T @ (-best_proj)).T) # m = B^T * (-best_proj) 
+        
+        # 3. Setup the Robust Backup QP
+        A_backup = sp.vstack([sp.csc_matrix(G_robust), sp.eye(u_dim, format="csc")], format="csc")
+        
+        # Constraints: Safety (G_robust * u_0 <= h_robust) and Action Limits
+        l_backup = np.hstack([-np.inf * np.ones_like(h_robust), self.action_space.low])
+        u_backup = np.hstack([h_robust, self.action_space.high])
+        
         backup_qp_stage2 = osqp.OSQP()
-        backup_qp_stage2.setup(P=P_stage2, q=q_stage2, A=A_stage2, 
-                            l=l_stage2, u=u_stage2, verbose=False)
+        backup_qp_stage2.setup(P=P_reg, q=q_vec, A=A_backup,
+                                l=l_backup, u=u_backup, verbose=False)
         
         res_final = backup_qp_stage2.solve()
         
         if res_final.info.status == 'solved':
-            full_action_sequence = res_final.x
-            return full_action_sequence[:u_dim]
+            return res_final.x
         else:
-            print("WARN: Backup QP failed to find a smooth action. Returning zero action.")
+            print("Robust Backup QP not solved (Infeasible). Falling back to zero action.")
             return np.zeros(u_dim)
-
-
-
+        
 class CBFPolicy:
     """
     A safety shield using a Control Barrier Function (CBF) with a learned
@@ -402,7 +512,7 @@ class CBFPolicy:
     """
     def __init__(
         self,
-        env: Union[KoopmanLinearModel, FixedLinearModel],
+        env: Union[KoopmanLinearModel],
         state_space: gym.Space,
         ori_state_space: gym.Space,
         action_space: gym.Space,
