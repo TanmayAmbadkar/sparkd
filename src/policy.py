@@ -330,7 +330,7 @@ class ProjectionPolicy:
             
             P_matrix = np.eye(total_vars) * 1e-6
             P_matrix[:u_dim, :u_dim] = np.eye(u_dim) # Prioritize u_0 tracking
-            P_matrix[n_u_vars:, n_u_vars:] = np.eye(n_slack_vars) * 1e4 # High slack penalty
+            P_matrix[n_u_vars:, n_u_vars:] = np.eye(n_slack_vars) * 1e10 # High slack penalty
             P_csc = sp.csc_matrix(P_matrix)
             
             q_vec = np.zeros(total_vars)
@@ -347,7 +347,7 @@ class ProjectionPolicy:
                 sol_slacks = res.x[n_u_vars:]
                 immediate_slack = sol_slacks[0]
                 
-                if sol_slacks[0] <= SLACK_TOL:
+                if np.allclose(sol_slacks[0], 0) <= SLACK_TOL:
                     candidate_u0 = sol_u[:u_dim]
                     candidate_score = np.linalg.norm(candidate_u0 - action)
                     if candidate_score < best_score:
@@ -366,19 +366,27 @@ class ProjectionPolicy:
         return best_u0, shielded
 
     def __call__(self, state: np.ndarray) -> Tuple[np.ndarray, bool]:
+        """
+        Main entry point for the shield.
+        """
         if self.saved_state is not None and np.allclose(state, self.saved_state):
             return self.saved_action, self.shielded
         return self.solve(state)
 
     def unsafe(self, state: np.ndarray, action: np.ndarray) -> bool:
-        res = self.solve(state, action=action)[0]
+        res, shielded = self.solve(state, action=action)
+        # If shielded is True, it means we modified the action -> Unsafe nominal
         return not np.allclose(res, action)
 
     def backup(self, state: np.ndarray, epsilon: float = 0.1) -> np.ndarray:
         """
-        Robust Backup Policy: Finds the geometric escape direction and solves a QP
-        to find the action u_0 that maximally moves the state in that direction,
-        subject to the immediate (j=1) robust safety constraint.
+        Robust Backup Policy ("Run Away"):
+        1. Finds the geometric escape direction from the nearest UNSAFE region.
+        2. Solves a QP to find a sequence of actions that maximally moves the state
+           in that escape direction over the horizon, subject to action bounds.
+           
+        QP Objective: 
+            maximize (projection_of_final_state_on_escape_dir) - penalty * ||u||^2
         """
         # 0. Initial Setup and State Transformation
         with torch.no_grad():
@@ -387,26 +395,18 @@ class ProjectionPolicy:
         s_dim = self.s_dim
         u_dim = self.u_dim
         
-        # Retrieve the single adaptive bound (V_0, eps_0) for robustness
-        _, (V_0, eps_0) = self.env.get_matrix_at_point(state, self.s_dim)
-        
-        # --- STAGE 1: Find the Optimal Geometric Escape Direction ---
+        # --- STAGE 1: Find the Escape Direction (from Unsafe Polys) ---
+        # Solving geometric QP to find shortest vector TO an unsafe region
         P_stage1 = sp.eye(s_dim, format='csc')
         q_stage1 = np.zeros(s_dim)
         best_val = np.inf
         best_proj = np.zeros(s_dim)
         
-        # Store the most critical constraint found (for Stage 2)
-        most_critical_poly_idx = -1
-        min_safety_margin = np.inf 
-
         for poly_idx, unsafe_mat in enumerate(self.unsafe_polys):
-            # ... (Stage 1 QP logic to find best_proj and most_critical_poly_idx) ...
-            # [Note: The Stage 1 QP logic must be modified to track the most critical *safe* poly, 
-            # but using the current projection logic for escape direction is acceptable.]
-            
             unsafe_mat = np.array(unsafe_mat)[:,0,:]
             A_ineq = unsafe_mat[:, :-1]
+            # Constraint: A_ineq * (z + d) <= -unsafe_mat[:,-1]
+            # A_ineq * d <= -unsafe_mat[:,-1] - A_ineq * z
             b_ineq = -unsafe_mat[:, -1] - (A_ineq @ z)
             
             backup_qp_stage1 = osqp.OSQP()
@@ -415,90 +415,87 @@ class ProjectionPolicy:
                                     verbose=False)
             res = backup_qp_stage1.solve()
             
-            if res.info.status == 'solved' and np.linalg.norm(res.x) < best_val:
-                best_val = np.linalg.norm(res.x)
-                best_proj = res.x
-                # Heuristic: The poly corresponding to the minimal distance is the most critical
-                most_critical_poly_idx = poly_idx 
-                
+            if res.info.status == 'solved':
+                dist = np.linalg.norm(res.x)
+                if dist < best_val:
+                    best_val = dist
+                    best_proj = res.x
+        
+        # Escape direction is opposite to the projection vector
+        # best_proj points FROM state TO unsafe region.
+        # We want to maximize movement in direction -best_proj.
         if np.linalg.norm(best_proj) < 1e-6:
-            return np.zeros(self.action_space.shape[0])
+            # Already inside or very close, or no unsafe regions found.
+            # If we are effectively "on top" of the unsafe region, picking a random direction
+            # or zero might be appropriate. Here we default to zero.
+            return np.zeros(self.u_dim)
             
-        best_proj /= np.linalg.norm(best_proj)
+        escape_dir = -best_proj / np.linalg.norm(best_proj)
         
-        # --- STAGE 2: Robust Control Action QP (One-Step Only) ---
+        # --- STAGE 2: Maximize Separation using QP ---
+        # Variable: u (sequence of H actions) -> size H * u_dim
+        # Dynamics expansion: x_H = A^H x_0 + sum(A^{H-1-i} B u_i) + terms(c)
+        # We want to Maximize: escape_dir^T * x_H
+        # Equivalent to Minimize: -escape_dir^T * (Linear_Term_of_u) + Regularization
         
-        # Get the critical safe polyhedron corresponding to the unsafe region
-        if most_critical_poly_idx == -1:
-            # Fallback if the geometric QP couldn't find a projection (shouldn't happen often)
-            return np.zeros(u_dim)
+        # 2a. Pre-compute the sensitivity of x_H to each u_i
+        # cost_vec (linear term q for QP) has size H * u_dim
+        
+        # We need the 'B' matrices. Since we might be in adaptive mode or not, 
+        # we strictly use the *current local linearization* at the state for the backup plan.
+        # This is a local approximation.
+        dummy_u = np.zeros(u_dim)
+        mat_dyn, _ = self.env.get_matrix_at_point(np.concatenate((z, dummy_u)), s_dim)
+        A = mat_dyn[:, :s_dim]
+        B = mat_dyn[:, s_dim:-1]
+        
+        q_qp = np.zeros(self.horizon * u_dim)
+        
+        # x_H term related to u_i is: A^{H-1-i} * B * u_i
+        # We want to minimize: -escape_dir^T * (A^{H-1-i} * B) * u_i
+        # So q_block_i = - (escape_dir^T * A^{H-1-i} * B)^T
+        
+        current_A_power = np.eye(s_dim) # Starts as A^0
+        
+        # We fill from i = H-1 down to 0 (since A power grows as we go back in time relative to u)
+        # u_{H-1} has Coeff B (A^0 B)
+        # u_{H-2} has Coeff AB (A^1 B)
+        for i in range(self.horizon - 1, -1, -1):
+            # Term for u_i: A^{H-1-i} * B
+            params = (current_A_power @ B)
+            
+            # Project onto escape direction
+            # sensitivity = escape_dir^T @ params  (shape 1 x u_dim)
+            sensitivity = escape_dir @ params
+            
+            # Add to objective (minimize negative projection)
+            q_qp[i*u_dim : (i+1)*u_dim] = -sensitivity
+            
+            # Update A power for next step (going backwards in time)
+            current_A_power = current_A_power @ A
 
-        # Use the safe poly associated with the most critical unsafe region
-        poly = self.safe_polys[most_critical_poly_idx] 
-        P_poly, b_poly = poly[:, :-1], poly[:, -1]
+        # 2b. Regularization (Smoothness)
+        # Min 0.5 * u^T P u
+        # We use a small epsilon weight from the method signature/default
+        reg_weight = epsilon 
+        P_qp = sp.eye(self.horizon * u_dim, format='csc') * reg_weight
         
-        # 1. Define the Robust Constraint (G*u_0 <= h_robust)
+        # 2c. Constraints (Action Bounds Only)
+        # l <= u <= u
+        A_constraints = sp.eye(self.horizon * u_dim, format='csc')
+        l_bounds = np.tile(self.action_space.low, self.horizon)
+        u_bounds = np.tile(self.action_space.high, self.horizon)
         
-        # P_1 matrix is simply P_poly * A (for j=1)
-        P_matrix_1 = P_poly @ self._A
-        G_robust = P_poly @ self._B
+        # 2d. Solve
+        solver = osqp.OSQP()
+        solver.setup(P=P_qp, q=q_qp, A=A_constraints, l=l_bounds, u=u_bounds, verbose=False)
+        res_qp = solver.solve()
         
-        # Calculate the upper bound vector h_robust (right hand side of the constraint)
-        h_robust = []
-        for i in range(P_poly.shape[0]):
-            p_i, b_i = P_poly[i, :], b_poly[i]
-            
-            # Nominal drift term (p_i^T * c)
-            nominal_drift = p_i @ self._c
-            
-            # Robust tightening term (Error Buffer) for j=1: |p_i * V_0| * eps_0
-            P_rot = np.dot(p_i, V_0)
-            error_buffer = np.dot(np.abs(P_rot), eps_0)
-            
-            # CBF Decay Term (Assuming gamma is the decay rate for the backup, here we use 1.0 for strictness)
-            gamma = 1.0 
-            
-            # Robust Constraint: h_robust = gamma * h(z) - error_buffer - nominal_drift
-            # The constraint is: p_i^T * B * u_0 <= gamma * (-(p_i^T * z + b_i)) - error_buffer - p_i^T * A * z - p_i^T * c + b_i
-            # Let's use the standard simplified form:
-            # p_i^T * B * u_0 <= gamma * p_i^T z + p_i^T(gamma-I)z - error_buffer - p_i^T * c + gamma*b_i - b_i
-            # Since we use the precomputed F/h_base in the main QP, we simplify the backup here:
-            
-            # This is the full right-hand side of the constraint when solving for u_0:
-            # RHS = p_i^T * z + b_i - p_i^T * (A*z + c) + gamma * (p_i^T * z + b_i) - error_buffer
-            
-            # We need the RHS to ensure feasibility: p_i^T * B * u_0 <= RHS 
-            RHS = -p_i @ P_matrix_1 @ z - nominal_drift + gamma * (p_i @ z + b_i) - error_buffer - b_i
-            h_robust.append(RHS)
-            
-        h_robust = np.array(h_robust)
-        
-        # 2. Define the Objective (Minimize control effort while maximizing escape)
-        # Target cost: min -m^T * u_0 + 0.5 * u_0^T * P_reg * u_0
-        
-        # P_reg: Regularization matrix (only on u_0, using epsilon from signature)
-        P_reg = sp.csc_matrix(2 * epsilon * sp.eye(u_dim))
-        
-        # q_vec: Linear cost vector to maximize escape alignment
-        q_vec = -((self._B.T @ (-best_proj)).T) # m = B^T * (-best_proj) 
-        
-        # 3. Setup the Robust Backup QP
-        A_backup = sp.vstack([sp.csc_matrix(G_robust), sp.eye(u_dim, format="csc")], format="csc")
-        
-        # Constraints: Safety (G_robust * u_0 <= h_robust) and Action Limits
-        l_backup = np.hstack([-np.inf * np.ones_like(h_robust), self.action_space.low])
-        u_backup = np.hstack([h_robust, self.action_space.high])
-        
-        backup_qp_stage2 = osqp.OSQP()
-        backup_qp_stage2.setup(P=P_reg, q=q_vec, A=A_backup,
-                                l=l_backup, u=u_backup, verbose=False)
-        
-        res_final = backup_qp_stage2.solve()
-        
-        if res_final.info.status == 'solved':
-            return res_final.x
+        if res_qp.info.status == 'solved':
+            # Return only the first action u_0
+            return res_qp.x[:u_dim]
         else:
-            print("Robust Backup QP not solved (Infeasible). Falling back to zero action.")
+            print("Run Away QP failed. Returning zero action.")
             return np.zeros(u_dim)
         
 class CBFPolicy:
