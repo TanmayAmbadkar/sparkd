@@ -62,7 +62,8 @@ class PendulumEnv(gym.Env):
         done = bool(abs(theta) >= 0.4) or \
             self.steps >= self._max_episode_steps or self.unsafe(self.state)
         self.steps += 1
-        return self.state, reward, done, False, {}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(self.state) else 0.0
+        return  self.state,  reward, cost,  done,  False,  {}
 
     def predict_done(self, state: np.ndarray) -> bool:
         return abs(state[0]) >= 0.4

@@ -1,0 +1,4 @@
+defaults:
+  - config
+  - override agent: ppo
+  - _self_

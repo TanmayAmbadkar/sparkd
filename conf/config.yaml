@@ -1,0 +1,23 @@
+defaults:
+  - agent: sac
+  - env: SafetyAntVelocity-v1
+  - _self_
+
+seed: 123456
+cuda: false
+render: false
+load_dir: null
+
+# Global VLL Settings (Can be overridden by agent or cli)
+# Note: Some agents might override these in their specific configs or code
+train_vll: true
+vll_steps: 10000
+vll_epochs_dyn: 100
+vll_epochs_cbf: 100
+horizon: 5
+red_dim: 100
+
+# Evaluation
+eval_steps: 5000
+
+# Output directory will be managed by Hydra (runs/date/time)

@@ -87,7 +87,8 @@ class WalkerEnv(gym.Env):
             # state = self.reduce_state(state)
         self.step_counter+=1
         
-        return state, reward, self.done, truncation, {}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(state) else 0.0
+        return  state,  reward, cost,  self.done,  truncation,  {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)

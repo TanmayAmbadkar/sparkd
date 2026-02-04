@@ -112,7 +112,8 @@ class CarRacingEnv(gym.Env):
         if self.render_mode == "human":
             self.render()
 
-        return self.state, reward, terminated, truncated, {'state_original': self.state}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(self.state) else 0.0
+        return  self.state,  reward, cost,  terminated,  truncated,  {'state_original': self.state}
 
     def render(self):
         if self.render_mode is None:

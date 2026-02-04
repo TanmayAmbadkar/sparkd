@@ -12,7 +12,6 @@ class HumanoidEnv(gym.Env):
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
         self.state_processor = state_processor
         self.safety = safety
-        print(self.observation_space)
 
         self._max_episode_steps = 1000
        
@@ -67,13 +66,11 @@ class HumanoidEnv(gym.Env):
         self.original_safety = input_box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
-        print(self.original_safety)
         # print(self.observation_space)
         
     def unsafe_constraints(self):
         
         self.polys = self.safety.invert_polytope(self.env.observation_space)
-        print(len(self.polys))
             
 
     def step(self, action):
@@ -85,7 +82,8 @@ class HumanoidEnv(gym.Env):
         
         self.step_counter+=1
         
-        return state, reward, self.done, truncation, {}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(state) else 0.0
+        return  state,  reward, cost,  self.done,  truncation,  {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)

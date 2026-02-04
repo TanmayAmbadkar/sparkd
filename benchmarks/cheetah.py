@@ -61,14 +61,11 @@ class CheetahEnv(gym.Env):
         self.original_safety = input_box_domain
         self.safe_polys = polys
         self.original_safe_polys = polys
-        print(self.original_safety)
         # print(self.observation_space)
         
     def unsafe_constraints(self):
         
         self.polys = self.safety.invert_polytope(self.env.observation_space)
-        print(len(self.polys))
-            
 
     def step(self, action):
         
@@ -87,7 +84,8 @@ class CheetahEnv(gym.Env):
             # state = self.reduce_state(state)
         self.step_counter+=1
         
-        return state, reward, self.done, truncation, {}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(state) else 0.0
+        return  state,  reward, cost,  self.done,  truncation,  {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)

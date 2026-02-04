@@ -5,8 +5,8 @@ from constraints import safety
 import sys
 from gymnasium.wrappers import NormalizeObservation
 class AntEnv(gym.Env):
-    def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("Ant-v5", render_mode="rgb_array")
+    def __init__(self, state_processor=None, reduced_dim=None, safety=None, render_mode="rgb_array"):
+        self.env = gym.make("Ant-v5", render_mode=render_mode)
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))
@@ -80,7 +80,8 @@ class AntEnv(gym.Env):
         
         self.step_counter+=1
         
-        return state, reward, self.done, truncation, {}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(state) else 0.0
+        return  state,  reward, cost,  self.done,  truncation,  {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)

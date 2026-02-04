@@ -24,6 +24,24 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class CNNBase(nn.Module):
+    def __init__(self, in_channels, feature_dim=64):
+        super(CNNBase, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten()
+        )
+        self.out_dim = 64
+
+    def forward(self, x):
+        return self.net(x)
+
 class ActorCritic(nn.Module):
     """
     A standard Actor-Critic network that outputs actions for a continuous
@@ -43,18 +61,25 @@ class ActorCritic(nn.Module):
         self.action_space = action_space
         action_dim = action_space.shape[0]
 
-        # Critic Network: Estimates the value of a state
+        self.cnn = None
+        if isinstance(obs_dim, (tuple, list)) and len(obs_dim) == 3:
+             self.cnn = CNNBase(obs_dim[0])
+             input_dim = self.cnn.out_dim
+        else:
+             input_dim = obs_dim
+
+        # Critic Network
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, hidden_dim)),
+            layer_init(nn.Linear(input_dim, hidden_dim)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
-        # Actor Network: Outputs the mean of the action distribution
+        # Actor Network
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, hidden_dim)),
+            layer_init(nn.Linear(input_dim, hidden_dim)),
             nn.Tanh(),
             layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
@@ -65,28 +90,16 @@ class ActorCritic(nn.Module):
         self.actor_logstd = nn.Parameter(-torch.ones(1, action_dim))
 
     def get_value(self, state):
-        """
-        Gets the value of a state from the critic network.
-
-        Args:
-            state (torch.Tensor): The input state.
-
-        Returns:
-            torch.Tensor: The estimated value of the state.
-        """
-        return self.critic(state)
+        x = state
+        if self.cnn is not None:
+            x = self.cnn(x)
+        return self.critic(x)
 
     def get_policy(self, state):
-        """
-        Gets the policy's action distribution for a given state.
-
-        Args:
-            state (torch.Tensor): The input state.
-
-        Returns:
-            torch.distributions.Normal: The action distribution.
-        """
-        action_mean = self.actor_mean(state)
+        x = state
+        if self.cnn is not None:
+             x = self.cnn(x)
+        action_mean = self.actor_mean(x)
         
         # --- MODIFICATION FOR STABILITY ---
         # Clamp the log_std to prevent it from becoming too large or small

@@ -5,8 +5,8 @@ from constraints import safety
 import sys
 
 class LunarLanderEnv(gym.Env):
-    def __init__(self, state_processor=None, reduced_dim=None, safety=None):
-        self.env = gym.make("LunarLander-v3", continuous=True, render_mode = "rgb_array")
+    def __init__(self, state_processor=None, reduced_dim=None, safety=None, render_mode="rgb_array"):
+        self.env = gym.make("LunarLander-v3", continuous=True, render_mode=render_mode)
         self.action_space = self.env.action_space
         self.original_observation_space = self.env.observation_space
         self.continuous = True
@@ -23,7 +23,7 @@ class LunarLanderEnv(gym.Env):
         self.polys = []
         self.transformed_polys = []
         self.transformed_safe_polys = []
-        self.render_mode = "rgb_array"
+        self.render_mode = render_mode
         
         self.safety_constraints()
         self.unsafe_constraints()
@@ -99,7 +99,8 @@ class LunarLanderEnv(gym.Env):
         #     reward = -100
         
         
-        return state, reward, self.done, truncation, {}
+        cost = 1.0 if hasattr(self, 'unsafe') and self.unsafe(state) else 0.0
+        return  state,  reward, cost,  self.done,  truncation,  {}
 
     def reset(self, **kwargs):
         state, info = self.env.reset(**kwargs)

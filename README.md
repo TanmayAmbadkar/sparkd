@@ -1,89 +1,112 @@
-# RAMPS: Robust Adaptive Multi-Step Predictive Shielding
+# VLL-HPS: Variational Latent-Linear Horizon-Predictive Shielding
 
-This repository contains the official implementation for the paper: **"Safer Policies via Affine Representations using Koopman Dynamics"**. RAMPS is a scalable safety shielding framework for deep reinforcement learning that operates in high-dimensional, continuous state and action spaces.
-
-It combines a learned, globally linear dynamics model based on **Koopman operator theory** with a **multi-step robust Control Barrier Function (CBF)** to provide strong safety assurances during exploration.
-
----
+This repository implements **VLL-HPS**, a framework for safe reinforcement learning that combines deep variational autoencoders with **Spectral Koopman Operator Theory** to learn a latent safety shield.
 
 ## Key Features
 
-- **Scalable Dynamics Learning:** Uses a Deep Koopman Operator to learn a single, globally linear model of the environment's dynamics, avoiding the curse of dimensionality that affects methods based on state-space partitioning.
-- **Robust Multi-Step Shielding:** Implements a novel multi-step robust CBF that can handle systems with high relative degrees ("trap states") and provides guarantees even with an imperfect, learned model.
-- **Adaptive Horizon Selection:** Employs a binary search to find the largest feasible prediction horizon at each timestep, maximizing foresight without relying on inaccurate long-term predictions.
-- **High Performance:** The shielding logic is highly optimized, with state-independent components pre-computed to allow for lightweight, real-time execution. It is compatible with high-speed QP solvers like OSQP and qpOASES.
-- **Modular and Flexible:** The code is structured to be modular, allowing for easy integration with different RL agents (PPO and SAC is included) and environments.
+- **Spectral Diagonal Dynamics**: Learns a low-dimensional latent space ($z$) where dynamics are diagonalized in the complex domain ($Z_{t+1} = \Lambda \odot Z_t + BU_t$), reducing complexity from $O(d^2)$ to $O(d)$.
+- **Guaranteed Stability**: Explicitly constrains the real part of eigenvalues ($\text{Re}(\Lambda) \le 0$) to ensure bounded latent trajectories.
+- **Probabilistic Safety**: Uses a variational approach to model uncertainty and enforce safety with high probability.
+- **Horizon-Predictive Shielding**: Uses a learned Control Barrier Function (CBF) head to predict long-term safety horizons.
+- **Differentiable Optimization**: Integrates a QP solver (OSQP) at runtime to minimally alter RL actions to ensure safety.
 
 ---
 
-## Core Components
+## Neural Architecture
 
-The implementation is centered around two main Python classes:
+The `VDK_Shield` model consists of four main components:
 
-1.  `KoopmanLightning`: A [PyTorch Lightning](https://www.pytorchlightning.ai/) module for training the Deep Koopman Operator. It implements a multi-component loss function to ensure the learned model is accurate, stable, and reconstructs the original state.
+1.  **Probabilistic Encoder** ($q_\phi(z|x)$):
+    *   Maps high-dimensional observations $x$ to a distribution over latent states $z \sim \mathcal{N}(\mu, \sigma^2)$.
+    *   **TabularEncoder**: MLP for state vectors.
+    *   **VisualEncoder**: CNN for pixel observations.
 
-2.  `CBFPolicy`: The RAMPS shield itself. This class takes a learned Koopman model and a set of safety constraints (defined as polyhedra) and performs the real-time safety verification.
-    - `update_model()`: The pre-computation method that builds the QP structure.
-    - `solve()`: The lightweight, real-time method that finds a safe action.
+2.  **Generative Decoder** ($p_\theta(x|z)$):
+    *   Reconstructs observations from latent states.
+
+3.  **Spectral Koopman Dynamics**:
+    *   **Diagonal Operator** $\Lambda = \mu + i\omega$ (learnable parameters).
+    *   **Control Matrix** $B = B_{re} + i B_{im}$.
+    *   Dynamics: $z_{t+1} = (\mu + i\omega) \odot z_t + (B_{re} + i B_{im}) u_t$.
+
+4.  **Latent CBF Head** ($w, \beta$):
+    *   A linear head on top of the latent features (concatenated Re/Im parts) to predict the safety value.
+    *   $V(z) = w^T [\text{Re}(z); \text{Im}(z)] + \beta$.
 
 ---
 
-## Getting Started
+## Training Process
 
-### Prerequisites
+Training is performed in two distinct stages.
 
-- Python 3.8+
-- PyTorch
-- PyTorch Lightning
-- Gymnasium
-- OSQP (or qpOASES)
-- NumPy, SciPy
+### Phase 1: Variational Koopman Dynamics (VDK)
+**Objective**: Learn a latent space that is generative, linear, and stable.
 
-### Installation
+**Loss Functions**:
+*   $\mathcal{L}_{rec}$: Reconstruction loss (observation space).
+*   $\mathcal{L}_{lin}$: Latent linearity loss $\|\mu_{next} - \text{Re}(z_{next}^{pred})\|^2$.
+*   $\mathcal{L}_{KL}$: KL divergence between posterior and predicted prior.
+*   $\mathcal{L}_{spec}$: Spectral regularization on $|\Lambda|$ to discourage vanishing/exploding gradients.
 
-1.  Clone the repository:
-    ```bash
-    git clone [https://github.com/your-username/sparkd.git](https://github.com/your-username/sparkd.git)
-    cd sparkd
-    ```
+### Phase 2: Robust Safety Value Iteration (CBF)
+**Objective**: Learn a safety value function $V(z)$ that predicts the "Horizon Safety" of a state.
 
-2.  Install the required packages:
-    ```bash
-    pip install -r requirements.txt
-    ```
+**Loss Function**:
+*   **Robust Asymmetric MSE**: Penalizes over-optimism (predicting safe when unsafe) more heavily than over-conservatism.
 
-### Training an Agent
+---
 
-The main training script is `main_ppo.py`. You can run it with various command-line arguments to configure the environment, hyperparameters, and shielding settings.
+## Runtime Shielding
 
-To train a PPO agent on the `SafeCheetah` environment with the RAMPS shield enabled:
+At inference time, the VLL-HPS shield intercepts actions $u_{RL}$ from the agent:
 
+1.  **Encode**: State $x_t \to z_t$.
+2.  **Safety Margin**: Calculate adaptive margin $M_t$ by propagating uncertainty variance through the spectral dynamics $|\Lambda|^2$.
+3.  **QP Optimization**: Solve the following Quadratic Program to find safe action $u^*$:
+    $$u^* = \arg\min_u \|u - u_{RL}\|^2$$
+    Subject to:
+    $$(w^T B_{eff}) u \ge M_t - \text{Term}_{state} - \beta$$
+    where the constraints are precomputed from latent parameters effectively.
+
+---
+
+## Usage
+
+### Basic Training (Unsafe / Baseline)
+Train a standard SAC/PPO agent without shielding:
 ```bash
-python main_ppo.py \
-    --env_name cheetah \
-    --seed 42 \
-    --num_steps 1000000 \
-    --lr 3e-4 \
-    --horizon 5 \
-    --red_dim 34 \
-    --cuda
+python main_sac.py --env_name ant --num_steps 1000000
 ```
 
-To run an ablation study without the safety shield:
+### Training VLL-HPS (End-to-End Pipeline)
+To run the full VLL-HPS data collection, training, and execution pipeline within the RL training loop:
+
 ```bash
-python main_ppo.py --env_name cheetah --no_safety --num_steps 1000000 --lr 3e-4 --cuda
+python main_sac.py \
+    --env_name ant \
+    --train_vll \
+    --vll_steps 20000 \
+    --vll_epochs_dyn 100 \
+    --vll_epochs_cbf 100 \
+    --vll_finetune_steps 50000
 ```
 
----
+**Flags:**
+*   `--train_vll`: Enables the VLL-HPS pipeline.
+*   `--vll_steps`: Number of random steps to collect for initial VLL pre-training.
+*   `--vll_epochs_dyn`: Epochs for training dynamics (Phase 1).
+*   `--vll_epochs_cbf`: Epochs for training CBF head (Phase 2).
+*   `--vll_finetune_steps`: Interval for periodically re-labeling data and fine-tuning the VLL shield.
 
-## How It Works
+### PPO Support
+VLL-HPS is also supported for PPO:
+```bash
+python main_ppo.py --env_name ant --train_vll --vll_steps 10000
+```
 
-RAMPS operates in an iterative loop:
+### Rendering and Evaluation
+To visualize the agent's performance, use the `--render` flag. Videos are saved to `runs_sac/<experiment_name>/videos/`.
 
-1.  **Collect Data:** An RL agent (e.g., PPO) interacts with the environment to collect a dataset of state-action-next_state transitions.
-2.  **Learn Dynamics:** The `KoopmanLightning` model is trained on this data to learn the `A`, `B`, and `c` matrices of a global linear system and a worst-case error bound `epsilon`.
-3.  **Update Shield:** The `CBFPolicy` shield is initialized or updated with the newly learned dynamics. It performs an expensive, one-time pre-computation of the QP constraints.
-4.  **Safe Exploration:** The RL agent continues to explore, but every action it proposes is first sent to the `CBFPolicy.solve()` method. The shield efficiently solves a multi-step QP to find the closest safe action, which is then executed in the environment.
-5.  **Repeat:** The new, safe data is added to the dataset, and the process repeats, creating a virtuous cycle where a more accurate model leads to a less conservative and higher-performing shield.
-
----
+```bash
+python main_sac.py --env_name ant --train_vll --render
+```
