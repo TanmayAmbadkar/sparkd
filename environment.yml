@@ -1,0 +1,25 @@
+name: sparkd
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - pytorch
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  - pip
+  - pip:
+    - gymnasium
+    - safety-gymnasium
+    - imageio
+    - osqp
+    - pygame
+    - pytorch-lightning
+    - scikit-learn
+    - torchmetrics
+    - hydra-core
+    - tensorboard
+    - moviepy

@@ -1,20 +1,20 @@
+
 import os
 import torch
 import numpy as np
-import imageio
+from src.algorithms.sac.replay_memory import ReplayMemory
 from torch.utils.tensorboard import SummaryWriter
 from typing import Any, Tuple, Optional, Dict, List
+from src.data_collection import compute_horizon_labels
+from src import train_vdk
 
 from src.vdk_shield import VDK_Shield, VisualEncoder, VisualDecoder, TabularEncoder, TabularDecoder
 from src.shield import VDK_Runtime
-from src.policy import Shield, ShieldPolicy
-from src.data_collection import compute_horizon_labels
-import src.train_vdk as train_vdk
-from pytorch_soft_actor_critic.replay_memory import ReplayMemory
-
-# Define a minimal Agent Protocol for type hinting if supported, otherwise use Any
-# For now, we use Any as the Agent can be SACPolicy or PPOPolicy which are structurally different but share .add() and __call__()
-AgentType = Any 
+from src.policies.shield import Shield, ShieldPolicy
+from src.policies.abstract_agent import Agent
+import imageio
+# Use the Abstract Base Class for typing
+AgentType = Agent 
 
 def load_vdk_shield(
     shield_path: str, 
@@ -212,7 +212,11 @@ def run_vll_finetuning(
     checkpoint = torch.load(vll_save_path)
     # Access the internal model
     # safe_agent -> shield (ShieldPolicy) -> runtime (VDK_Runtime) -> model (VDK_Shield)
-    vdk_shield = safe_agent.shield.shield_runtime.model 
+    vdk_shield = (
+        safe_agent.shield.shield_runtime.model 
+        if hasattr(safe_agent.shield, 'shield_runtime') 
+        else safe_agent.shield.runtime.model # Fallback if I messed up
+    ) 
     vdk_shield.load_state_dict(checkpoint['state_dict'])
     if args.cuda: vdk_shield = vdk_shield.cuda()
     

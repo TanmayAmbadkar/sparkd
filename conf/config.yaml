@@ -21,3 +21,10 @@ red_dim: 100
 eval_steps: 5000
 
 # Output directory will be managed by Hydra (runs/date/time)
+hydra:
+  run:
+    dir: runs_${agent.name}/${now:%Y-%m-%d_%H-%M-%S}_${agent.name}_${env_name}_H${horizon}_D${red_dim}_S${seed}
+  sweep:
+    dir: runs_${agent.name}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: true

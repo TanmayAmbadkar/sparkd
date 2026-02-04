@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 import torch
 import gymnasium as gym
-from benchmarks import envs
+from src.envs import envs
 from tqdm import tqdm
 
 def compute_horizon_labels(

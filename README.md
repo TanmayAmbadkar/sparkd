@@ -72,41 +72,51 @@ At inference time, the VLL-HPS shield intercepts actions $u_{RL}$ from the agent
 
 ## Usage
 
+### Unified Entry Point
+All experiments are now run through a single `main.py` script using [Hydra](https://hydra.cc/) for configuration.
+
 ### Basic Training (Unsafe / Baseline)
-Train a standard SAC/PPO agent without shielding:
+Train a standard agent (SAC or PPO) without shielding:
+
 ```bash
-python main_sac.py --env_name ant --num_steps 1000000
+# Run SAC on Ant
+python main.py agent=sac env=ant
+
+# Run PPO on Ant
+python main.py agent=ppo env=ant
 ```
 
 ### Training VLL-HPS (End-to-End Pipeline)
-To run the full VLL-HPS data collection, training, and execution pipeline within the RL training loop:
+To run the full VLL-HPS data collection, training, and execution pipeline:
 
 ```bash
-python main_sac.py \
-    --env_name ant \
-    --train_vll \
-    --vll_steps 20000 \
-    --vll_epochs_dyn 100 \
-    --vll_epochs_cbf 100 \
-    --vll_finetune_steps 50000
+python main.py agent=sac env=ant train_vll=true
 ```
 
-**Flags:**
-*   `--train_vll`: Enables the VLL-HPS pipeline.
-*   `--vll_steps`: Number of random steps to collect for initial VLL pre-training.
-*   `--vll_epochs_dyn`: Epochs for training dynamics (Phase 1).
-*   `--vll_epochs_cbf`: Epochs for training CBF head (Phase 2).
-*   `--vll_finetune_steps`: Interval for periodically re-labeling data and fine-tuning the VLL shield.
+**Common Hydra Overrides:**
+*   `train_vll=true`: Enables the VLL-HPS pipeline.
+*   `vll_steps=20000`: Random steps for VLL pre-training.
+*   `vll_epochs_dyn=100`: Epochs for training dynamics.
+*   `num_steps=1000000`: Total training steps.
+*   `seed=123`: Random seed.
 
-### PPO Support
-VLL-HPS is also supported for PPO:
+Example:
 ```bash
-python main_ppo.py --env_name ant --train_vll --vll_steps 10000
+python main.py agent=ppo env=ant train_vll=true vll_steps=10000 seed=42
 ```
 
 ### Rendering and Evaluation
-To visualize the agent's performance, use the `--render` flag. Videos are saved to `runs_sac/<experiment_name>/videos/`.
+To verify and visualize the agent:
 
 ```bash
-python main_sac.py --env_name ant --train_vll --render
+python main.py agent=ppo env=ant render=true eval_steps=5000
 ```
+Videos are saved to `runs_{agent}/<experiment_name>/videos/`.
+
+## Directory Structure
+*   `src/`: Core source code.
+    *   `src/algorithms`: PPO and SAC implementations.
+    *   `src/envs`: Environment wrappers (Humanoid, Ant, etc.).
+    *   `src/policies`: Agent policies and Shield logic.
+*   `conf/`: Hydra configuration files (`agent/`, `env/`, `config.yaml`).
+*   `runs_{agent}/`: Unified output directory for logs, checkpoints, and videos.
