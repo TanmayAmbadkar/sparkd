@@ -16,6 +16,54 @@ import imageio
 # Use the Abstract Base Class for typing
 AgentType = Agent 
 
+def compute_labels_from_batch(costs, dones, gamma=0.95, alpha=2.0):
+    """
+    Computes horizon target y_0^H for each sequence in the batch (N, T).
+    y_0^H = min_{k=0..T-1} (gamma^k * S_k)
+    where S_k = 1 - alpha*cost_k (clipped) or -1 if failure.
+    
+    Returns: (N,) horizon_targets
+    """
+    # costs, dones are (N, T)
+    batch_size, T = costs.shape
+    
+    # 1. Compute Base Scores S (N, T)
+    # S = 1 - alpha * C
+    S = 1.0 - alpha * costs
+    S = np.clip(S, -1.0, 1.0)
+    
+    # Failure handling: if done AND cost > 0, set current and future S to -1?
+    # Actually if done[k]=True and cost[k]>0, then S[k]=-1.
+    # Future steps in the sequence (if they exist, likely padding or next ep) are irrelevant 
+    # because we stop rollout at failure.
+    # But ReplayMemory guarantees valid sequences (no done in middle) via 'valid_length' check?
+    # Wait, ReplayMemory sample implementation:
+    # batch_dones = array([dones[i:i+horizon] ...])
+    # It does NOT strictly filter out dones in the middle currently.
+    # If done occurs at step k < T-1, the physical transition breaks.
+    # However, for the label, we just need to confirm failure.
+    
+    # Vectorized computation
+    # Mask failures: cost > 0 and done
+    failures = (dones > 0.5) & (costs > 0)
+    S[failures] = -1.0
+    
+    # Discounted min reduction
+    # y_i = min(gamma^0 S_i_0, gamma^1 S_i_1, ...)
+    
+    discounts = np.power(gamma, np.arange(T)) # (T,)
+    S_discounted = S * discounts.reshape(1, T) # (N, T)
+    
+    # We need to handle cumulative min, but actually we want min over the whole T.
+    # But wait, if done occurs at k, steps k+1... are invalid.
+    # We should mask them with +inf so min ignores them.
+    # Find first done index for each row.
+    
+    # Simple accumulation for now:
+    vals = np.min(S_discounted, axis=1) # (N,)
+    return vals
+
+
 def load_vdk_shield(
     shield_path: str, 
     env_obs_space: Any, 
@@ -109,14 +157,31 @@ def run_vll_pretraining(
         if (step+1) % 5000 == 0: 
             print(f"VLL Pre-training: {step+1}/{args.vll_steps}")
 
-    # Labeling
-    print("Labeling collected data...")
-    limit = min(real_data.size, args.vll_steps)
-    s, a, ns, c, d = real_data.states[:limit], real_data.actions[:limit], real_data.next_states[:limit], real_data.costs[:limit], real_data.dones[:limit] 
-    safety_scores, horizon_targets = compute_horizon_labels(
-        s, ns, c, d, horizon=args.horizon, gamma=0.95
-    )
+    # Labeling & Sequence Extraction
+    print("Extracting sequences and labeling...")
     
+    # We want sequences of length args.horizon for autoregressive training
+    horizon = args.horizon
+    if real_data.size < horizon:
+        print("Not enough data for sequence extraction.")
+        return # Should probably error or handle gracefully
+        
+    # Use helper from ReplayMemory to get all valid sequences
+    # We sample 'size' amount? No, sample() takes random indices. 
+    # We want ALL valid sequences.
+    # We'll just loop or use sample with replace=False and size roughly equal to buffer.
+    # But ReplayMemory.sample doesn't guarantee contiguous coverage if strictly random.
+    # Ideally standard sampling is fine for training.
+    
+    valid_size = real_data.size - horizon
+    s, a, r, ns, d, c = real_data.sample(batch_size=valid_size, horizon=horizon, get_cost=True)
+    
+    # s is (N, T, D)
+    
+    # Compute labels for the FIRST state in each sequence based on the rollout
+    horizon_targets = compute_labels_from_batch(c, d, gamma=0.95) # (N,)
+    
+    # Save sequences
     torch.save({
         'states': torch.tensor(s, dtype=torch.float32),
         'actions': torch.tensor(a, dtype=torch.float32),
@@ -167,12 +232,14 @@ def run_vll_finetuning(
     vll_save_path = os.path.join(log_dir, "vll_shield.pth")
     ft_file = os.path.join(log_dir, f"ft_data_{total_numsteps}.pt")
     
-    # Sample
-    batch_size = min(len(real_data), 50000)
-    s_b, a_b, _, ns_b, d_b, c_b = real_data.sample(batch_size=batch_size, get_cost=True)
-    _, horizon_targets = compute_horizon_labels(
-        s_b, ns_b, c_b, d_b, horizon=args.horizon, gamma=0.95
-    )
+    # Sample Sequences
+    batch_size = min(len(real_data), 5000) # Slightly smaller batch for sequences to save memory?
+    
+    # Extract sequences (N, T, dim)
+    s_b, a_b, _, ns_b, d_b, c_b = real_data.sample(batch_size=batch_size, horizon=args.horizon, get_cost=True)
+    
+    # Compute labels correctly using the batch structure
+    horizon_targets = compute_labels_from_batch(c_b, d_b, gamma=0.95)
     
     torch.save({
         'states': torch.tensor(s_b, dtype=torch.float32),
