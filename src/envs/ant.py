@@ -6,7 +6,7 @@ import sys
 from gymnasium.wrappers import NormalizeObservation
 class AntEnv(gym.Env):
     def __init__(self, state_processor=None, reduced_dim=None, safety=None, render_mode="rgb_array"):
-        self.env = gym.make("Ant-v5", render_mode=render_mode)
+        self.env = gym.make("Ant-v4", render_mode=render_mode)
         self.action_space = self.env.action_space
         
         self.observation_space = self.env.observation_space if state_processor is None else gym.spaces.Box(low=-1, high=1, shape=(reduced_dim,))

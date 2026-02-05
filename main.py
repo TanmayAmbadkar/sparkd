@@ -90,7 +90,10 @@ def main(args: DictConfig):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    if args.cuda:
+        torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # --- 3. Agent & Shield Initialization ---
     action_dim = env.action_space.shape[0]
@@ -114,8 +117,17 @@ def main(args: DictConfig):
         print(f"Loading Agent from {agent_path}...")
         agent.load_checkpoint(agent_path)
 
-        # Load Shield
-        shield_path = os.path.join(args.load_dir, "vll_shield.pth")
+        # --- 4. Load Existing Shield (If Applicable) ---
+        # Check standard location and new subdirectory location
+        p1 = os.path.join(args.load_dir, "vll_shield.pth")
+        p2 = os.path.join(args.load_dir, "dynamics_weights", "vll_shield.pth")
+        
+        if os.path.exists(p2):
+            shield_path = p2
+        elif os.path.exists(p1):
+            shield_path = p1
+        else:
+            shield_path = p1 # Default fallback for printing error
 
         if os.path.exists(shield_path):
             print(f"Loading Shield from {shield_path}...")
@@ -123,7 +135,13 @@ def main(args: DictConfig):
                 shield_path, env.observation_space, action_dim, args
             )
 
-            device = "cuda" if args.cuda else "cpu"
+            if args.cuda and torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+
             safe_agent = Shield(
                 ShieldPolicy(VDK_Runtime(vdk_shield, device=device)),
                 agent,
@@ -142,7 +160,7 @@ def main(args: DictConfig):
 
     # --- 5. Training Mode Setup ---
     agent_save_path = os.path.join(log_dir, f"{args.name}_agent.pth")
-    vll_save_path = os.path.join(log_dir, "vll_shield.pth")
+    # vll_save_path unused here, defined in experiment runner inside weights dir
 
     # Replay Memory (for VLL training & buffering)
     # Note: PPO has internal memory too, but we use this 'real_data' for VLL training
@@ -155,6 +173,9 @@ def main(args: DictConfig):
         safe_agent = run_vll_pretraining(
             env, agent, real_data, args, log_dir, writer
         )
+        if hasattr(real_data, 'is_image') and real_data.is_image:
+             print("Discarding Pretraining Data (Image Env)...")
+             real_data.clear_memory()
         agent.save_checkpoint(agent_save_path)
 
     # --- 6. Main Loop ---
@@ -254,6 +275,9 @@ def main(args: DictConfig):
             run_vll_finetuning(
                 safe_agent, real_data, args, log_dir, total_numsteps, writer
             )
+            if hasattr(real_data, 'is_image') and real_data.is_image:
+                 print("Discarding Finetuning Data (Image Env)...")
+                 real_data.clear_memory()
 
         # Eval
         if total_numsteps - last_eval_step >= args.eval_steps:

@@ -71,14 +71,24 @@ def train_vdk(
          # For now, simplistic handling or error if T present for images
         if has_time_dim:
              # Normalize over (N, T)
-             states = states / 255.0
-             next_states = next_states / 255.0
+             print(f"Image Data Stats (Pre-Norm): Min={states.min():.4f}, Max={states.max():.4f}, Mean={states.mean():.4f}")
+             
+             if states.max() > 1.0:
+                 states = states / 255.0
+                 next_states = next_states / 255.0
+                 print("Applied /255.0 normalization.")
+             else:
+                 print("Skipped /255.0 normalization (Data already <= 1.0).")
+
+             print(f"Image Data Stats (Post-Norm): Min={states.min():.4f}, Max={states.max():.4f}, Mean={states.mean():.4f}")
              in_channels = shape[2] 
+
              encoder = VisualEncoder(latent_dim=latent_dim, in_channels=in_channels)
              decoder = VisualDecoder(latent_dim=latent_dim, out_channels=in_channels)
         else:
-             states = states / 255.0
-             next_states = next_states / 255.0
+             if states.max() > 1.0:
+                 states = states / 255.0
+                 next_states = next_states / 255.0
              in_channels = shape[1]
              encoder = VisualEncoder(latent_dim=latent_dim, in_channels=in_channels)
              decoder = VisualDecoder(latent_dim=latent_dim, out_channels=in_channels)
@@ -144,7 +154,17 @@ def train_vdk(
         except RuntimeError as e:
              print(f"Warning: Could not load exact state dict (architecture changed?): {e}")
 
-    device = torch.device('cuda' if torch.cuda.is_available() and gpu else 'cpu')
+    if gpu:
+        if torch.cuda.is_available():
+            device_name = 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device_name = 'mps'
+        else:
+            device_name = 'cpu'
+    else:
+        device_name = 'cpu'
+        
+    device = torch.device(device_name)
     print(f"Using device: {device}")
     model = model.to(device)
     
@@ -177,36 +197,62 @@ def train_vdk(
             # --- Autoregressive Loop ---
             loss_rec = 0
             loss_lin = 0
-            current_obs = s[:, 0, :] # x_0
+            # Encode x_0 -> z_0 (Complex)
+            if len(s.shape) == 5:
+                 current_obs = s[:, 0, :, :, :]
+            else:
+                 current_obs = s[:, 0, :] # x_0
             
-            # Encode x_0 -> z_0
-            mu_t, logvar_t = model.encode(current_obs) # (B, d)
+            mu0_re, mu0_im, logvar0_re, logvar0_im = model.encode(current_obs) # (B, d) each
             
-            # For z, we track real/im parts. Assume Im(z_0)=0.
-            z_re = mu_t
-            z_im = torch.zeros_like(mu_t)
+            # Sample z_0
+            z_re, z_im = model.reparameterize(mu0_re, mu0_im, logvar0_re, logvar0_im)
             
             # We also need Ground Truth Z sequence for 'lin' loss (latent consistency)
-            # Encode ALL frames in BATCH (B*T, D) -> (B*T, d)
-            B, T, D = s.shape
+            # Encode ALL frames in BATCH (B*T, D) -> (B*T, 4d)
+            if len(s.shape) == 5:
+                B, T, C, H, W = s.shape
+                # Flatten to encode: (B*T, C, H, W)
+                flat_s = s.reshape(B*T, C, H, W)
+            else:
+                B, T, D = s.shape
+                # Flatten to encode
+                flat_s = s.reshape(B*T, -1)
             
-            # Flatten to encode
-            flat_s = s.reshape(B*T, -1)
-            flat_mu, _ = model.encode(flat_s) 
-            gt_z_seq = flat_mu.reshape(B, T, -1) # (B, T, d)
+            # Encoder returns 4-tuple directly now
+            mu_flat_re, mu_flat_im, _, _ = model.encoder(flat_s) 
             
+            gt_z_seq_re = mu_flat_re.reshape(B, T, -1) # (B, T, d)
+            gt_z_seq_im = mu_flat_im.reshape(B, T, -1) # (B, T, d)
+            
+            # Weighted Loss Parameters
+            gamma_loss = 0.5
+            step_weights = [gamma_loss**i for i in range(T)]
+            total_weight = sum(step_weights)
+            
+            loss_rec_total = 0
+            loss_lin_total = 0
+
             for t in range(T):
                 # 1. Decode current prediction -> x_hat_t
                 rec_obs = model.decode(z_re, z_im) # (B, D)
                 
                 # 2. Reconstruction Loss
                 target_obs = s[:, t, :] # Ground Truth x_t
-                loss_rec += torch.mean((rec_obs - target_obs)**2)
+                step_rec_loss = torch.mean((rec_obs - target_obs)**2)
                 
                 # 3. Linearity/Consistency Loss
                 # Compare z_t (pred) with Encoder(x_t) (ground truth)
-                gt_z_t = gt_z_seq[:, t, :]
-                loss_lin += torch.mean((z_re - gt_z_t)**2) # Only comparing Real part as Encoder output is Real
+                # V-Final: Match both Real and Imaginary parts
+                gt_z_t_re = gt_z_seq_re[:, t, :]
+                gt_z_t_im = gt_z_seq_im[:, t, :]
+                
+                step_lin_loss = torch.mean((z_re - gt_z_t_re)**2) + torch.mean((z_im - gt_z_t_im)**2)
+                
+                # Accumulate Weighted
+                w_t = step_weights[t]
+                loss_rec_total += w_t * step_rec_loss
+                loss_lin_total += w_t * step_lin_loss
                 
                 # 4. Predict Next Step (Dynamics)
                 if t < T - 1:
@@ -217,8 +263,8 @@ def train_vdk(
                     
                     if use_ground_truth:
                          # Feed GT z_t into dynamics
-                         curr_z_re = gt_z_t
-                         curr_z_im = torch.zeros_like(gt_z_t)
+                         curr_z_re = gt_z_t_re
+                         curr_z_im = gt_z_t_im
                     else:
                          # Feed recurrent prediction
                          curr_z_re = z_re
@@ -226,14 +272,18 @@ def train_vdk(
                          
                     z_re, z_im = model.predict_next(curr_z_re, curr_z_im, action_t)
                     
-            # Normalize by T
-            loss_rec /= T
-            loss_lin /= T
+            # Normalize
+            loss_rec = loss_rec_total / total_weight
+            loss_lin = loss_lin_total / total_weight
             
             # 5. Spectral Regularization
-            # |lambda| = sqrt(mu^2 + omega^2)
+            # |lambda| = r (from new Polar parameterization)
             # Penalty: sum( relu( |lambda| - 1.0 )^2 )
-            lam_sq = model.dynamics.mu**2 + model.dynamics.omega**2
+            # lambda_modulus_sq is r^2.
+            # We want to penalize if r > 1.
+            # Using sqrt(r^2) - 1.
+            
+            lam_sq = model.dynamics.lambda_modulus_sq
             lam_abs = torch.sqrt(lam_sq + 1e-8)
             loss_spec = torch.sum(torch.relu(lam_abs - 1.0)**2)
             
@@ -250,7 +300,20 @@ def train_vdk(
             total_loss += loss_total.item()
             
         final_dyn_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1}: Loss = {final_dyn_loss:.4f} (Spec: {loss_spec.item():.4f})")
+        
+        # Diagnostic: Check for Posterior Collapse (or Trivial Code)
+        # Calculate spread of Means across the last batch
+        with torch.no_grad():
+            # mu0_re is (B, d)
+            # Variance across Batch dimension: if 0, all inputs map to same z
+            spread_re = mu0_re.var(dim=0).mean().item()
+            spread_im = mu0_im.var(dim=0).mean().item()
+            mean_spread = spread_re + spread_im
+            
+        print(f"Epoch {epoch+1}: Loss = {final_dyn_loss:.4f} (Spec: {loss_spec.item():.4f}) | LatentSpread: {mean_spread:.2e}")
+        
+        if mean_spread < 1e-4:
+            print("WARNING: Latent Space Collapse Detected! (Spread < 1e-4)")
         
     # --- 4. Stage 2: Robust Safety Value Iteration (CBF) ---
     print("\n=== Stage 2: Training CBF Head ===")
@@ -299,10 +362,12 @@ def train_vdk(
             y_h = y_h.to(device).unsqueeze(1) # (B, 1) target for s0
              
             # Encode (No Grads)
+            # Encode (No Grads)
             with torch.no_grad():
-                mu_t, _ = model.encode(s0)
-                z_re = mu_t
-                z_im = torch.zeros_like(mu_t)
+                mu_re, mu_im, _, _ = model.encode(s0)
+                # Use mean for CBF evaluation
+                z_re = mu_re
+                z_im = mu_im
                 
             # CBF Score on CURRENT latent z (not next)
             # This is more robust for "Safety of state s"

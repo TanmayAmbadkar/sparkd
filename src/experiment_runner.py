@@ -114,8 +114,12 @@ def run_vll_pretraining(
     3. Trains VDK Shield
     4. Returns a wrapped Shield object
     """
-    data_file = os.path.join(log_dir, "vll_data.pt")
-    vll_save_path = os.path.join(log_dir, "vll_shield.pth")
+    # Create subfolder for weights
+    weights_dir = os.path.join(log_dir, "dynamics_weights")
+    os.makedirs(weights_dir, exist_ok=True)
+
+    data_file = os.path.join(weights_dir, "vll_data.pt")
+    vll_save_path = os.path.join(weights_dir, "vll_shield.pth")
     
     print("--- Starting VLL-HPS Pipeline: Pre-training RL Agent ---")
     
@@ -154,7 +158,7 @@ def run_vll_pretraining(
             vll_obs, _ = env.reset()
             vll_done, vll_trunc = False, False
             
-        if (step+1) % 5000 == 0: 
+        if (step+1) % 100 == 0: 
             print(f"VLL Pre-training: {step+1}/{args.vll_steps}")
 
     # Labeling & Sequence Extraction
@@ -189,11 +193,14 @@ def run_vll_pretraining(
         'horizon_targets': torch.tensor(horizon_targets, dtype=torch.float32)
     }, data_file)
     
+    # Determine acceleration
+    use_gpu = args.cuda or (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available())
+    
     # Train VDK
     _, dl, cl = train_vdk.train_vdk(
         data_path=data_file, output_path=vll_save_path,
         epochs_dyn=args.vll_epochs_dyn, epochs_cbf=args.vll_epochs_cbf,
-        latent_dim=args.red_dim, gpu=args.cuda
+        latent_dim=args.red_dim, gpu=use_gpu
     )
     writer.add_scalar('loss/vll_dyn', dl, 0)
     writer.add_scalar('loss/vll_cbf', cl, 0)
@@ -202,7 +209,12 @@ def run_vll_pretraining(
     print(f"Loading VLL-HPS Shield from {vll_save_path}...")
     vdk_shield, state_mean, state_std = load_vdk_shield(vll_save_path, env.observation_space, env.action_space.shape[0], args)
     
-    device = 'cuda' if args.cuda else 'cpu'
+    if args.cuda:
+        device = 'cuda'
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
     safe_agent = Shield(
         ShieldPolicy(VDK_Runtime(vdk_shield, device=device)), 
         agent, 
@@ -229,11 +241,23 @@ def run_vll_finetuning(
     4. Reloads shield into safe_agent
     """
     print(f"\n--- Periodic VLL Finetuning at {total_numsteps} ---")
-    vll_save_path = os.path.join(log_dir, "vll_shield.pth")
-    ft_file = os.path.join(log_dir, f"ft_data_{total_numsteps}.pt")
+    weights_dir = os.path.join(log_dir, "dynamics_weights")
+    os.makedirs(weights_dir, exist_ok=True)
+    
+    vll_save_path = os.path.join(weights_dir, "vll_shield.pth")
+    ft_file = os.path.join(weights_dir, f"ft_data_{total_numsteps}.pt")
     
     # Sample Sequences
-    batch_size = min(len(real_data), 5000) # Slightly smaller batch for sequences to save memory?
+    # Use configured batch size (e.g. 512 for images, 5000 for tabular)
+    is_image = hasattr(real_data, 'is_image') and real_data.is_image
+    
+    if is_image:
+        target_batch = len(real_data)
+        print(f"[Image Env] Using entire dataset for finetuning: {target_batch} samples.")
+    else:
+        target_batch = args.vll_finetune_batch_size if hasattr(args, 'vll_finetune_batch_size') else 5000
+    
+    batch_size = min(len(real_data), target_batch)
     
     # Extract sequences (N, T, dim)
     s_b, a_b, _, ns_b, d_b, c_b = real_data.sample(batch_size=batch_size, horizon=args.horizon, get_cost=True)
@@ -323,20 +347,31 @@ def evaluate_agent(
         ep_cost = 0.0
         
         while not d and not t:
+            # Determine evaluation mode:
+            # - args.eval_deterministic=True (default) -> evaluate=True (Mean action)
+            # - args.eval_deterministic=False -> evaluate=False (Sample action)
+            is_deterministic = args.eval_deterministic
+            
             if safe_agent:
-                act, _, _, _ = safe_agent(s, evaluate=True)
+                act, _, _, _ = safe_agent(s, evaluate=is_deterministic)
             else:
-                act = agent(s, evaluate=True) # PPO/SAC support evaluate=True
+                act = agent(s, evaluate=is_deterministic)
                 
             ns, r, c, d, t, _ = env.step(act)
             ret += r
             ep_cost += c
             
-            if args.render and ep == 0:
-                try:
-                    frames.append(env.render())
-                except Exception:
-                    pass
+            try:
+                frame = env.render()
+                if frame is not None:
+                    frames.append(frame)
+                else:
+                    print("Warning: env.render() returned None.")
+            except Exception as e:
+                print(f"Render failed: {e}")
+                import traceback
+                traceback.print_exc()
+                pass
             s = ns
             
         avg_rew += ret
@@ -344,7 +379,13 @@ def evaluate_agent(
 
     if args.render and frames and video_dir:
         video_file = os.path.join(video_dir, f"eval_{total_numsteps}.mp4")
-        imageio.mimsave(video_file, frames, fps=30)
+        try:
+            imageio.mimsave(video_file, frames, fps=30)
+            print(f"Video saved to {video_file}")
+        except Exception as e:
+            print(f"Failed to save video: {e}")
+    elif args.render and not frames:
+        print("No frames captured for video.")
         
     writer.add_scalar("reward/test", avg_rew / episodes, total_numsteps)
     writer.add_scalar("cost/test", avg_cost / episodes, total_numsteps)

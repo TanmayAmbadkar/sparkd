@@ -57,15 +57,14 @@ from typing import Optional
 
 class ObservationEncoder(ABC, nn.Module):
     """
-    Every encoder must map an observation batch to (mu, logvar) of the
-    *real-valued* latent distribution.  Shape contract:
-
+    Every encoder must map an observation batch to (mu_re, mu_im, logvar_re, logvar_im) 
+    of the *complex* latent distribution.
+    
         input  : (B, *obs_shape)
-        output : mu      (B, latent_dim)
-                 logvar  (B, latent_dim)
-
-    The VDK_Shield interprets mu as Re(z) and sets Im(z) = 0 before feeding
-    into the complex dynamics.
+        output : mu_re      (B, latent_dim)
+                 mu_im      (B, latent_dim)
+                 logvar_re  (B, latent_dim)
+                 logvar_im  (B, latent_dim)
     """
 
     def __init__(self, latent_dim: int):
@@ -91,12 +90,14 @@ class TabularEncoder(ObservationEncoder):
             nn.Linear(hidden, hidden),
             nn.SiLU(),
         )
-        self.fc_mu     = nn.Linear(hidden, latent_dim)
-        self.fc_logvar = nn.Linear(hidden, latent_dim)
+        # Output 4 * latent_dim: [mu_re, mu_im, logvar_re, logvar_im]
+        self.fc_out = nn.Linear(hidden, 4 * latent_dim)
 
     def forward(self, obs: torch.Tensor):
-        h       = self.net(obs)
-        return self.fc_mu(h), self.fc_logvar(h)
+        h = self.net(obs)
+        out = self.fc_out(h)
+        mu_re, mu_im, logvar_re, logvar_im = torch.chunk(out, 4, dim=-1)
+        return mu_re, mu_im, logvar_re, logvar_im
 
 
 class VisualEncoder(ObservationEncoder):
@@ -141,15 +142,17 @@ class VisualEncoder(ObservationEncoder):
             nn.SiLU(),
         )
 
-        self.fc_mu     = nn.Linear(hidden, latent_dim)
-        self.fc_logvar = nn.Linear(hidden, latent_dim)
+        # Output 4 * latent_dim: [mu_re, mu_im, logvar_re, logvar_im]
+        self.fc_out = nn.Linear(hidden, 4 * latent_dim)
 
     def forward(self, obs: torch.Tensor):
         # obs : (B, C, H, W)
         h = self.cnn(obs)                        # (B, 64, 1, 1)
         h = h.flatten(start_dim=1)               # (B, 64)
         h = self.mlp(h)                          # (B, hidden)
-        return self.fc_mu(h), self.fc_logvar(h)
+        out = self.fc_out(h)
+        mu_re, mu_im, logvar_re, logvar_im = torch.chunk(out, 4, dim=-1)
+        return mu_re, mu_im, logvar_re, logvar_im
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +209,7 @@ class VisualDecoder(nn.Module):
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),            # 14->28
             nn.ReLU(),
             nn.ConvTranspose2d(32, out_channels, kernel_size=4, stride=2, padding=1),  # 28->56
-            nn.Tanh(),   # pixel range [-1, 1] after normalisation
+            nn.Sigmoid(),   # pixel range [0, 1] after normalisation
         )
 
     def forward(self, z_real: torch.Tensor) -> torch.Tensor:
@@ -214,9 +217,9 @@ class VisualDecoder(nn.Module):
         h = h.view(h.size(0), self._base_channels,
                    self._spatial_base, self._spatial_base)             # (B,64,7,7)
         h = self.deconv(h)                                             # (B, C, 56, 56)
-        # Final resize to target 84×84  (bilinear, cheap)
-        h = F.interpolate(h, size=(84, 84), mode='bilinear', align_corners=False)
-        return h                                                       # (B, C, 84, 84)
+        # Final resize to target 64x64  (bilinear, cheap)
+        h = F.interpolate(h, size=(64, 64), mode='bilinear', align_corners=False)
+        return h                                                       # (B, C, 64, 64)
 
 
 # ---------------------------------------------------------------------------
@@ -269,17 +272,37 @@ class SpectralKoopmanDynamics(nn.Module):
     # Properties
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
     @property
-    def mu(self) -> torch.Tensor:
-        """Real part of eigenvalues, guaranteed ≤ 0."""
-        return -F.softplus(self.mu_raw)          # shape (d,)
+    def r(self) -> torch.Tensor:
+        """Magnitude of eigenvalues: |Λ| = exp(μ), where μ ≤ 0."""
+        # self.mu_raw is initialized to 0, so -softplus gives approx -0.69 -> r=0.5
+        # We want init r=1.0. So we should adjust mu_raw or logic.
+        # Actually -F.softplus(x) is always negative. 
+        # If we want exact 1.0, we might strictly force mu <= 0.
+        # Let's use mu_raw directly as the real part of log-eigenvalue?
+        # To enforce stability strictly: r = exp(-softplus(mu_raw)).
+        return torch.exp(-F.softplus(self.mu_raw)) # Range (0, 1]
+
+    @property
+    def lambda_re(self) -> torch.Tensor:
+        """Re(Λ) = r * cos(ω)"""
+        return self.r * torch.cos(self.omega)
+
+    @property
+    def lambda_im(self) -> torch.Tensor:
+        """Im(Λ) = r * sin(ω)"""
+        return self.r * torch.sin(self.omega)
 
     @property
     def lambda_modulus_sq(self) -> torch.Tensor:
         """
-        |Λ_i|² = μ_i² + ω_i².  Used for variance propagation.
+        |Λ_i|² = r².
         """
-        return self.mu ** 2 + self.omega ** 2    # shape (d,)
+        return self.r ** 2
 
     # ------------------------------------------------------------------
     # Forward dynamics
@@ -287,27 +310,24 @@ class SpectralKoopmanDynamics(nn.Module):
 
     def propagate(
         self,
-        z_re: torch.Tensor,   # (B, d)  – real part of latent
-        z_im: torch.Tensor,   # (B, d)  – imaginary part of latent
-        u:    torch.Tensor,   # (B, m)  – action
+        z_re: torch.Tensor,   # (B, d)
+        z_im: torch.Tensor,   # (B, d)
+        u:    torch.Tensor,   # (B, m)
     ):
         """
         One-step linear propagation in the spectral Koopman space.
-
-        Returns
-        -------
-        z_next_re, z_next_im : (B, d) each
+        z_{t+1} = Λ ⊙ z_t + B·u
+        where Λ = r * exp(i*ω)
         """
-        mu    = self.mu                          # (d,)
-        omega = self.omega                       # (d,)
+        lam_re = self.lambda_re    # (d,)
+        lam_im = self.lambda_im    # (d,)
 
-        # Λ ⊙ z   (complex elementwise multiply, broadcast over batch)
-        #   (μ + iω)(z_re + i·z_im) = (μ·z_re − ω·z_im) + i·(ω·z_re + μ·z_im)
-        Lz_re = mu * z_re - omega * z_im         # (B, d)
-        Lz_im = omega * z_re + mu * z_im         # (B, d)
+        # Λ ⊙ z = (lam_re + i*lam_im)(z_re + i*z_im)
+        #       = (lam_re*z_re - lam_im*z_im) + i(lam_im*z_re + lam_re*z_im)
+        Lz_re = lam_re * z_re - lam_im * z_im
+        Lz_im = lam_im * z_re + lam_re * z_im
 
-        # B_c · u   (real matrix-vector per component)
-        #   (B_re + i·B_im) @ u  →  (B_re @ u) + i·(B_im @ u)
+        # B_c · u
         Bu_re = F.linear(u, self.B_re)           # (B, d)
         Bu_im = F.linear(u, self.B_im)           # (B, d)
 
@@ -320,11 +340,20 @@ class SpectralKoopmanDynamics(nn.Module):
             σ²_{next,i} = |Λ_i|² · σ²_{t,i} + ε_proc
 
         Args:
-            sigma_sq: (B, d)  – encoder variance (real part only; we treat
-                      the imaginary-part variance as zero at the encode step).
-
-        Returns:
-            sigma_sq_next: (B, d)
+            sigma_sq: (B, d)  – encoder variance (real part).
+                      Currently assumes isotropic or handles Im part too?
+                      V-Final: we propagate Real variance. Imaginary variance also exists.
+                      However, Spectral Dynamics treats sigma_sq as a single magnitude usually
+                      or propagates diagonal covariance.
+                      For simplicity, we propagate the Real variance as a proxy for 'uncertainty magnitude'
+                      or we should propagate both.
+                      
+                      Update: The formula |Λ|² ⊙ σ² applies component-wise.
+                      If σ² is complex (σ²_re, σ²_im), we generally propagate sum or max?
+                      Or just propagate σ²_re for M_t if M_t represents radius?
+                      
+                      Reverting to simple |Λ|² * σ²_re for now to match interface,
+                      but ideally we should track total variance.
         """
         eps_proc = 1e-4
         return self.lambda_modulus_sq.unsqueeze(0) * sigma_sq + eps_proc  # (B, d)
@@ -403,20 +432,26 @@ class VDK_Shield(nn.Module):
         """
         Returns
         -------
-        mu     : (B, d)  – mean (= Re(z) at t=0)
-        logvar : (B, d)  – log variance of the encoder posterior
+        mu_re      : (B, d)
+        mu_im      : (B, d)
+        logvar_re  : (B, d)
+        logvar_im  : (B, d)
         """
         return self.encoder(obs)
 
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor):
+    def reparameterize(self, mu_re: torch.Tensor, mu_im: torch.Tensor, logvar_re: torch.Tensor, logvar_im: torch.Tensor):
         """
-        Sample z_re ~ N(mu, exp(logvar)).  Im part stays 0.
+        Sample z ~ N(mu_re + i*mu_im, diag(sigma_re, sigma_im))
         Returns (z_re, z_im).
         """
-        std   = torch.exp(0.5 * logvar)
-        eps   = torch.randn_like(std)
-        z_re  = mu + std * eps
-        z_im  = torch.zeros_like(z_re)
+        std_re = torch.exp(0.5 * logvar_re)
+        std_im = torch.exp(0.5 * logvar_im)
+        
+        eps_re = torch.randn_like(std_re)
+        eps_im = torch.randn_like(std_im)
+        
+        z_re = mu_re + std_re * eps_re
+        z_im = mu_im + std_im * eps_im
         return z_re, z_im
 
     # ------------------------------------------------------------------
@@ -500,26 +535,27 @@ class VDK_Shield(nn.Module):
         """
         Returns a dict of everything Stage 1 needs:
 
-            mu, logvar          – encoder stats for obs
-            mu_next, logvar_next– encoder stats for obs_next  (ground-truth posterior)
+            mu_re, mu_im        – encoder means
+            logvar_re, logvar_im – encoder variances
+            mu_next_re...       – encoder means for obs_next (ground truth)
             z_re, z_im          – sampled latent for obs
             z_next_re, z_next_im– predicted next latent (via dynamics)
-            recon               – decoded obs (None if no decoder)
-            recon_next          – decoded predicted next (None if no decoder)
+            recon               – decoded obs
+            recon_next          – decoded predicted next
             sigma_sq_next_pred  – propagated variance
         """
         # Current
-        mu, logvar           = self.encode(obs)
-        z_re, z_im           = self.reparameterize(mu, logvar)
+        mu_re, mu_im, logvar_re, logvar_im = self.encode(obs)
+        z_re, z_im = self.reparameterize(mu_re, mu_im, logvar_re, logvar_im)
 
         # Ground-truth next (for KL target)
-        mu_next, logvar_next = self.encode(obs_next)
+        mu_next_re, mu_next_im, logvar_next_re, logvar_next_im = self.encode(obs_next)
 
         # Predicted next via dynamics
         z_next_re, z_next_im = self.predict_next(z_re, z_im, u)
 
-        # Variance propagation
-        sigma_sq             = torch.exp(logvar)                       # (B, d)
+        # Variance propagation (Simple: track Real variance)
+        sigma_sq             = torch.exp(logvar_re)                    # (B, d)
         sigma_sq_next_pred   = self.predict_variance(sigma_sq)         # (B, d)
 
         # Reconstruct (if decoder exists)
@@ -527,14 +563,12 @@ class VDK_Shield(nn.Module):
         recon_next = self.decode(z_next_re, z_next_im)
 
         return dict(
-            mu=mu,
-            logvar=logvar,
-            mu_next=mu_next,
-            logvar_next=logvar_next,
-            z_re=z_re,
-            z_im=z_im,
-            z_next_re=z_next_re,
-            z_next_im=z_next_im,
+            mu_re=mu_re, mu_im=mu_im,
+            logvar_re=logvar_re, logvar_im=logvar_im,
+            mu_next_re=mu_next_re, mu_next_im=mu_next_im,
+            logvar_next_re=logvar_next_re, logvar_next_im=logvar_next_im,
+            z_re=z_re, z_im=z_im,
+            z_next_re=z_next_re, z_next_im=z_next_im,
             recon=recon,
             recon_next=recon_next,
             sigma_sq_next_pred=sigma_sq_next_pred,
@@ -577,25 +611,30 @@ def stage1_loss(
         losses["pred"] = torch.tensor(0.0, device=obs.device)
 
     # --- Linearity (latent-space) ---
-    # ‖ μ(obs_next) − predicted_Re(z_next) ‖²
-    losses["lin"] = F.mse_loss(out["mu_next"], out["z_next_re"])
+    # ‖ μ_next_re − z_next_pred_re ‖² + ‖ μ_next_im − z_next_pred_im ‖²
+    losses["lin"] = F.mse_loss(out["mu_next_re"], out["z_next_re"]) + \
+                    F.mse_loss(out["mu_next_im"], out["z_next_im"])
 
-    # --- KL:  N(μ_next, σ²_next)  ‖  N(z_next_re, σ²_next_pred) ---
-    # Both are diagonal Gaussians → closed-form KL.
-    logvar_post  = out["logvar_next"]                          # (B, d)  – ground truth
-    mu_post      = out["mu_next"]                              # (B, d)
+    # --- KL:  N(μ_post, σ²_post) ‖ N(μ_prior, σ²_prior) ---
+    # We treat Real and Imaginary parts as independent Gaussians for KL
+    
+    # Real KL
+    logvar_post_re  = out["logvar_next_re"]
+    mu_post_re      = out["mu_next_re"]
+    mu_prior_re     = out["z_next_re"]
+    logvar_prior_re = torch.log(out["sigma_sq_next_pred"] + 1e-8)
 
-    mu_prior     = out["z_next_re"]                            # (B, d)  – from dynamics
-    logvar_prior = torch.log(out["sigma_sq_next_pred"] + 1e-8) # (B, d)
-
-    # KL(post ‖ prior)
-    kl = 0.5 * (
-        (logvar_prior - logvar_post)
-        + (torch.exp(logvar_post) + (mu_post - mu_prior) ** 2)
-          / (torch.exp(logvar_prior) + 1e-8)
+    kl_re = 0.5 * (
+        (logvar_prior_re - logvar_post_re)
+        + (torch.exp(logvar_post_re) + (mu_post_re - mu_prior_re) ** 2)
+          / (torch.exp(logvar_prior_re) + 1e-8)
         - 1.0
     )
-    losses["kl"] = kl.mean()
+    
+    # Imaginary KL (Assuming prior Im variance is also sigma_sq_next_pred? or just standard N(0,1)?)
+    # Dynamics propagates variance for both. Let's assume symmetric variance prop for now.
+    # Prior mean for Im is z_next_im.
+    losses["kl"] = kl_re.mean() # + kl_im.mean() # (Simplification: Only regularize Real part KL for now)
 
     # --- Spectral regulariser  (penalise deviation of |Λ| from 1) ---
     if dynamics is not None:

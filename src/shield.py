@@ -26,12 +26,13 @@ class VDK_Runtime:
         # Move everything to CPU/Numpy for OSQP
         
         # 1. Dynamics (Spectral)
-        # Lambda = mu + i*omega
+        # Lambda = lam_re + i*lam_im (now properly derived from r, theta)
         # B_c = B_re + i*B_im
         dyn = self.model.dynamics
         
-        self.mu_vec    = dyn.mu.detach().cpu().numpy()          # (d,)
-        self.omega_vec = dyn.omega.detach().cpu().numpy()       # (d,)
+        # Detach and grab numpy
+        self.lam_re_vec = dyn.lambda_re.detach().cpu().numpy()  # (d,)
+        self.lam_im_vec = dyn.lambda_im.detach().cpu().numpy()  # (d,)
         self.B_re      = dyn.B_re.detach().cpu().numpy()        # (d, m)
         self.B_im      = dyn.B_im.detach().cpu().numpy()        # (d, m)
         
@@ -47,17 +48,16 @@ class VDK_Runtime:
         # --- QP Constants (Precomputed) ---
         # Constraint: (w^T B_eff) u >= Lower_Bound
         # w^T z_{next} = w_re^T z_{next,re} + w_im^T z_{next,im}
-        # z_{next,re} = mu*z_re - omega*z_im + B_re*u
-        # z_{next,im} = omega*z_re + mu*z_im + B_im*u
+        # z_{next,re} = lam_re*z_re - lam_im*z_im + B_re*u
+        # z_{next,im} = lam_im*z_re + lam_re*z_im + B_im*u
         
         # u-term coefficient vector C (size m):
         # C = w_re^T B_re + w_im^T B_im
-        # C_j = sum_k (w_re_k * B_re_kj + w_im_k * B_im_kj)
         self.C_qp = self.w_re @ self.B_re + self.w_im @ self.B_im  # (m,)
         
         # --- Safety Margin Constants ---
-        # |Lambda_i|^2 = mu_i^2 + omega_i^2
-        self.lambda_sq = self.mu_vec**2 + self.omega_vec**2      # (d,)
+        # |Lambda_i|^2 = lambda_modulus_sq
+        self.lambda_sq = dyn.lambda_modulus_sq.detach().cpu().numpy() # (d,)
         # |w_i|^2      = w_re_i^2 + w_im_i^2
         self.w_sq      = self.w_re**2 + self.w_im**2             # (d,)
         
@@ -77,17 +77,17 @@ class VDK_Runtime:
         # 1. Encode
         with torch.no_grad():
             s_tensor = torch.tensor(s_t, dtype=torch.float32).unsqueeze(0).to(self.device)
-            mu_t, logvar_t = self.model.encode(s_tensor)
+            mu_re, mu_im, logvar_re, logvar_im = self.model.encode(s_tensor)
             
-            # Extract real stats (Im(z_t) is assumed 0)
-            z_re_t = mu_t.cpu().numpy().flatten()        # (d,)
-            sigma_sq_t = torch.exp(logvar_t).cpu().numpy().flatten() # (d,)
+            # Extract stats
+            z_re_t = mu_re.cpu().numpy().flatten()        # (d,)
+            z_im_t = mu_im.cpu().numpy().flatten()        # (d,)
             
-            # z_im_t is effectively zero for the current step t
+            # Use Real variance for safety margin (Simplification matching train logic)
+            sigma_sq_t = torch.exp(logvar_re).cpu().numpy().flatten() # (d,)
             
         # 2. Adaptive Safety Margin M_t
         # sigma^2_safety = sum_i ( |w_i|^2 * |Lambda_i|^2 * sigma^2_{t,i} )
-        # This propagates the variance through one step of dynamics
         safety_var = np.sum(self.w_sq * self.lambda_sq * sigma_sq_t)
         safe_std = np.sqrt(safety_var + 1e-8)
         M_t = self.z_score * safe_std
@@ -98,21 +98,19 @@ class VDK_Runtime:
         q = -2 * u_rl
         
         # Linear Constraint: C_qp @ u >= Lower_Bound
-        # Mean(V(z_{next})) = w^T E[z_{next}] + beta
-        # E[z_{next, re}] = mu*z_re - omega*0 + B_re*u = mu*z_re + B_re*u
-        # E[z_{next, im}] = omega*z_re + mu*0 + B_im*u = omega*z_re + B_im*u
-        
-        # Mean(V) = w_re^T(mu*z_re + B_re*u) + w_im^T(omega*z_re + B_im*u) + beta
-        #         = (w_re^T B_re + w_im^T B_im) u + (w_re^T(mu*z_re) + w_im^T(omega*z_re)) + beta
-        #         = C_qp @ u + Term_State + beta
-        
+        # Mean(V) = C_qp @ u + Term_State + beta
         # We want: Mean(V) >= M_t
         # C_qp @ u >= M_t - Term_State - beta
         
-        # Calculate Term_State: sum_i ( w_re_i * mu_i * z_re_i + w_im_i * omega_i * z_re_i )
-        # = sum_i z_re_i * ( w_re_i * mu_i + w_im_i * omega_i )
+        # Calculate Term_State: 
+        # w^T (Lambda z) 
+        # = w_re^T (lam_re z_re - lam_im z_im) + w_im^T (lam_im z_re + lam_re z_im)
+        # = z_re^T (w_re lam_re + w_im lam_im) + z_im^T (w_im lam_re - w_re lam_im)
         
-        term_state = np.dot(z_re_t, self.w_re * self.mu_vec + self.w_im * self.omega_vec)
+        term_re_coeff = self.w_re * self.lam_re_vec + self.w_im * self.lam_im_vec
+        term_im_coeff = self.w_im * self.lam_re_vec - self.w_re * self.lam_im_vec
+        
+        term_state = np.dot(z_re_t, term_re_coeff) + np.dot(z_im_t, term_im_coeff)
         
         lower_bound = M_t - term_state - self.beta
         
