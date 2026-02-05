@@ -1,0 +1,8 @@
+# @package _global_
+env_name: SafetyAntVelocity-v1
+horizon: 5
+vll_epochs_dyn: 200
+num_steps: 1000000 # Override default agent steps
+red_dim: 100
+train_vll: true
+start_steps: 1000

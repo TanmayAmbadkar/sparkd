@@ -1,0 +1,6 @@
+# @package _global_
+env_name: SafetyHopperVelocity-v1
+horizon: 20
+vll_epochs_dyn: 200
+num_steps: 500000 # Override default agent steps
+train_vll: True
