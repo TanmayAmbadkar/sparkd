@@ -7,3 +7,4 @@ red_dim: 300
 train_vll: true
 # Humanoid needs stochastic noise for balance
 eval_deterministic: false
+vll_steps: 10000
