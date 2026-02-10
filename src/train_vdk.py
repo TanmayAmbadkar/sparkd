@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
-from src.vdk_shield import VDK_Shield, TabularEncoder, TabularDecoder, VisualEncoder, VisualDecoder, stage1_loss, stage2_loss
+from src.vdk_shield import VDK_Shield, TabularEncoder, TabularDecoder, VisualEncoder, VisualDecoder, stage1_loss, stage2_loss, compute_autoregressive_loss
 from tqdm import tqdm
 
 def train_vdk(
@@ -194,108 +194,17 @@ def train_vdk(
             
             optimizer_dyn.zero_grad()
             
-            # --- Autoregressive Loop ---
-            loss_rec = 0
-            loss_lin = 0
-            # Encode x_0 -> z_0 (Complex)
-            if len(s.shape) == 5:
-                 current_obs = s[:, 0, :, :, :]
-            else:
-                 current_obs = s[:, 0, :] # x_0
-            
-            mu0_re, mu0_im, logvar0_re, logvar0_im = model.encode(current_obs) # (B, d) each
-            
-            # Sample z_0
-            z_re, z_im = model.reparameterize(mu0_re, mu0_im, logvar0_re, logvar0_im)
-            
-            # We also need Ground Truth Z sequence for 'lin' loss (latent consistency)
-            # Encode ALL frames in BATCH (B*T, D) -> (B*T, 4d)
-            if len(s.shape) == 5:
-                B, T, C, H, W = s.shape
-                # Flatten to encode: (B*T, C, H, W)
-                flat_s = s.reshape(B*T, C, H, W)
-            else:
-                B, T, D = s.shape
-                # Flatten to encode
-                flat_s = s.reshape(B*T, -1)
-            
-            # Encoder returns 4-tuple directly now
-            mu_flat_re, mu_flat_im, _, _ = model.encoder(flat_s) 
-            
-            gt_z_seq_re = mu_flat_re.reshape(B, T, -1) # (B, T, d)
-            gt_z_seq_im = mu_flat_im.reshape(B, T, -1) # (B, T, d)
-            
-            # Weighted Loss Parameters
-            gamma_loss = 0.5
-            step_weights = [gamma_loss**i for i in range(T)]
-            total_weight = sum(step_weights)
-            
-            loss_rec_total = 0
-            loss_lin_total = 0
-
-            for t in range(T):
-                # 1. Decode current prediction -> x_hat_t
-                rec_obs = model.decode(z_re, z_im) # (B, D)
-                
-                # 2. Reconstruction Loss
-                target_obs = s[:, t, :] # Ground Truth x_t
-                step_rec_loss = torch.mean((rec_obs - target_obs)**2)
-                
-                # 3. Linearity/Consistency Loss
-                # Compare z_t (pred) with Encoder(x_t) (ground truth)
-                # V-Final: Match both Real and Imaginary parts
-                gt_z_t_re = gt_z_seq_re[:, t, :]
-                gt_z_t_im = gt_z_seq_im[:, t, :]
-                
-                step_lin_loss = torch.mean((z_re - gt_z_t_re)**2) + torch.mean((z_im - gt_z_t_im)**2)
-                
-                # Accumulate Weighted
-                w_t = step_weights[t]
-                loss_rec_total += w_t * step_rec_loss
-                loss_lin_total += w_t * step_lin_loss
-                
-                # 4. Predict Next Step (Dynamics)
-                if t < T - 1:
-                    action_t = u[:, t, :]
-                    
-                    # Teacher Forcing Decision
-                    use_ground_truth = (torch.rand(1).item() < eps)
-                    
-                    if use_ground_truth:
-                         # Feed GT z_t into dynamics
-                         curr_z_re = gt_z_t_re
-                         curr_z_im = gt_z_t_im
-                    else:
-                         # Feed recurrent prediction
-                         curr_z_re = z_re
-                         curr_z_im = z_im
-                         
-                    z_re, z_im = model.predict_next(curr_z_re, curr_z_im, action_t)
-                    
-            # Normalize
-            loss_rec = loss_rec_total / total_weight
-            loss_lin = loss_lin_total / total_weight
-            
-            # 5. Spectral Regularization
-            # |lambda| = r (from new Polar parameterization)
-            # Penalty: sum( relu( |lambda| - 1.0 )^2 )
-            # lambda_modulus_sq is r^2.
-            # We want to penalize if r > 1.
-            # Using sqrt(r^2) - 1.
-            
-            lam_sq = model.dynamics.lambda_modulus_sq
-            lam_abs = torch.sqrt(lam_sq + 1e-8)
-            loss_spec = torch.sum(torch.relu(lam_abs - 1.0)**2)
-            
-            # Total
-            lambda_pred = 1.0
-            lambda_lin = 1.0
-            
-            loss_total = lambda_pred * loss_rec + lambda_lin * loss_lin + spectral_reg_weight * loss_spec
+            # --- Autoregressive Loop --- (Refactored)
+            loss_total, metrics = compute_autoregressive_loss(
+                model, s, u, eps=eps, gamma_loss=0.5, spectral_reg_weight=spectral_reg_weight
+            )
             
             loss_total.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer_dyn.step()
+            
+            total_loss += loss_total.item()
+            loss_spec = metrics["spec"] # Keep for logging
             
             total_loss += loss_total.item()
             

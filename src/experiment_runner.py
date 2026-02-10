@@ -158,7 +158,7 @@ def run_vll_pretraining(
             vll_obs, _ = env.reset()
             vll_done, vll_trunc = False, False
             
-        if (step+1) % 100 == 0: 
+        if (step+1) % 1000 == 0: 
             print(f"VLL Pre-training: {step+1}/{args.vll_steps}")
 
     # Labeling & Sequence Extraction

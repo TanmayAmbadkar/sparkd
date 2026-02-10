@@ -17,7 +17,14 @@ class SAC(object):
         self.target_update_interval = args.target_update_interval
         self.automatic_entropy_tuning = args.automatic_entropy_tuning
 
-        self.device = torch.device("cuda" if args.cuda else "cpu")
+        if not args.cuda:
+            self.device = torch.device("cpu")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
 
         self.critic = QNetwork(num_inputs, action_space.shape[0], args.hidden_size).to(device=self.device)
         self.critic_optim = Adam(self.critic.parameters(), lr=args.lr)
@@ -72,6 +79,7 @@ class SAC(object):
 
         self.critic_optim.zero_grad()
         qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0) # Clip Critic Grads
         self.critic_optim.step()
 
         pi, log_pi, _ = self.policy.sample(state_batch)
@@ -83,6 +91,7 @@ class SAC(object):
 
         self.policy_optim.zero_grad()
         policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0) # Clip Policy Grads
         self.policy_optim.step()
 
         if self.automatic_entropy_tuning:

@@ -32,5 +32,12 @@ def create_agent(cfg: DictConfig, env: gym.Env) -> Agent:
             batch_size=cfg.agent.batch_size,
             args=merged_args
         )
+    elif agent_type == "all_c":
+        from src.policies.all_c_agent import ALLCAgent
+        return ALLCAgent(
+            gym_env=env,
+            args=cfg,
+            sac_args=merged_args
+        )
     else:
         raise ValueError(f"Unknown agent type: {agent_type}")

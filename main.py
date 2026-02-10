@@ -12,6 +12,9 @@ from torch.utils.tensorboard import SummaryWriter
 # Imports from new structure
 from src.policies.shield import Shield, ShieldPolicy
 from src.policies.abstract_agent import Agent
+from src.policies.sac_agent import SACPolicy
+from src.policies.ppo_agent import PPOPolicy
+from src.policies.all_c_agent import ALLCAgent
 from src.agent_factory import create_agent
 from src.shield import VDK_Runtime
 from src.experiment_runner import (
@@ -164,11 +167,17 @@ def main(args: DictConfig):
 
     # Replay Memory (for VLL training & buffering)
     # Note: PPO has internal memory too, but we use this 'real_data' for VLL training
+    buffer_size = args.replay_size
+        
     real_data = ReplayMemory(
-        args.replay_size, env.observation_space, action_dim, args.seed
+        buffer_size, env.observation_space, action_dim, args.seed
     )
 
     # VLL Pretraining
+    safe_agent = None
+    if args.name == 'all_c':
+        args.train_vll = False
+        
     if args.train_vll:
         safe_agent = run_vll_pretraining(
             env, agent, real_data, args, log_dir, writer
@@ -189,6 +198,7 @@ def main(args: DictConfig):
     
     # Determine Training frequency
     is_sac = (args.name == "sac")
+    is_all_c = (args.name == "all_c")
     is_ppo = (args.name == "ppo")
 
     while total_numsteps < args.num_steps:
@@ -229,15 +239,53 @@ def main(args: DictConfig):
 
             # --- ALG SPECIFIC TRAINING ---
             if is_sac:
-                 if len(real_data) > args.batch_size: # SAC uses global replay size check usually
-                    for _ in range(args.updates_per_step):
-                        c1l, c2l, pl, el, al = agent.train()
-                        writer.add_scalar("loss/critic_1", c1l, total_numsteps)
-                        writer.add_scalar("loss/critic_2", c2l, total_numsteps)
-                        writer.add_scalar("loss/policy", pl, total_numsteps)
-                        writer.add_scalar("loss/entropy_loss", el, total_numsteps)
-                        writer.add_scalar("loss/alpha_value", al, total_numsteps)
+                 if len(agent.memory) > args.batch_size:
+                    # Number of updates per step (normally 1)
+                    for i in range(args.updates_per_step):    
+                    
+                        # Standard Agent Training
+                        critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha = agent.train()
+                        
+                        writer.add_scalar('loss/critic_1', critic_1_loss, total_numsteps)
+                        writer.add_scalar('loss/critic_2', critic_2_loss, total_numsteps)
+                        writer.add_scalar('loss/policy', policy_loss, total_numsteps)
+                        writer.add_scalar('loss/entropy_loss', ent_loss, total_numsteps)
+                        writer.add_scalar('entropy_temprature/alpha', alpha, total_numsteps)
+        
+            if is_all_c:
+                if len(agent.memory) > args.batch_size:
+                    # Number of updates per step (normally 1)
+                    for i in range(args.updates_per_step):    
+                        # Hybrid ALL-C Training
+                        # This call internally handles:
+                        # 1. SAC Teacher update (every call)
+                        # 2. VDK/Student On-Policy update (if buffer full)
+                        sac_stats = agent.teacher.train()
+
+                        # Convert sac_stats tuple to dict for consistent return
+                        train_stats = {
+                            'critic_1': sac_stats[0],
+                            'critic_2': sac_stats[1],
+                            'policy': sac_stats[2],
+                            'entropy': sac_stats[3],
+                            'alpha': sac_stats[4],
+                        }
+                        
+                        if isinstance(train_stats, dict) and train_stats:
+                            # Log SAC Stats
+                            writer.add_scalar("loss/critic_1", train_stats.get('critic_1', 0), total_numsteps)
+                            writer.add_scalar("loss/critic_2", train_stats.get('critic_2', 0), total_numsteps)
+                            writer.add_scalar("loss/policy", train_stats.get('policy', 0), total_numsteps)
+                            writer.add_scalar("loss/entropy_loss", train_stats.get('entropy', 0), total_numsteps)
+                            writer.add_scalar("loss/alpha_value", train_stats.get('alpha', 0), total_numsteps)
+                            
+                            # Log VDK/Student stats if they occurred
+                train_stats = agent.train()
+                if 'vdk_loss' in train_stats:
+                    writer.add_scalar('loss/vdk_dyn', train_stats['vdk_loss'], total_numsteps)
+                    writer.add_scalar('loss/student_val', train_stats['student_loss'], total_numsteps)
             
+
             elif is_ppo:
                 # Access internal memory size via agent (PPOPolicy wrappers)
                 if len(agent.memory) >= args.batch_size:

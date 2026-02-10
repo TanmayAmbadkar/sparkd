@@ -333,6 +333,34 @@ class SpectralKoopmanDynamics(nn.Module):
 
         return Lz_re + Bu_re, Lz_im + Bu_im
 
+    def get_real_A_matrix(self) -> torch.Tensor:
+        """
+        Returns the 2d x 2d real block matrix representing the complex operation z' = Lambda * z.
+        A_tilde = [[ Re(L), -Im(L) ],
+                   [ Im(L),  Re(L) ]]
+        where L is diagonal.
+        """
+        re = torch.diag(self.lambda_re)
+        im = torch.diag(self.lambda_im)
+        
+        # Row 1: [Re, -Im]
+        row1 = torch.cat([re, -im], dim=1)
+        # Row 2: [Im, Re]
+        row2 = torch.cat([im, re], dim=1)
+        
+        # Stack: (2d, 2d)
+        A_tilde = torch.cat([row1, row2], dim=0)
+        return A_tilde
+
+    def get_real_B_matrix(self) -> torch.Tensor:
+        """
+        Returns the 2d x m real block matrix representing the complex operation z' = ... + B*u.
+        B_tilde = [ B_re ]
+                  [ B_im ]
+        """
+        # B_re: (d, m), B_im: (d, m) -> (2d, m)
+        return torch.cat([self.B_re, self.B_im], dim=0)
+
     def propagate_variance(self, sigma_sq: torch.Tensor) -> torch.Tensor:
         """
         Propagate diagonal covariance through the spectral operator.
@@ -653,6 +681,109 @@ def stage1_loss(
     return total, losses
 
 
+def compute_autoregressive_loss(
+    model: VDK_Shield,
+    s: torch.Tensor,
+    u: torch.Tensor,
+    eps: float = 1.0,
+    gamma_loss: float = 0.5,
+    spectral_reg_weight: float = 0.01,
+) -> torch.Tensor:
+    """
+    Computes the autoregressive VDK loss (Exact Pretraining Logic).
+    
+    Args:
+        model: VDK_Shield instance
+        s: (B, T, D) sequence of states
+        u: (B, T, m) sequence of actions
+        eps: Teacher forcing probability
+        gamma_loss: Discount factor for future step losses
+        spectral_reg_weight: Regularization weight
+        
+    Returns:
+        loss_total: Scalar tensor
+        metrics: Dict of scalar tensors (rec, lin, spec)
+    """
+    device = s.device
+    B, T, D = s.shape
+    
+    # 1. Encode Initial State x_0
+    mu0_re, mu0_im, logvar0_re, logvar0_im = model.encode(s[:, 0, :])
+    z_re, z_im = model.reparameterize(mu0_re, mu0_im, logvar0_re, logvar0_im)
+    
+    # 2. Get Ground Truth Latents for ALL steps (for consistency loss)
+    # Flatten (B, T, D) -> (B*T, D)
+    flat_s = s.reshape(B*T, -1)
+    # We only need means for consistency targets
+    with torch.no_grad(): # Usually we don't backprop through the target encoder?
+        # Actually train_vdk.py allowed gradients through the encoder for all steps 
+        # because it helps shape the latent space to be consistent.
+        # But wait, train_vdk.py snippet:
+        # mu_flat_re... = model.encoder(flat_s) -- It DOES backprop through this.
+        pass
+
+    # Re-running encoder on full sequence allowing grads
+    mu_flat_re, mu_flat_im, _, _ = model.encoder(flat_s)
+    gt_z_seq_re = mu_flat_re.reshape(B, T, -1)
+    gt_z_seq_im = mu_flat_im.reshape(B, T, -1)
+    
+    # Weights for timesteps
+    step_weights = [gamma_loss**i for i in range(T)]
+    total_weight = sum(step_weights)
+    
+    loss_rec_total = 0
+    loss_lin_total = 0
+    
+    for t in range(T):
+        # A. Reconstruction Loss x_hat_t vs x_t
+        rec_obs = model.decode(z_re, z_im)
+        target_obs = s[:, t, :]
+        step_rec_loss = F.mse_loss(rec_obs, target_obs)
+        
+        # B. Linearity Loss z_t vs Encoder(x_t)
+        gt_z_t_re = gt_z_seq_re[:, t, :]
+        gt_z_t_im = gt_z_seq_im[:, t, :]
+        
+        step_lin_loss = F.mse_loss(z_re, gt_z_t_re) + F.mse_loss(z_im, gt_z_t_im)
+        
+        w_t = step_weights[t]
+        loss_rec_total += w_t * step_rec_loss
+        loss_lin_total += w_t * step_lin_loss
+        
+        # C. Predict Next Step
+        if t < T - 1:
+            action_t = u[:, t, :]
+            
+            # Teacher Forcing
+            use_ground_truth = (torch.rand(1).item() < eps)
+            if use_ground_truth:
+                 curr_z_re = gt_z_t_re
+                 curr_z_im = gt_z_t_im
+            else:
+                 curr_z_re = z_re
+                 curr_z_im = z_im
+                 
+            z_re, z_im = model.predict_next(curr_z_re, curr_z_im, action_t)
+            
+    loss_rec = loss_rec_total / total_weight
+    loss_lin = loss_lin_total / total_weight
+    
+    # D. Spectral Regularization
+    lam_sq = model.dynamics.lambda_modulus_sq
+    lam_abs = torch.sqrt(lam_sq + 1e-8)
+    loss_spec = torch.sum(torch.relu(lam_abs - 1.0)**2)
+    
+    loss_total = loss_rec + loss_lin + spectral_reg_weight * loss_spec
+    
+    metrics = {
+        "rec": loss_rec,
+        "lin": loss_lin,
+        "spec": loss_spec
+    }
+    
+    return loss_total, metrics
+
+
 def stage2_loss(
     V_pred:  torch.Tensor,   # (B, 1)  – CBF score from shield
     y_H:     torch.Tensor,   # (B, 1)  – horizon oracle target
@@ -679,3 +810,61 @@ def stage2_loss(
 
     total = losses["mse"] + lam_robust * losses["robust"] + lam_reg * losses["reg"]
     return total, losses
+
+
+# ---------------------------------------------------------------------------
+# 6.  QUADRATIC STUDENT (Optimistic Landscape Learner)
+# ---------------------------------------------------------------------------
+
+class QuadraticStudent(nn.Module):
+    """
+    Learns a quadratic value landscape over the latent space.
+    V(z) = z^T P z + w^T z + beta
+    
+    where z is the real-projected latent vector (size 2d).
+    P is a symmetric matrix (size 2d x 2d).
+    """
+
+    def __init__(self, latent_dim: int):
+        super().__init__()
+        self.dim = 2 * latent_dim              # Real + Imag
+        
+        # P: Symmetric Quadratic Term
+        # We store full matrix but symmetrize in forward pass
+        # Initialize slightly negative definite to encourage stability / boundedness
+        self.P = nn.Parameter(torch.eye(self.dim) * -0.01)
+        
+        # w: Linear Term
+        self.w = nn.Parameter(torch.zeros(self.dim, 1))
+        
+        # beta: Scalar Bias
+        self.beta = nn.Parameter(torch.zeros(1))
+
+    def forward(self, z_tilde: torch.Tensor) -> torch.Tensor:
+        """
+        V(z) = z^T P z + w^T z + beta
+        z_tilde: (B, 2d)
+        Returns: (B, 1) Value
+        """
+        # Symmetrize P
+        P_sym = 0.5 * (self.P + self.P.T)
+        
+        # Quadratic: (B, 1, 2d) @ (2d, 2d) @ (B, 2d, 1) -> (B, 1, 1) -> (B, 1)
+        # z_unsq = z_tilde.unsqueeze(-1)       # (B, 2d, 1)
+        # z_T = z_tilde.unsqueeze(1)           # (B, 1, 2d)
+        
+        # quad = z_T @ P_sym @ z_unsq
+        # quad = quad.squeeze(-1)
+        
+        # More efficient quadratic form (B, 2d) * (2d, 2d) * (B, 2d)^T diagonal? No.
+        # Just use matmul.
+        z_P = z_tilde @ P_sym                  # (B, 2d)
+        quad = torch.sum(z_P * z_tilde, dim=1, keepdim=True)
+        
+        # Linear: (B, 2d) @ (2d, 1) -> (B, 1)
+        lin = z_tilde @ self.w
+        
+        return quad + lin + self.beta
+
+    def get_P_symmetric(self):
+        return 0.5 * (self.P + self.P.T)
