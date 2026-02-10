@@ -822,17 +822,17 @@ class QuadraticStudent(nn.Module):
     V(z) = z^T P z + w^T z + beta
     
     where z is the real-projected latent vector (size 2d).
-    P is a symmetric matrix (size 2d x 2d).
+    P is guaranteed negative semi-definite via Cholesky: P = -L L^T.
     """
 
     def __init__(self, latent_dim: int):
         super().__init__()
         self.dim = 2 * latent_dim              # Real + Imag
         
-        # P: Symmetric Quadratic Term
-        # We store full matrix but symmetrize in forward pass
-        # Initialize slightly negative definite to encourage stability / boundedness
-        self.P = nn.Parameter(torch.eye(self.dim) * -0.01)
+        # P = -L L^T  (guaranteed NSD)
+        # L is lower-triangular; we store the raw lower-triangular entries.
+        # Initialize so that P ≈ -0.01 * I  →  L ≈ 0.1 * I
+        self.L_raw = nn.Parameter(torch.eye(self.dim) * 0.1)
         
         # w: Linear Term
         self.w = nn.Parameter(torch.zeros(self.dim, 1))
@@ -840,24 +840,28 @@ class QuadraticStudent(nn.Module):
         # beta: Scalar Bias
         self.beta = nn.Parameter(torch.zeros(1))
 
+    def _get_L(self) -> torch.Tensor:
+        """Lower-triangular L with positive diagonal."""
+        L = torch.tril(self.L_raw)
+        # Ensure positive diagonal via softplus
+        diag_idx = torch.arange(self.dim, device=L.device)
+        L = L.clone()
+        L[diag_idx, diag_idx] = F.softplus(L[diag_idx, diag_idx]) + 1e-6
+        return L
+
+    def get_P_symmetric(self) -> torch.Tensor:
+        """P = -L L^T  (negative semi-definite by construction)."""
+        L = self._get_L()
+        return -(L @ L.T)
+
     def forward(self, z_tilde: torch.Tensor) -> torch.Tensor:
         """
         V(z) = z^T P z + w^T z + beta
         z_tilde: (B, 2d)
         Returns: (B, 1) Value
         """
-        # Symmetrize P
-        P_sym = 0.5 * (self.P + self.P.T)
+        P_sym = self.get_P_symmetric()
         
-        # Quadratic: (B, 1, 2d) @ (2d, 2d) @ (B, 2d, 1) -> (B, 1, 1) -> (B, 1)
-        # z_unsq = z_tilde.unsqueeze(-1)       # (B, 2d, 1)
-        # z_T = z_tilde.unsqueeze(1)           # (B, 1, 2d)
-        
-        # quad = z_T @ P_sym @ z_unsq
-        # quad = quad.squeeze(-1)
-        
-        # More efficient quadratic form (B, 2d) * (2d, 2d) * (B, 2d)^T diagonal? No.
-        # Just use matmul.
         z_P = z_tilde @ P_sym                  # (B, 2d)
         quad = torch.sum(z_P * z_tilde, dim=1, keepdim=True)
         
@@ -866,5 +870,3 @@ class QuadraticStudent(nn.Module):
         
         return quad + lin + self.beta
 
-    def get_P_symmetric(self):
-        return 0.5 * (self.P + self.P.T)

@@ -20,3 +20,7 @@ vll_finetune_epochs_dyn: 20
 vll_finetune_epochs_cbf: 20
 
 train_vll: false
+
+# ALL-C Specific
+initial_epochs: 200          # Epochs for first VDK training at start_steps
+on_policy_batch_size: 2048   # Buffer size before periodic update

@@ -254,36 +254,18 @@ def main(args: DictConfig):
         
             if is_all_c:
                 if len(agent.memory) > args.batch_size:
-                    # Number of updates per step (normally 1)
-                    for i in range(args.updates_per_step):    
-                        # Hybrid ALL-C Training
-                        # This call internally handles:
-                        # 1. SAC Teacher update (every call)
-                        # 2. VDK/Student On-Policy update (if buffer full)
-                        sac_stats = agent.teacher.train()
-
-                        # Convert sac_stats tuple to dict for consistent return
-                        train_stats = {
-                            'critic_1': sac_stats[0],
-                            'critic_2': sac_stats[1],
-                            'policy': sac_stats[2],
-                            'entropy': sac_stats[3],
-                            'alpha': sac_stats[4],
-                        }
+                    for i in range(args.updates_per_step):
+                        train_stats = agent.train()
                         
-                        if isinstance(train_stats, dict) and train_stats:
-                            # Log SAC Stats
-                            writer.add_scalar("loss/critic_1", train_stats.get('critic_1', 0), total_numsteps)
-                            writer.add_scalar("loss/critic_2", train_stats.get('critic_2', 0), total_numsteps)
-                            writer.add_scalar("loss/policy", train_stats.get('policy', 0), total_numsteps)
-                            writer.add_scalar("loss/entropy_loss", train_stats.get('entropy', 0), total_numsteps)
-                            writer.add_scalar("loss/alpha_value", train_stats.get('alpha', 0), total_numsteps)
-                            
-                            # Log VDK/Student stats if they occurred
-                train_stats = agent.train()
-                if 'vdk_loss' in train_stats:
-                    writer.add_scalar('loss/vdk_dyn', train_stats['vdk_loss'], total_numsteps)
-                    writer.add_scalar('loss/student_val', train_stats['student_loss'], total_numsteps)
+                        writer.add_scalar('loss/critic_1', train_stats.get('critic_1', 0), total_numsteps)
+                        writer.add_scalar('loss/critic_2', train_stats.get('critic_2', 0), total_numsteps)
+                        writer.add_scalar('loss/policy', train_stats.get('policy', 0), total_numsteps)
+                        writer.add_scalar('loss/entropy_loss', train_stats.get('entropy', 0), total_numsteps)
+                        writer.add_scalar('entropy_temprature/alpha', train_stats.get('alpha', 0), total_numsteps)
+                        
+                        if 'vdk_loss' in train_stats:
+                            writer.add_scalar('loss/vdk_dyn', train_stats['vdk_loss'], total_numsteps)
+                            writer.add_scalar('loss/student_val', train_stats['student_loss'], total_numsteps)
             
 
             elif is_ppo:

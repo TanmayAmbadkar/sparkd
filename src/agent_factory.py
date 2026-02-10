@@ -36,7 +36,7 @@ def create_agent(cfg: DictConfig, env: gym.Env) -> Agent:
         from src.policies.all_c_agent import ALLCAgent
         return ALLCAgent(
             gym_env=env,
-            args=cfg,
+            args=merged_args,
             sac_args=merged_args
         )
     else:
