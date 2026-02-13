@@ -257,15 +257,10 @@ def main(args: DictConfig):
                     for i in range(args.updates_per_step):
                         train_stats = agent.train()
                         
-                        writer.add_scalar('loss/critic_1', train_stats.get('critic_1', 0), total_numsteps)
-                        writer.add_scalar('loss/critic_2', train_stats.get('critic_2', 0), total_numsteps)
-                        writer.add_scalar('loss/policy', train_stats.get('policy', 0), total_numsteps)
-                        writer.add_scalar('loss/entropy_loss', train_stats.get('entropy', 0), total_numsteps)
-                        writer.add_scalar('entropy_temprature/alpha', train_stats.get('alpha', 0), total_numsteps)
-                        
-                        if 'vdk_loss' in train_stats:
-                            writer.add_scalar('loss/vdk_dyn', train_stats['vdk_loss'], total_numsteps)
-                            writer.add_scalar('loss/student_val', train_stats['student_loss'], total_numsteps)
+                        if 'value_loss' in train_stats:
+                            writer.add_scalar('loss/value', train_stats['value_loss'], total_numsteps)
+                        if 'dyn_loss' in train_stats:
+                            writer.add_scalar('loss/dyn', train_stats['dyn_loss'], total_numsteps)
             
 
             elif is_ppo:

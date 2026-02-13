@@ -262,15 +262,19 @@ class SpectralKoopmanDynamics(nn.Module):
         omega_init = alpha * torch.arange(1, latent_dim + 1, dtype=torch.float32) * math.pi
         self.omega = nn.Parameter(omega_init)
 
-        # --- Control input matrix  B_c = B_re + i·B_im ---
-        self.B_re = nn.Parameter(torch.empty(latent_dim, control_dim))
-        self.B_im = nn.Parameter(torch.empty(latent_dim, control_dim))
-        nn.init.xavier_normal_(self.B_re)
-        nn.init.xavier_normal_(self.B_im)
+        # --- Control input matrix  B_c(z) = B_re(z) + i·B_im(z) ---
+        # Parameterized by a small MLP: [z_re, z_im] -> [B_re, B_im]
+        # Input: 2*latent_dim, Output: 2 * latent_dim * control_dim
+        self.B_net = nn.Sequential(
+            nn.Linear(2 * latent_dim, 64),
+            nn.SiLU(),
+            nn.Linear(64, 2 * latent_dim * control_dim)
+        )
+        
+        # Initialize last layer with small weights for stability
+        nn.init.uniform_(self.B_net[-1].weight, -1e-3, 1e-3)
+        nn.init.uniform_(self.B_net[-1].bias, -1e-3, 1e-3)
 
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Properties
@@ -308,6 +312,19 @@ class SpectralKoopmanDynamics(nn.Module):
     # Forward dynamics
     # ------------------------------------------------------------------
 
+    def get_B(self, z_re: torch.Tensor, z_im: torch.Tensor):
+        """
+        Computes B(z) = B_re(z) + i B_im(z)
+        Returns B_re, B_im of shape (B, d, m)
+        """
+        z_cat = torch.cat([z_re, z_im], dim=-1) # (B, 2d)
+        B_flat = self.B_net(z_cat) # (B, 2*d*m)
+        
+        B_flat = B_flat.reshape(z_re.shape[0], 2, self.latent_dim, self.control_dim)
+        B_re = B_flat[:, 0, :, :] # (B, d, m)
+        B_im = B_flat[:, 1, :, :] # (B, d, m)
+        return B_re, B_im
+
     def propagate(
         self,
         z_re: torch.Tensor,   # (B, d)
@@ -316,7 +333,7 @@ class SpectralKoopmanDynamics(nn.Module):
     ):
         """
         One-step linear propagation in the spectral Koopman space.
-        z_{t+1} = Λ ⊙ z_t + B·u
+        z_{t+1} = Λ ⊙ z_t + B(z_t)·u
         where Λ = r * exp(i*ω)
         """
         lam_re = self.lambda_re    # (d,)
@@ -327,9 +344,13 @@ class SpectralKoopmanDynamics(nn.Module):
         Lz_re = lam_re * z_re - lam_im * z_im
         Lz_im = lam_im * z_re + lam_re * z_im
 
-        # B_c · u
-        Bu_re = F.linear(u, self.B_re)           # (B, d)
-        Bu_im = F.linear(u, self.B_im)           # (B, d)
+        # B(z) · u
+        B_re, B_im = self.get_B(z_re, z_im) # (B, d, m)
+        
+        # Batch Matmul: (B, d, m) @ (B, m, 1) -> (B, d, 1)
+        u_expanded = u.unsqueeze(-1)
+        Bu_re = torch.matmul(B_re, u_expanded).squeeze(-1)
+        Bu_im = torch.matmul(B_im, u_expanded).squeeze(-1)
 
         return Lz_re + Bu_re, Lz_im + Bu_im
 
@@ -352,14 +373,20 @@ class SpectralKoopmanDynamics(nn.Module):
         A_tilde = torch.cat([row1, row2], dim=0)
         return A_tilde
 
-    def get_real_B_matrix(self) -> torch.Tensor:
+    def get_real_B_matrix(self, z_re: torch.Tensor = None, z_im: torch.Tensor = None) -> torch.Tensor:
         """
-        Returns the 2d x m real block matrix representing the complex operation z' = ... + B*u.
-        B_tilde = [ B_re ]
-                  [ B_im ]
+        Returns the 2d x m real block matrix representing the complex operation z' = ... + B(z)*u.
+        B_tilde(z) = [ B_re(z) ]
+                     [ B_im(z) ]
+        
+        Requires z if B is state-dependent.
         """
-        # B_re: (d, m), B_im: (d, m) -> (2d, m)
-        return torch.cat([self.B_re, self.B_im], dim=0)
+        if z_re is None or z_im is None:
+             raise ValueError("get_real_B_matrix now requires (z_re, z_im) due to state-dependence.")
+             
+        B_re, B_im = self.get_B(z_re, z_im) # (B, d, m)
+        # Stack: (B, 2d, m)
+        return torch.cat([B_re, B_im], dim=1)
 
     def propagate_variance(self, sigma_sq: torch.Tensor) -> torch.Tensor:
         """
@@ -688,6 +715,7 @@ def compute_autoregressive_loss(
     eps: float = 1.0,
     gamma_loss: float = 0.5,
     spectral_reg_weight: float = 0.01,
+    kl_weight: float = 0.001,
 ) -> torch.Tensor:
     """
     Computes the autoregressive VDK loss (Exact Pretraining Logic).
@@ -773,12 +801,26 @@ def compute_autoregressive_loss(
     lam_abs = torch.sqrt(lam_sq + 1e-8)
     loss_spec = torch.sum(torch.relu(lam_abs - 1.0)**2)
     
-    loss_total = loss_rec + loss_lin + spectral_reg_weight * loss_spec
+    # E. KL Divergence (Variational Constraint)
+    # KL( N(mu0, sigma0) || N(0, I) )  for the initial state encoding
+    # kl = 0.5 * sum( sigma^2 + mu^2 - 1 - log(sigma^2) )
+    mu0_sq = mu0_re**2 + mu0_im**2
+    logvar0_sq = logvar0_re + logvar0_im # sum of logvars? 
+    # Actually, we treat Re and Im as independent dimensions.
+    # KL_re = 0.5 * (exp(logvar0_re) + mu0_re^2 - 1 - logvar0_re)
+    # KL_im = 0.5 * (exp(logvar0_im) + mu0_im^2 - 1 - logvar0_im)
+    
+    kl_re = 0.5 * (torch.exp(logvar0_re) + mu0_re**2 - 1 - logvar0_re)
+    kl_im = 0.5 * (torch.exp(logvar0_im) + mu0_im**2 - 1 - logvar0_im)
+    loss_kl = (kl_re.sum(dim=1) + kl_im.sum(dim=1)).mean()
+
+    loss_total = loss_rec + loss_lin + spectral_reg_weight * loss_spec + kl_weight * loss_kl
     
     metrics = {
         "rec": loss_rec,
         "lin": loss_lin,
-        "spec": loss_spec
+        "spec": loss_spec,
+        "kl": loss_kl
     }
     
     return loss_total, metrics

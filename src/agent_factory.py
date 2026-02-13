@@ -37,7 +37,6 @@ def create_agent(cfg: DictConfig, env: gym.Env) -> Agent:
         return ALLCAgent(
             gym_env=env,
             args=merged_args,
-            sac_args=merged_args
         )
     else:
         raise ValueError(f"Unknown agent type: {agent_type}")

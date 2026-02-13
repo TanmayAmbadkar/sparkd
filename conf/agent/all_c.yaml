@@ -8,19 +8,21 @@ num_steps: 1000000
 replay_size: 200000
 start_steps: 10000
 tau: 0.005
-alpha: 0.2
-automatic_entropy_tuning: false
 updates_per_step: 1
-target_update_interval: 1
-policy: Gaussian
 
-# VLL Finetuning Defaults for SAC Teacher
+# VDK Dynamics
 vll_finetune_steps: 50000
 vll_finetune_epochs_dyn: 20
 vll_finetune_epochs_cbf: 20
-
 train_vll: false
 
-# ALL-C Specific
+# AVGA Specific
 initial_epochs: 200          # Epochs for first VDK training at start_steps
-on_policy_batch_size: 2048   # Buffer size before periodic update
+on_policy_batch_size: 8192   # Buffer size before periodic VDK update
+r_cost: 2.0                  # Control cost weight (higher = smaller actions)
+value_hidden_dim: 256        # Hidden size for Neural Value Network
+exploration_noise: 0.2       # Gaussian noise std for exploration
+gae_lambda: 0.95             # GAE lambda for advantage estimation
+value_epochs: 10             # Number of epochs for value training per joint update
+value_batch_size: 64         # Batch size for value training
+
