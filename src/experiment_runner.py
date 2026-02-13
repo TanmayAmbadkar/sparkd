@@ -357,21 +357,29 @@ def evaluate_agent(
             else:
                 act = agent(s, evaluate=is_deterministic)
                 
-            ns, r, c, d, t, _ = env.step(act)
+            step_res = env.step(act)
+            if len(step_res) == 6:
+                ns, r, c, d, t, _ = step_res
+            else:
+                # Standard Gym: obs, reward, terminated, truncated, info
+                ns, r, d, t, _ = step_res
+                c = 0.0
+
             ret += r
             ep_cost += c
             
-            try:
-                frame = env.render()
-                if frame is not None:
-                    frames.append(frame)
-                else:
-                    print("Warning: env.render() returned None.")
-            except Exception as e:
-                print(f"Render failed: {e}")
-                import traceback
-                traceback.print_exc()
-                pass
+            if args.render:
+                try:
+                    frame = env.render()
+                    if frame is not None:
+                        frames.append(frame)
+                    else:
+                        print("Warning: env.render() returned None.")
+                except Exception as e:
+                    print(f"Render failed: {e}")
+                    # import traceback
+                    # traceback.print_exc()
+                    pass
             s = ns
             
         avg_rew += ret

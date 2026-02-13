@@ -10,6 +10,15 @@ start_steps: 10000
 tau: 0.005
 updates_per_step: 1
 
+# Offline Training
+offline_initial_steps: 10000
+offline_dyn_interval: 5000
+offline_gae_horizon: 20
+offline_gae_lambda: 0.95
+offline_finetune_updates: 1000
+uncertainty_weight: 0.5
+offline_iql_tau: 0.7
+
 # VDK Dynamics
 vll_finetune_steps: 50000
 vll_finetune_epochs_dyn: 20

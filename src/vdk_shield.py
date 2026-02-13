@@ -816,11 +816,18 @@ def compute_autoregressive_loss(
 
     loss_total = loss_rec + loss_lin + spectral_reg_weight * loss_spec + kl_weight * loss_kl
     
+    # Validation Metrics: Latent Spread (Std Dev across batch over all dims)
+    with torch.no_grad():
+        spread_re = z_re.std()
+        spread_im = z_im.std()
+    
     metrics = {
         "rec": loss_rec,
         "lin": loss_lin,
         "spec": loss_spec,
-        "kl": loss_kl
+        "kl": loss_kl,
+        "spread_re": spread_re,
+        "spread_im": spread_im
     }
     
     return loss_total, metrics

@@ -366,12 +366,143 @@ class ALLCAgent(Agent):
         return stats
 
     # ==================================================================
+    # Offline Training Loop
+    # ==================================================================
+    def train_offline(self, steps: int = 1000, log_every: int = 100, start_step: int = 0):
+        print(f"Starting Offline Training for {steps} steps (from {start_step})...")
+        self.initial_training_done = True 
+        
+        initial_steps = getattr(self.args, "offline_initial_steps", 10000)
+        dyn_interval = getattr(self.args, "offline_dyn_interval", 5000)
+        initial_epochs = getattr(self.args, "initial_epochs", 200)
+
+        # 0. Initial VAE Training (Only at absolute start)
+        if start_step == 0:
+            print(f"--- Initial VAE Training (Epochs: {initial_epochs} on first {initial_steps} transitions) ---")
+            self._train_initial_vae(epochs=initial_epochs, sample_limit=initial_steps)
+
+        finetune_updates = getattr(self.args, "offline_finetune_updates", 1000)
+
+        for step in range(start_step, start_step + steps):
+             stats = {}
+             
+             # Phase 1: Initial (Critic Only, Subset Data)
+             if step < initial_steps:
+                 v_stats = self._update_value_off_policy(sample_range=(0, initial_steps))
+                 stats.update(v_stats)
+                 
+             # Phase 2: Main Loop (Periodic Coupled Updates)
+             else:
+                 # Check for periodic trigger
+                 if (step - initial_steps) % dyn_interval == 0:
+                     print(f"--- Periodic Finetuning at Step {step} ({finetune_updates} updates) ---")
+                     
+                     ft_v_loss = []
+                     ft_d_loss = []
+                     
+                     for _ in range(finetune_updates):
+                         # Update Both
+                         d_stats = self._update_dynamics_offline(sample_range=None) # Full data
+                         v_stats = self._update_value_off_policy(sample_range=None) # Full data
+                         
+                         if "dyn_loss_off" in d_stats: ft_d_loss.append(d_stats["dyn_loss_off"])
+                         if "val_loss_off" in v_stats: ft_v_loss.append(v_stats["val_loss_off"])
+                     
+                     # Log average stats for this block
+                     if ft_d_loss: stats["dyn_loss_off"] = np.mean(ft_d_loss)
+                     if ft_v_loss: stats["val_loss_off"] = np.mean(ft_v_loss)
+                     stats["finetune_block"] = 1.0
+                     
+                     # Add latent spread from last update if available
+                     if "latent_spread_re" in d_stats:
+                         stats["latent_spread_re"] = d_stats["latent_spread_re"]
+                         stats["latent_spread_im"] = d_stats["latent_spread_im"]
+
+                 else:
+                     # Do nothing between intervals
+                     pass
+                  
+             if step % log_every == 0:
+                 # Filter out empty stats print if nothing happened
+                 if stats:
+                    print(f"Offline Step {step}: {stats}")
+                 
+             self.updates += 1
+
+    def _train_initial_vae(self, epochs, sample_limit):
+        """
+        Pre-trains VAE on the first `sample_limit` transitions for `epochs`.
+        """
+        # Estimate batches per epoch
+        subset_size = min(len(self.memory), sample_limit)
+        batch_size = self.args.batch_size
+        if subset_size < batch_size:
+            print("Warning: Initial data < batch size. Training might be unstable.")
+            
+        n_batches = max(1, subset_size // batch_size)
+        
+        print(f"Training VAE for {epochs} epochs on {subset_size} samples ({n_batches} batches/epoch)...")
+        
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            for _ in range(n_batches):
+                stats = self._update_dynamics_offline(sample_range=(0, sample_limit))
+                epoch_loss += stats.get("dyn_loss_off", 0.0)
+            
+            if (epoch + 1) % 10 == 0:
+                print(f"  VAE Epoch {epoch+1}/{epochs}: Loss {epoch_loss/n_batches:.4f}")
+             
+    def _update_dynamics_offline(self, sample_range=None):
+        """
+        Updates VDK dynamics using sequences sampled from ReplayMemory.
+        """
+        if len(self.memory) < self.batch_size:
+             return {}
+             
+        T_horizon = getattr(self.args, "horizon", 5)
+        batch_size = self.args.batch_size
+        
+        # Sample sequences: (B, T, D)
+        # Note: ReplayMemory.sample doesn't support horizon > 1 unless configured?
+        # Checked ReplayMemory: yes, supports horizon arg.
+        
+        try:
+            states, actions, rewards, next_states, dones = self.memory.sample(batch_size, horizon=T_horizon, sample_range=sample_range)
+        except ValueError:
+            return {} # Not enough data
+            
+        # To Torch
+        s_t = torch.FloatTensor(states).to(self.device)   # (B, T, D)
+        u_t = torch.FloatTensor(actions).to(self.device)  # (B, T, m)
+        
+        # Normalize
+        s_t = (s_t - self.state_mean) / self.state_std
+        
+        self.vdk_optimizer.zero_grad()
+        loss, metrics = compute_autoregressive_loss(
+            self.vdk, s_t, u_t, eps=0.5, gamma_loss=0.5, spectral_reg_weight=0.01
+        )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.vdk.parameters(), 1.0)
+        self.vdk_optimizer.step()
+        
+        # Soft update target
+        self._soft_update(self.vdk, self.vdk_target, self.tau_encoder)
+
+        return {
+            "dyn_loss_off": loss.item(),
+            "latent_spread_re": metrics.get("spread_re", 0.0).item(),
+            "latent_spread_im": metrics.get("spread_im", 0.0).item(),
+        }
+
+    # ==================================================================
     # Private: Value FVI  (off-policy Bellman backup)
     # ==================================================================
-    def _update_value_off_policy(self) -> Dict[str, float]:
+    def _update_value_off_policy(self, sample_range=None) -> Dict[str, float]:
         """
-        Standard Off-Policy Value Update using Replay Buffer.
-        V(z) <- r + gamma * V_target(z')
+        Off-Policy Value Update using Expectile Regression (IQL).
+        Minimizes Expectile Loss between V(z) and target_q (r + gamma * V'(z')).
+        Forces V(z) to approximate the tau-th quantile of returns (upper envelope).
         """
         # Only start off-policy updates after the VDK dynamics are initialized
         if not self.initial_training_done:
@@ -380,62 +511,69 @@ class ALLCAgent(Agent):
         if len(self.memory) < self.batch_size:
             return {}
 
-        # 1. Sample
-        batch = self.memory.sample(self.batch_size)
-        state, action, reward, next_state, done = batch
+        # 1. Configuration
+        tau = getattr(self.args, "offline_iql_tau", 0.7)
 
-        # 2. To Tensor
-        state = torch.FloatTensor(state).to(self.device)
-        next_state = torch.FloatTensor(next_state).to(self.device)
-        reward = torch.FloatTensor(reward).to(self.device).unsqueeze(1)  # (B, 1)
-        done = torch.FloatTensor(done).to(self.device).unsqueeze(1)      # (B, 1)
+        # 2. Sample (Standard Batch)
+        # We switch back to standard sampling (horizon=1) for IQL-style V-learning
+        batch = self.memory.sample(self.batch_size, sample_range=sample_range)
+        states, actions, rewards, next_states, dones = batch
+        
+        # 3. To Tensor
+        states = torch.FloatTensor(states).to(self.device)
+        next_states = torch.FloatTensor(next_states).to(self.device)
+        rewards = torch.FloatTensor(rewards).to(self.device).unsqueeze(1) # (B, 1)
+        dones = torch.FloatTensor(dones).to(self.device).unsqueeze(1)     # (B, 1)
+        
+        # 4. Normalize States
+        states = (states - self.state_mean) / self.state_std
+        next_states = (next_states - self.state_mean) / self.state_std
 
-        # 3. Normalize States (using running stats from on-policy data)
-        state = (state - self.state_mean) / self.state_std
-        next_state = (next_state - self.state_mean) / self.state_std
+        # 5. Reward Normalization
+        # Normalize rewards for stability
+        rewards = self.reward_normalizer.normalize(rewards)
+        rewards = torch.clamp(rewards, -10.0, 10.0)
 
-        # 4. Normalize Rewards (using running stats)
-        # We generally don't update normalizer here to avoid distribution shift from old data
-        reward = self.reward_normalizer.normalize(reward)
-        reward = torch.clamp(reward, -10.0, 10.0)
-
-        # 5. Compute Target
+        # 6. Compute Target Q (1-step Bellman using V_target)
         with torch.no_grad():
-            # Encode next state -> z'
-            # Note: We use the *current* VDK encoder. 
-            # Ideally could use vdk_target, but ALLC generally assumes one dynamics model.
-            # _update_joint uses self.vdk for both.
-            mu_next_re, mu_next_im, _, _ = self.vdk.encode(next_state)
+             # Encode Next State
+             # We use simple mean encoding, ignoring uncertainty for the main value path as standard IQL
+             mu_next_re, mu_next_im, _, _ = self.vdk.encode(next_states)
+             
+             # Drift Next
+             lam_re = self.vdk.dynamics.lambda_re
+             lam_im = self.vdk.dynamics.lambda_im
+             drift_next_re = mu_next_re * lam_re - mu_next_im * lam_im
+             drift_next_im = mu_next_re * lam_im + mu_next_im * lam_re
+             
+             # V_target(z')
+             v_next = self.value_target(drift_next_re, drift_next_im)
+             
+             # Target Q = r + gamma * V_target(s')
+             target_q = rewards + self.gamma * (1 - dones) * v_next
 
-            # Apply drift to z'
-            lam_re = self.vdk.dynamics.lambda_re
-            lam_im = self.vdk.dynamics.lambda_im
-            drift_next_re = mu_next_re * lam_re - mu_next_im * lam_im
-            drift_next_im = mu_next_re * lam_im + mu_next_im * lam_re
-
-            # V_target(z'_drift)
-            target_q = self.value_target(drift_next_re, drift_next_im)
-            target_val = reward + (1 - done) * self.gamma * target_q
-
-        # 6. Compute Prediction
-        # Encode current state -> z (detach, we don't update encoder here)
+        # 7. Compute Prediction V(z)
+        # Encode Current State (detach, no gradients to encoder)
         with torch.no_grad():
-            mu_re, mu_im, _, _ = self.vdk.encode(state)
-            drift_re = mu_re * lam_re - mu_im * lam_im
-            drift_im = mu_re * lam_im + mu_im * lam_re
+             mu_curr_re, mu_curr_im, _, _ = self.vdk.encode(states)
+             drift_curr_re = mu_curr_re * lam_re - mu_curr_im * lam_im
+             drift_curr_im = mu_curr_re * lam_im + mu_curr_im * lam_re
+             
+        # V(z) - with gradients
+        v_pred = self.value(drift_curr_re, drift_curr_im)
 
-        # V(z_drift)
-        pred_val = self.value(drift_re, drift_im)
-
-        # 7. Update
-        loss = F.mse_loss(pred_val, target_val)
+        # 8. Expectile Loss (IQL Logic)
+        # L2_tau(diff) = |tau - I(diff < 0)| * diff^2
+        diff = target_q - v_pred
+        weight = torch.where(diff > 0, tau, 1.0 - tau)
+        loss = (weight * (diff**2)).mean()
 
         self.value_optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.value.parameters(), 1.0)
         self.value_optimizer.step()
 
-        # 8. Soft Update Target
+        # 9. Soft Update Target
         self._soft_update(self.value, self.value_target, self.tau)
 
         return {"val_loss_off": loss.item()}

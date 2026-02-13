@@ -87,14 +87,62 @@ def main(args: DictConfig):
         print(f"--- Experiment Log Directory: {log_dir} ---")
 
     # --- 2. Environment Setup ---
-    render_mode = "rgb_array" if args.render else None
-    env = envs.get_env_from_name(args.env_name, render_mode=render_mode)
+    # Override env_name if using D4RL/Minari in offline mode
+    if getattr(args, "offline", False):
+         if getattr(args, "d4rl_dataset", None):
+             print(f"Offline Mode: Overriding env_name '{args.env_name}' with D4RL dataset '{args.d4rl_dataset}'")
+             args.env_name = args.d4rl_dataset
+             try:
+                 import d4rl 
+             except ImportError:
+                 print("Warning: D4RL not installed.")
+         elif getattr(args, "minari_dataset", None):
+             print(f"Offline Mode: Using Minari dataset '{args.minari_dataset}'.")
+             # We don't override env_name automatically because Minari ID != Env ID
+             # But we warn if safety_gymnasium is likely to fail
+             try:
+                 import minari
+             except ImportError:
+                 print("Warning: Minari not installed.")
 
+    render_mode = "rgb_array" if args.render else None
+    try:
+        env = envs.get_env_from_name(args.env_name, render_mode=render_mode)
+    except RuntimeError as e:
+        # Fallback for Minari if SafetyGym fails
+        if getattr(args, "minari_dataset", None):
+            print(f"SafetyGym env '{args.env_name}' failed. Attempting fallback for Minari dataset.")
+            import gymnasium as gym
+            fallback_env = None
+            
+            ds_name = args.minari_dataset.lower()
+            if "halfcheetah" in ds_name:
+                fallback_env = "HalfCheetah-v4"
+            elif "hopper" in ds_name:
+                fallback_env = "Hopper-v4"
+            elif "walker" in ds_name:
+                fallback_env = "Walker2d-v4"
+            elif "ant" in ds_name:
+                fallback_env = "Ant-v4"
+            
+            if fallback_env:
+                print(f"Falling back to standard Gym env: {fallback_env}")
+                try:
+                    env = gym.make(fallback_env, render_mode=render_mode)
+                except Exception as ex:
+                    print(f"Fallback to {fallback_env} failed: {ex}")
+                    raise e
+            else:
+                raise e
+        else:
+            raise e
+        
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.cuda:
         torch.cuda.manual_seed_all(args.seed)
+    print(f"Environment: {args.env_name}")
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -187,7 +235,68 @@ def main(args: DictConfig):
              real_data.clear_memory()
         agent.save_checkpoint(agent_save_path)
 
-    # --- 6. Main Loop ---
+    # --- 6. Offline Training Mode ---
+    if getattr(args, "offline", False):
+        print(f"=== Starting Offline Training Mode ===")
+        if getattr(args, "d4rl_dataset", None):
+            try:
+                import d4rl
+            except ImportError:
+                print("Error: D4RL not installed or not found. Please install d4rl.")
+                return
+
+            print(f"Loading D4RL dataset: {args.d4rl_dataset}")
+            # D4RL requires gym (not gymnasium) usually, but d4rl-pybullet/others might adapt.
+            # Standard D4RL is gym-based. 
+            # If we are using standard d4rl, we might need 'gym'.
+            # But let's assume the user has a setup that works or we use the 'gym' compatibility info.
+            # Actually, most D4RL forks are legacy gym. 
+            # If d4rl is installed, we can try to use it with 'gym'.
+            import gym as legacy_gym
+            d4rl_env = legacy_gym.make(args.d4rl_dataset)
+            agent.memory.load_d4rl_dataset(d4rl_env)
+            
+        elif getattr(args, "minari_dataset", None):
+            print(f"Loading Minari dataset: {args.minari_dataset}")
+            agent.memory.load_minari_dataset(args.minari_dataset)
+            
+        elif getattr(args, "dataset_path", None):
+            import hydra.utils
+            ds_path = hydra.utils.to_absolute_path(args.dataset_path)
+            print(f"Loading offline dataset from: {ds_path}")
+            agent.memory.load_buffer(ds_path)
+        else:
+            print("Error: Offline mode requires 'd4rl_dataset' or 'dataset_path' argument.")
+            return
+
+        # Train
+        steps_to_train = args.num_steps
+        # Default eval interval 5000 steps or user defined
+        eval_interval = getattr(args, "eval_interval", 5000) 
+        total_offline_steps = 0
+        
+        print(f"Starting Offline Training Loop for {steps_to_train} steps (Eval every {eval_interval})...")
+        
+        while total_offline_steps < steps_to_train:
+             # Run a chunk of training
+             current_steps = min(eval_interval, steps_to_train - total_offline_steps)
+             agent.train_offline(steps=current_steps, start_step=total_offline_steps)
+             total_offline_steps += current_steps
+             
+             print(f"--- Offline Training Step {total_offline_steps}/{steps_to_train} ---")
+             
+             # Evaluate
+             evaluate_agent(
+                 env, agent, safe_agent, args, total_offline_steps, writer, video_dir
+             )
+             
+             # Checkpoint
+             agent.save_checkpoint(agent_save_path)
+             
+        print("Offline Training Complete.")
+        return
+
+    # --- 7. Main Online Loop ---
     total_numsteps = 0
     total_real_episodes = 0
     real_unsafe_episodes = 0

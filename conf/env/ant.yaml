@@ -1,8 +1,9 @@
 # @package _global_
-env_name: SafetyAntVelocity-v1
+env_name: Ant-v5
 horizon: 5
 vll_epochs_dyn: 200
 num_steps: 1000000 # Override default agent steps
-red_dim: 100
+red_dim: 107
 train_vll: true
 start_steps: 10000
+minari_dataset: "mujoco/ant/expert-v0"
